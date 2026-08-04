@@ -28,7 +28,9 @@ Use the currently supported official Debian and Docker instructions during deplo
 
 ## 3. Deploy
 
-Create `/opt/iptvmaster`, check out a pinned release tag, and copy `.env.example` to `.env`. Replace the database password with a long random value and restrict the file to the administrator/root account.
+Create `/opt/iptvmaster`, check out a pinned release tag, and copy `.env.example` to `.env`. Replace the database password with a long random value, generate `IPTVMASTER_MASTER_KEY` using `openssl rand -base64 32`, and restrict the file to the administrator/root account. Back up the master key securely and separately; losing it makes stored provider credentials unrecoverable.
+
+The default playlist refresh interval is 120 minutes and the XMLTV interval is 720 minutes. Keep those provider-friendly defaults initially; change them only after observing how often the provider's daily event groups and guide actually change.
 
 ```sh
 cd /opt/iptvmaster
@@ -47,7 +49,11 @@ Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be
 - The browser UI loads from a trusted LAN computer.
 - The container and VM recover after separate reboots.
 - The provider secret does not appear in container logs.
+- A generated M3U URL loads from another trusted LAN device and stops loading after revocation.
+- The paired XMLTV URL loads in TiviMate, contains guide programmes, and is also blocked by the same revocation.
 - A test playlist refresh does not relay playback through the VM.
+
+When creating a TiviMate URL, open the setup UI using the VM's stable LAN hostname or address, not `localhost`. The generated address uses the browser origin and must be reachable from the Nvidia Shield.
 
 ## 5. Back up
 

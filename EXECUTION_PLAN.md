@@ -1,6 +1,6 @@
 # IPTVMaster Execution Plan
 
-Status: ready for approval  
+Status: implementation in progress
 Scope: personal, self-hosted IPTV playlist and EPG editor for TiviMate  
 Primary deployment target: Proxmox VE on an i7-3770K host with 16 GB RAM
 

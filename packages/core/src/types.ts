@@ -18,6 +18,13 @@ export interface M3uParseIssue {
 export interface M3uParseResult {
   entries: M3uEntry[];
   issues: M3uParseIssue[];
+  mediaCounts: Record<MediaType, number>;
+  skippedEntries: number;
+}
+
+export interface M3uParseOptions {
+  includeMediaTypes?: readonly MediaType[];
+  maxRetainedEntries?: number;
 }
 
 export type NumericDateOrder = 'month-day' | 'day-month';
@@ -47,6 +54,16 @@ export interface EventGroupPolicy {
   hidePlaceholders: boolean;
   placeholderPatterns?: string[];
   timePolicy?: EventTimePolicy;
+}
+
+export interface OutputGroupPolicy extends EventGroupPolicy {
+  behavior: 'permanent' | 'event';
+}
+
+export interface OutputPolicyResult {
+  entries: M3uEntry[];
+  hiddenEntries: number;
+  localizedEvents: number;
 }
 
 export interface AppliedEventPolicy {
