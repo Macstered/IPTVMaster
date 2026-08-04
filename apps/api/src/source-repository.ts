@@ -7,6 +7,9 @@ import {
   type NumericDateOrder,
   type OutputGroupPolicy,
   type PlaylistInspection,
+  type XmltvChannel,
+  type XmltvInspection,
+  type XmltvProgramme,
 } from '@iptvmaster/core';
 import { createHash, randomBytes } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
@@ -47,6 +50,21 @@ export interface StoredSnapshotSummary {
   unchanged: boolean;
 }
 
+export interface StoredEpgSummary {
+  sourceId: string;
+  fingerprint: string;
+  importedAt: string;
+  channelCount: number;
+  programmeCount: number;
+  issueCount: number;
+  unchanged: boolean;
+}
+
+export interface StoredEpgGuide {
+  channels: XmltvChannel[];
+  programmes: XmltvProgramme[];
+}
+
 export interface GroupSummary {
   providerGroup: string;
   channelCount: number;
@@ -77,6 +95,7 @@ export interface CreatedOutputProfile {
   name: string;
   accessToken: string;
   playlistPath: string;
+  epgPath: string;
 }
 
 export interface ResolvedOutputProfile {
@@ -93,6 +112,11 @@ export interface SourceRepository {
     sourceId: string,
     inspection: PlaylistInspection,
   ): Promise<StoredSnapshotSummary>;
+  saveEpgSnapshot(
+    sourceId: string,
+    inspection: XmltvInspection,
+  ): Promise<StoredEpgSummary>;
+  getLatestEpg(sourceId: string): Promise<StoredEpgGuide>;
   getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]>;
   listGroups(sourceId: string): Promise<GroupSummary[]>;
   saveGroupPolicy(
@@ -133,6 +157,15 @@ interface SnapshotRow {
   imported_at: Date;
   live_count: number;
   skipped_vod_count: number;
+  issue_count: number;
+}
+
+interface EpgStateRow {
+  source_id: string;
+  fingerprint: string;
+  imported_at: Date;
+  channel_count: number;
+  programme_count: number;
   issue_count: number;
 }
 
@@ -228,6 +261,18 @@ function toGroupSummary(row: GroupRow): GroupSummary {
 
 function accessTokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex');
+}
+
+function toEpgSummary(row: EpgStateRow, unchanged: boolean): StoredEpgSummary {
+  return {
+    sourceId: row.source_id,
+    fingerprint: row.fingerprint,
+    importedAt: row.imported_at.toISOString(),
+    channelCount: row.channel_count,
+    programmeCount: row.programme_count,
+    issueCount: row.issue_count,
+    unchanged,
+  };
 }
 
 export class PostgresSourceRepository implements SourceRepository {
@@ -486,6 +531,233 @@ export class PostgresSourceRepository implements SourceRepository {
     }));
   }
 
+  async saveEpgSnapshot(
+    sourceId: string,
+    inspection: XmltvInspection,
+  ): Promise<StoredEpgSummary> {
+    const client = await this.#pool.connect();
+    let syncRunId: string | undefined;
+    try {
+      const runResult = await client.query<{ id: string }>(
+        `INSERT INTO sync_run (source_id, sync_type, status)
+         VALUES ($1, 'epg', 'running')
+         RETURNING id`,
+        [sourceId],
+      );
+      syncRunId = runResult.rows[0]?.id;
+      if (!syncRunId)
+        throw new Error('EPG sync run did not return an identifier');
+
+      const existing = await client.query<EpgStateRow>(
+        `SELECT source_id, fingerprint, imported_at, channel_count,
+                programme_count, issue_count
+         FROM epg_snapshot_state
+         WHERE source_id = $1`,
+        [sourceId],
+      );
+      const previous = existing.rows[0];
+      if (previous?.fingerprint === inspection.fingerprint) {
+        const summary = toEpgSummary(previous, true);
+        await client.query(
+          `UPDATE sync_run
+           SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
+           WHERE id = $1`,
+          [syncRunId, JSON.stringify(summary)],
+        );
+        return summary;
+      }
+
+      const severeIssueCount = inspection.issues.filter(
+        (issue) => issue.code !== 'missing-timezone',
+      ).length;
+      if (inspection.programmes.length === 0) {
+        throw new SnapshotRejectedError('EPG contains no valid programmes');
+      }
+      if (
+        previous &&
+        previous.programme_count >= 100 &&
+        inspection.programmes.length < previous.programme_count * 0.4
+      ) {
+        throw new SnapshotRejectedError(
+          'EPG programme count dropped by more than 60 percent',
+        );
+      }
+      if (
+        severeIssueCount > 100 &&
+        severeIssueCount > inspection.programmes.length * 0.2
+      ) {
+        throw new SnapshotRejectedError('EPG contains too many parse issues');
+      }
+
+      await client.query('BEGIN');
+      await client.query('DELETE FROM epg_channel WHERE source_id = $1', [
+        sourceId,
+      ]);
+      const channelChunkSize = 2_000;
+      for (
+        let offset = 0;
+        offset < inspection.channels.length;
+        offset += channelChunkSize
+      ) {
+        const values = inspection.channels
+          .slice(offset, offset + channelChunkSize)
+          .map((channel) => ({
+            upstream_id: channel.id,
+            display_name: channel.displayName,
+            icon_url: channel.iconUrl ?? null,
+          }));
+        await client.query(
+          `INSERT INTO epg_channel
+            (source_id, upstream_id, display_name, icon_url)
+           SELECT $1, item.upstream_id, item.display_name, item.icon_url
+           FROM jsonb_to_recordset($2::jsonb) AS item(
+             upstream_id TEXT,
+             display_name TEXT,
+             icon_url TEXT
+           )`,
+          [sourceId, JSON.stringify(values)],
+        );
+      }
+
+      const programmeChunkSize = 2_000;
+      for (
+        let offset = 0;
+        offset < inspection.programmes.length;
+        offset += programmeChunkSize
+      ) {
+        const values = inspection.programmes
+          .slice(offset, offset + programmeChunkSize)
+          .map((programme) => ({
+            channel_id: programme.channelId,
+            starts_at: programme.start,
+            stops_at: programme.stop ?? null,
+            title: programme.title,
+            description: programme.description ?? null,
+            category: programme.category ?? null,
+          }));
+        await client.query(
+          `INSERT INTO epg_programme
+            (epg_channel_id, starts_at, stops_at, title, description, category)
+           SELECT channel.id, item.starts_at::timestamptz,
+                  item.stops_at::timestamptz, item.title, item.description,
+                  item.category
+           FROM jsonb_to_recordset($2::jsonb) AS item(
+             channel_id TEXT,
+             starts_at TEXT,
+             stops_at TEXT,
+             title TEXT,
+             description TEXT,
+             category TEXT
+           )
+           JOIN epg_channel channel
+             ON channel.source_id = $1 AND channel.upstream_id = item.channel_id`,
+          [sourceId, JSON.stringify(values)],
+        );
+      }
+
+      const stateResult = await client.query<EpgStateRow>(
+        `INSERT INTO epg_snapshot_state
+          (source_id, fingerprint, channel_count, programme_count, issue_count)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (source_id) DO UPDATE SET
+           fingerprint = EXCLUDED.fingerprint,
+           imported_at = NOW(),
+           channel_count = EXCLUDED.channel_count,
+           programme_count = EXCLUDED.programme_count,
+           issue_count = EXCLUDED.issue_count
+         RETURNING source_id, fingerprint, imported_at, channel_count,
+                   programme_count, issue_count`,
+        [
+          sourceId,
+          inspection.fingerprint,
+          inspection.channels.length,
+          inspection.programmes.length,
+          inspection.issues.length,
+        ],
+      );
+      const state = stateResult.rows[0];
+      if (!state) throw new Error('EPG state update did not return a row');
+      const summary = toEpgSummary(state, false);
+      await client.query(
+        `UPDATE sync_run
+         SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
+         WHERE id = $1`,
+        [syncRunId, JSON.stringify(summary)],
+      );
+      await client.query('COMMIT');
+      return summary;
+    } catch (error) {
+      await this.#safeRollback(client);
+      if (syncRunId) {
+        try {
+          await client.query(
+            `UPDATE sync_run
+             SET status = $2, finished_at = NOW(), safe_error = $3
+             WHERE id = $1`,
+            [
+              syncRunId,
+              error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
+              error instanceof SnapshotRejectedError
+                ? error.message
+                : 'EPG snapshot persistence failed',
+            ],
+          );
+        } catch {
+          // Preserve the original import error.
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getLatestEpg(sourceId: string): Promise<StoredEpgGuide> {
+    const channels = await this.#pool.query<{
+      upstream_id: string;
+      display_name: string;
+      icon_url: string | null;
+    }>(
+      `SELECT upstream_id, display_name, icon_url
+       FROM epg_channel
+       WHERE source_id = $1
+       ORDER BY display_name, upstream_id`,
+      [sourceId],
+    );
+    const programmes = await this.#pool.query<{
+      channel_id: string;
+      starts_at: Date;
+      stops_at: Date | null;
+      title: string;
+      description: string | null;
+      category: string | null;
+    }>(
+      `SELECT channel.upstream_id AS channel_id, programme.starts_at,
+              programme.stops_at, programme.title, programme.description,
+              programme.category
+       FROM epg_programme programme
+       JOIN epg_channel channel ON channel.id = programme.epg_channel_id
+       WHERE channel.source_id = $1
+       ORDER BY programme.starts_at, channel.upstream_id`,
+      [sourceId],
+    );
+    return {
+      channels: channels.rows.map((row) => ({
+        id: row.upstream_id,
+        displayName: row.display_name,
+        ...(row.icon_url ? { iconUrl: row.icon_url } : {}),
+      })),
+      programmes: programmes.rows.map((row) => ({
+        channelId: row.channel_id,
+        start: row.starts_at.toISOString(),
+        ...(row.stops_at ? { stop: row.stops_at.toISOString() } : {}),
+        title: row.title,
+        ...(row.description ? { description: row.description } : {}),
+        ...(row.category ? { category: row.category } : {}),
+      })),
+    };
+  }
+
   async listGroups(sourceId: string): Promise<GroupSummary[]> {
     const result = await this.#pool.query<GroupRow>(
       `SELECT i.provider_group,
@@ -622,6 +894,7 @@ export class PostgresSourceRepository implements SourceRepository {
       name: profile.name,
       accessToken,
       playlistPath: `/p/${accessToken}/playlist.m3u`,
+      epgPath: `/p/${accessToken}/epg.xml`,
     };
   }
 

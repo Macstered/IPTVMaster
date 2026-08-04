@@ -5,3 +5,5 @@ export * from './secrets.js';
 export * from './snapshot-validation.js';
 export * from './source-import.js';
 export * from './types.js';
+export * from './xmltv-import.js';
+export * from './xmltv.js';

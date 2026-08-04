@@ -358,6 +358,10 @@ h2 {
   margin-top: 4px;
   color: #66c59e;
 }
+.source-actions {
+  display: grid;
+  gap: 7px;
+}
 .secondary-button {
   color: #83c9f9;
   border: 1px solid #26557a;

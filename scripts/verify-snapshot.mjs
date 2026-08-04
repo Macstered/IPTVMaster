@@ -92,6 +92,24 @@ try {
   const output = serializeM3u(
     applyOutputGroupPolicies(entries, policies).entries,
   );
+  const epgInspection = {
+    fingerprint: 'e'.repeat(64),
+    totalBytes: 240,
+    channels: [{ id: 'synthetic.yle1', displayName: 'Yle TV1' }],
+    programmes: [
+      {
+        channelId: 'synthetic.yle1',
+        start: '2026-08-04T15:00:00.000Z',
+        stop: '2026-08-04T16:00:00.000Z',
+        title: 'Synthetic news',
+      },
+    ],
+    issues: [],
+    issuesTruncated: false,
+  };
+  const firstEpg = await repository.saveEpgSnapshot(source.id, epgInspection);
+  const secondEpg = await repository.saveEpgSnapshot(source.id, epgInspection);
+  const guide = await repository.getLatestEpg(source.id);
   const profile = await repository.createOutputProfile(
     source.id,
     'Synthetic TiviMate',
@@ -105,6 +123,12 @@ try {
   const publishedOutput = publishedResponse
     ? await publishedResponse.text()
     : output;
+  const publishedEpgResponse = integrationBaseUrl
+    ? await fetch(`${integrationBaseUrl}${profile.epgPath}`)
+    : undefined;
+  const publishedEpg = publishedEpgResponse
+    ? await publishedEpgResponse.text()
+    : '';
   const revoked = await repository.revokeOutputProfile(profile.id);
   const revokedProfile = await repository.resolveOutputProfile(
     profile.accessToken,
@@ -122,6 +146,14 @@ try {
     publishedEndpointOk:
       publishedResponse === undefined ||
       (publishedResponse.ok && publishedOutput.includes('18:00 Tennis 8/4')),
+    firstEpgUnchanged: firstEpg.unchanged,
+    secondEpgUnchanged: secondEpg.unchanged,
+    epgRoundTrip:
+      guide.channels.length === 1 &&
+      guide.programmes[0]?.title === 'Synthetic news',
+    publishedEpgEndpointOk:
+      publishedEpgResponse === undefined ||
+      (publishedEpgResponse.ok && publishedEpg.includes('Synthetic news')),
     outputTokenRevoked: revoked && revokedProfile === null,
   };
   process.stdout.write(`${JSON.stringify(report)}\n`);
@@ -135,6 +167,9 @@ try {
     !report.outputGroupRenamed ||
     !report.outputTokenResolves ||
     !report.publishedEndpointOk ||
+    !report.secondEpgUnchanged ||
+    !report.epgRoundTrip ||
+    !report.publishedEpgEndpointOk ||
     !report.outputTokenRevoked
   ) {
     throw new Error('Synthetic PostgreSQL integration verification failed');

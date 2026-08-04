@@ -8,10 +8,12 @@ import {
   parseM3uText,
   redactStreamUrl,
   serializeM3u,
+  serializeXmltv,
   SnapshotRejectedError,
   type EventGroupPolicy,
   type M3uEntry,
   type PlaylistInspection,
+  type XmltvInspection,
 } from '@iptvmaster/core';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { existsSync } from 'node:fs';
@@ -27,6 +29,11 @@ import {
   PlaylistScheduler,
   SourceNotFoundError,
 } from './playlist-refresh.js';
+import {
+  EpgNotConfiguredError,
+  EpgRefreshCoordinator,
+  EpgScheduler,
+} from './epg-refresh.js';
 
 const timePolicySchema = z.object({
   sourceTimeZone: z.string().min(1).default('Europe/Stockholm'),
@@ -88,9 +95,13 @@ const outputProfileSchema = z.object({
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
   playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
+  epgInspector?: (epgUrl: string) => Promise<XmltvInspection>;
   enablePlaylistScheduler?: boolean;
+  enableEpgScheduler?: boolean;
   playlistRefreshIntervalMs?: number;
   playlistRefreshInitialDelayMs?: number;
+  epgRefreshIntervalMs?: number;
+  epgRefreshInitialDelayMs?: number;
 }
 
 function safeEntry(entry: M3uEntry) {
@@ -152,6 +163,7 @@ export async function buildApp(
 
   let sourceRepository = options.sourceRepository;
   const playlistInspector = options.playlistInspector ?? inspectRemotePlaylist;
+  const epgInspector = options.epgInspector;
   let ownsSourceRepository = false;
   const databaseUrl = process.env['DATABASE_URL'];
   const masterKey = process.env['IPTVMASTER_MASTER_KEY'];
@@ -185,10 +197,36 @@ export async function buildApp(
             ) * 1_000,
         })
       : undefined;
+  const epgRefreshCoordinator = sourceRepository
+    ? new EpgRefreshCoordinator(sourceRepository, epgInspector ?? undefined)
+    : undefined;
+  const epgSchedulerEnabled =
+    epgRefreshCoordinator !== undefined &&
+    (options.enableEpgScheduler ??
+      (ownsSourceRepository && process.env['EPG_REFRESH_ENABLED'] !== 'false'));
+  const epgScheduler =
+    epgSchedulerEnabled && sourceRepository && epgRefreshCoordinator
+      ? new EpgScheduler(sourceRepository, epgRefreshCoordinator, app.log, {
+          intervalMs:
+            options.epgRefreshIntervalMs ??
+            positiveEnvironmentNumber('EPG_REFRESH_INTERVAL_MINUTES', 720) *
+              60_000,
+          initialDelayMs:
+            options.epgRefreshInitialDelayMs ??
+            positiveEnvironmentNumber('EPG_REFRESH_INITIAL_DELAY_SECONDS', 60) *
+              1_000,
+        })
+      : undefined;
+  epgScheduler?.start();
   playlistScheduler?.start();
-  if (playlistScheduler || (ownsSourceRepository && sourceRepository?.close)) {
+  if (
+    playlistScheduler ||
+    epgScheduler ||
+    (ownsSourceRepository && sourceRepository?.close)
+  ) {
     app.addHook('onClose', async () => {
       await playlistScheduler?.stop();
+      await epgScheduler?.stop();
       if (ownsSourceRepository) await sourceRepository?.close?.();
     });
   }
@@ -204,18 +242,23 @@ export async function buildApp(
     databaseConfigured: databaseUrl !== undefined,
     encryptionConfigured: masterKey !== undefined,
     playlistAutomation: playlistScheduler !== undefined,
+    epgAutomation: epgScheduler !== undefined,
   }));
 
-  app.get(
-    '/api/v1/automation/status',
-    async () =>
-      playlistScheduler?.status() ?? {
-        enabled: false,
-        running: false,
-        intervalMinutes: 0,
-        sourceStates: refreshCoordinator?.listStates() ?? [],
-      },
-  );
+  app.get('/api/v1/automation/status', async () => ({
+    ...(playlistScheduler?.status() ?? {
+      enabled: false,
+      running: false,
+      intervalMinutes: 0,
+      sourceStates: refreshCoordinator?.listStates() ?? [],
+    }),
+    epg: epgScheduler?.status() ?? {
+      enabled: false,
+      running: false,
+      intervalMinutes: 0,
+      sourceStates: epgRefreshCoordinator?.listStates() ?? [],
+    },
+  }));
 
   app.get('/api/v1/sources', async (_request, reply) => {
     if (!sourceRepository) {
@@ -364,6 +407,54 @@ export async function buildApp(
     },
   );
 
+  app.post<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/epg/import',
+    async (request, reply) => {
+      if (!sourceRepository || !epgRefreshCoordinator) {
+        return reply
+          .code(503)
+          .send({ error: 'EPG persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      try {
+        const result = await epgRefreshCoordinator.refresh(sourceId.data);
+        if (result.status === 'already-running') {
+          return reply.code(202).send({
+            status: result.status,
+            sourceId: result.sourceId,
+            startedAt: result.startedAt,
+          });
+        }
+        const { inspection, summary } = result;
+        if (!inspection || !summary) {
+          throw new Error('Completed EPG refresh is missing its result');
+        }
+        return reply.code(summary.unchanged ? 200 : 201).send({
+          summary,
+          inspection: {
+            fingerprint: inspection.fingerprint,
+            totalBytes: inspection.totalBytes,
+            channelCount: inspection.channels.length,
+            programmeCount: inspection.programmes.length,
+            issueCount: inspection.issues.length,
+            issuesTruncated: inspection.issuesTruncated,
+          },
+        });
+      } catch (error) {
+        if (error instanceof EpgNotConfiguredError) {
+          return reply.code(404).send({ error: error.message });
+        }
+        if (error instanceof SnapshotRejectedError) {
+          return reply.code(422).send({ error: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
   app.put<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/group-policies',
     async (request, reply) => {
@@ -455,6 +546,30 @@ export async function buildApp(
         .type('audio/x-mpegurl; charset=utf-8')
         .header('cache-control', 'private, no-store')
         .send(serializeM3u(output.entries));
+    },
+  );
+
+  app.get<{ Params: { accessToken: string } }>(
+    '/p/:accessToken/epg.xml',
+    async (request, reply) => {
+      if (
+        !sourceRepository ||
+        !/^[A-Za-z0-9_-]{24,128}$/.test(request.params.accessToken)
+      ) {
+        return reply.code(404).send({ error: 'EPG not found' });
+      }
+      const profile = await sourceRepository.resolveOutputProfile(
+        request.params.accessToken,
+      );
+      if (!profile) return reply.code(404).send({ error: 'EPG not found' });
+      const guide = await sourceRepository.getLatestEpg(profile.sourceId);
+      if (guide.channels.length === 0) {
+        return reply.code(503).send({ error: 'EPG is not ready' });
+      }
+      return reply
+        .type('application/xml; charset=utf-8')
+        .header('cache-control', 'private, no-store')
+        .send(serializeXmltv(guide.channels, guide.programmes));
     },
   );
 

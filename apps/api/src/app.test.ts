@@ -5,6 +5,7 @@ import {
   type M3uEntry,
   type OutputGroupPolicy,
   type PlaylistInspection,
+  type XmltvInspection,
 } from '@iptvmaster/core';
 
 import { buildApp } from './app.js';
@@ -17,6 +18,8 @@ import type {
   SaveGroupPolicyInput,
   SourceCredentials,
   SourceRepository,
+  StoredEpgGuide,
+  StoredEpgSummary,
   StoredSnapshotSummary,
 } from './source-repository.js';
 
@@ -35,6 +38,7 @@ class MemorySourceRepository implements SourceRepository {
   latestEntries: M3uEntry[] = [];
   policies: OutputGroupPolicy[] = [];
   outputProfile: ResolvedOutputProfile | null = null;
+  latestEpg: StoredEpgGuide = { channels: [], programmes: [] };
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -80,6 +84,29 @@ class MemorySourceRepository implements SourceRepository {
 
   async getLatestPlaylistEntries(): Promise<M3uEntry[]> {
     return this.latestEntries;
+  }
+
+  async saveEpgSnapshot(
+    sourceId: string,
+    inspection: XmltvInspection,
+  ): Promise<StoredEpgSummary> {
+    this.latestEpg = {
+      channels: inspection.channels,
+      programmes: inspection.programmes,
+    };
+    return {
+      sourceId,
+      fingerprint: inspection.fingerprint,
+      importedAt: '2026-08-04T00:00:00.000Z',
+      channelCount: inspection.channels.length,
+      programmeCount: inspection.programmes.length,
+      issueCount: inspection.issues.length,
+      unchanged: false,
+    };
+  }
+
+  async getLatestEpg(): Promise<StoredEpgGuide> {
+    return this.latestEpg;
   }
 
   async listGroups(): Promise<GroupSummary[]> {
@@ -167,6 +194,7 @@ class MemorySourceRepository implements SourceRepository {
       name,
       accessToken,
       playlistPath: `/p/${accessToken}/playlist.m3u`,
+      epgPath: `/p/${accessToken}/epg.xml`,
     };
   }
 
@@ -342,7 +370,10 @@ describe('IPTVMaster API', () => {
     await repository.createSource({
       name: 'Home provider',
       sourceType: 'm3u',
-      credentials: { playlistUrl: 'http://provider.test/list' },
+      credentials: {
+        playlistUrl: 'http://provider.test/list',
+        epgUrl: 'http://provider.test/guide',
+      },
       sourceTimezone: 'Europe/Stockholm',
       displayTimezone: 'Europe/Helsinki',
     });
@@ -416,7 +447,10 @@ describe('IPTVMaster API', () => {
     const source = await repository.createSource({
       name: 'Home provider',
       sourceType: 'm3u',
-      credentials: { playlistUrl: 'http://provider.test/list' },
+      credentials: {
+        playlistUrl: 'http://provider.test/list',
+        epgUrl: 'http://provider.test/guide',
+      },
       sourceTimezone: 'Europe/Stockholm',
       displayTimezone: 'Europe/Helsinki',
     });
@@ -452,8 +486,31 @@ describe('IPTVMaster API', () => {
         lineNumber: 6,
       },
     ];
-    const app = await buildApp({ sourceRepository: repository });
+    const app = await buildApp({
+      sourceRepository: repository,
+      epgInspector: async () => ({
+        fingerprint: 'f'.repeat(64),
+        totalBytes: 200,
+        channels: [{ id: 'yle1', displayName: 'Yle TV1' }],
+        programmes: [
+          {
+            channelId: 'yle1',
+            start: '2026-08-04T15:00:00.000Z',
+            stop: '2026-08-04T16:00:00.000Z',
+            title: 'Synthetic news',
+          },
+        ],
+        issues: [],
+        issuesTruncated: false,
+      }),
+    });
     applications.push(app);
+
+    const epgImportResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/epg/import`,
+    });
+    expect(epgImportResponse.statusCode).toBe(201);
 
     const policyResponse = await app.inject({
       method: 'PUT',
@@ -477,10 +534,12 @@ describe('IPTVMaster API', () => {
       payload: { sourceId: source.id, name: 'Living room TiviMate' },
     });
     const playlistPath = profileResponse.json().profile.playlistPath as string;
+    const epgPath = profileResponse.json().profile.epgPath as string;
     const playlistResponse = await app.inject({
       method: 'GET',
       url: playlistPath,
     });
+    const epgResponse = await app.inject({ method: 'GET', url: epgPath });
 
     expect(profileResponse.statusCode).toBe(201);
     expect(playlistResponse.statusCode).toBe(200);
@@ -493,6 +552,11 @@ describe('IPTVMaster API', () => {
       'group-title="Today\'s Finnish Sports"',
     );
     expect(playlistResponse.body).not.toContain('Reload your playlist');
+    expect(epgResponse.statusCode).toBe(200);
+    expect(epgResponse.headers['content-type']).toContain('application/xml');
+    expect(epgResponse.body).toContain('<display-name>Yle TV1</display-name>');
+    expect(epgResponse.body).toContain('Synthetic news');
+    expect(epgResponse.body).toContain('start="20260804150000 +0000"');
 
     const profileId = profileResponse.json().profile.id as string;
     const revokeResponse = await app.inject({
@@ -503,7 +567,12 @@ describe('IPTVMaster API', () => {
       method: 'GET',
       url: playlistPath,
     });
+    const revokedEpgResponse = await app.inject({
+      method: 'GET',
+      url: epgPath,
+    });
     expect(revokeResponse.statusCode).toBe(204);
     expect(revokedPlaylistResponse.statusCode).toBe(404);
+    expect(revokedEpgResponse.statusCode).toBe(404);
   });
 });

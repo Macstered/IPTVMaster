@@ -17,10 +17,12 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
 - Token-protected, revocable M3U output URLs for TiviMate.
 - Non-overlapping automatic playlist refreshes, enabled every 120 minutes by default.
+- Streaming XMLTV parsing with bounded downloads and transactional last-known-good EPG replacement.
+- Non-overlapping automatic EPG refreshes, enabled every 12 hours by default.
 - A small API and browser UI for encrypted setup, playlist imports, group rules, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
 
-XMLTV ingestion, automatic EPG refreshes, and XMLTV publication are the next implementation milestone.
+Permanent-channel editing/reconciliation and administrator authentication remain future milestones; the current slice is intended for LAN-only evaluation.
 
 See [EXECUTION_PLAN.md](./EXECUTION_PLAN.md) for the complete delivery plan.
 
@@ -61,14 +63,14 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 
 1. Open the web UI from a LAN address that the Nvidia Shield can reach.
 2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again.
-3. Import the live playlist. VOD and series entries are skipped.
+3. Import the live playlist and XMLTV guide. VOD and series entries are skipped.
 4. Filter the provider groups and mark only daily live-event groups as events. Those groups use `Europe/Stockholm` to `Europe/Helsinki` title conversion; ordinary live TV stays unchanged.
-5. Create the TiviMate URL and copy it immediately. Only its SHA-256 hash is stored, so the complete URL cannot be shown again later.
+5. Create the TiviMate URLs and copy both the M3U playlist and XMLTV EPG addresses immediately. Only the shared token's SHA-256 hash is stored, so the complete URLs cannot be shown again later.
 6. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
 
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 
-Playlist automation starts 30 seconds after the application and then runs every 120 minutes. Override `PLAYLIST_REFRESH_INTERVAL_MINUTES` and `PLAYLIST_REFRESH_INITIAL_DELAY_SECONDS` in `.env`, or set `PLAYLIST_REFRESH_ENABLED=false` to disable it. Overlapping manual and scheduled imports for the same source are coalesced, and a rejected/failed refresh leaves the last-known-good snapshot active.
+Playlist automation starts 30 seconds after the application and then runs every 120 minutes. EPG automation starts after 60 seconds and runs every 720 minutes. Override the `PLAYLIST_REFRESH_*` and `EPG_REFRESH_*` values in `.env`, or set the corresponding `*_ENABLED=false` value to disable a scheduler. Overlapping manual and scheduled imports for the same source are coalesced, and a rejected/failed refresh leaves the last-known-good playlist or guide active.
 
 ## Security
 

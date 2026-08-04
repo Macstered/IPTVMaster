@@ -5,6 +5,7 @@ interface Capabilities {
   databaseConfigured: boolean;
   encryptionConfigured: boolean;
   playlistAutomation: boolean;
+  epgAutomation: boolean;
 }
 
 interface SafeSource {
@@ -26,6 +27,14 @@ interface ImportSummary {
   issues: number;
 }
 
+interface EpgImportSummary {
+  totalBytes: number;
+  channelCount: number;
+  programmeCount: number;
+  issueCount: number;
+  issuesTruncated: boolean;
+}
+
 interface GroupSummary {
   providerGroup: string;
   channelCount: number;
@@ -41,6 +50,7 @@ interface CreatedOutputProfile {
   name: string;
   accessToken: string;
   playlistPath: string;
+  epgPath: string;
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -66,9 +76,12 @@ export function SourceSetup() {
   const [epgUrl, setEpgUrl] = useState('');
   const [saving, setSaving] = useState(false);
   const [inspectingId, setInspectingId] = useState<string | null>(null);
+  const [importingEpgId, setImportingEpgId] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(
     null,
   );
+  const [epgImportSummary, setEpgImportSummary] =
+    useState<EpgImportSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [groupFilter, setGroupFilter] = useState('Events FI');
@@ -77,6 +90,7 @@ export function SourceSetup() {
   const [outputProfile, setOutputProfile] =
     useState<CreatedOutputProfile | null>(null);
   const [playlistOutputUrl, setPlaylistOutputUrl] = useState('');
+  const [epgOutputUrl, setEpgOutputUrl] = useState('');
 
   async function loadGroups(sourceId: string) {
     const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
@@ -167,6 +181,27 @@ export function SourceSetup() {
     }
   }
 
+  async function importEpg(source: SafeSource) {
+    setImportingEpgId(source.id);
+    setEpgImportSummary(null);
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/sources/${source.id}/epg/import`, {
+        method: 'POST',
+      });
+      const payload = await readJson<{ inspection: EpgImportSummary }>(
+        response,
+      );
+      setEpgImportSummary(payload.inspection);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not import XMLTV',
+      );
+    } finally {
+      setImportingEpgId(null);
+    }
+  }
+
   async function setGroupBehavior(
     source: SafeSource,
     group: GroupSummary,
@@ -226,6 +261,7 @@ export function SourceSetup() {
       setPlaylistOutputUrl(
         `${window.location.origin}${payload.profile.playlistPath}`,
       );
+      setEpgOutputUrl(`${window.location.origin}${payload.profile.epgPath}`);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -251,6 +287,7 @@ export function SourceSetup() {
       }
       setOutputProfile(null);
       setPlaylistOutputUrl('');
+      setEpgOutputUrl('');
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -357,20 +394,37 @@ export function SourceSetup() {
                 </small>
                 {capabilities?.playlistAutomation ? (
                   <small className="automation-note">
-                    Automatic playlist refresh enabled
+                    Automatic playlist
+                    {source.hasEpgUrl && capabilities.epgAutomation
+                      ? ' and EPG refresh enabled'
+                      : ' refresh enabled'}
                   </small>
                 ) : null}
               </div>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={inspectingId !== null}
-                onClick={() => void inspectSource(source)}
-              >
-                {inspectingId === source.id
-                  ? 'Importing…'
-                  : 'Import live playlist'}
-              </button>
+              <div className="source-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={inspectingId !== null || importingEpgId !== null}
+                  onClick={() => void inspectSource(source)}
+                >
+                  {inspectingId === source.id
+                    ? 'Importing…'
+                    : 'Import live playlist'}
+                </button>
+                {source.hasEpgUrl ? (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={inspectingId !== null || importingEpgId !== null}
+                    onClick={() => void importEpg(source)}
+                  >
+                    {importingEpgId === source.id
+                      ? 'Importing guide…'
+                      : 'Import XMLTV guide'}
+                  </button>
+                ) : null}
+              </div>
             </article>
           ))}
         </div>
@@ -397,6 +451,32 @@ export function SourceSetup() {
           <div>
             <small>PARSE ISSUES</small>
             <strong>{importSummary.issues.toLocaleString()}</strong>
+          </div>
+        </div>
+      ) : null}
+
+      {epgImportSummary ? (
+        <div className="import-summary" aria-live="polite">
+          <div>
+            <small>EPG CHANNELS</small>
+            <strong>{epgImportSummary.channelCount.toLocaleString()}</strong>
+          </div>
+          <div>
+            <small>PROGRAMMES</small>
+            <strong>{epgImportSummary.programmeCount.toLocaleString()}</strong>
+          </div>
+          <div>
+            <small>DOWNLOAD SIZE</small>
+            <strong>
+              {(epgImportSummary.totalBytes / 1_000_000).toFixed(1)} MB
+            </strong>
+          </div>
+          <div>
+            <small>PARSE ISSUES</small>
+            <strong>
+              {epgImportSummary.issueCount.toLocaleString()}
+              {epgImportSummary.issuesTruncated ? '+' : ''}
+            </strong>
           </div>
         </div>
       ) : null}
@@ -458,7 +538,7 @@ export function SourceSetup() {
 
           <div className="output-setup">
             <div>
-              <strong>TiviMate playlist URL</strong>
+              <strong>TiviMate playlist and EPG URLs</strong>
               <small>
                 Create a private, revocable URL after your group rules are
                 ready.
@@ -474,13 +554,18 @@ export function SourceSetup() {
           </div>
           {playlistOutputUrl ? (
             <div className="output-url">
-              <label htmlFor="playlist-output-url">
-                Copy this URL into TiviMate
-              </label>
+              <label htmlFor="playlist-output-url">M3U playlist URL</label>
               <input
                 id="playlist-output-url"
                 readOnly
                 value={playlistOutputUrl}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <label htmlFor="epg-output-url">XMLTV EPG URL</label>
+              <input
+                id="epg-output-url"
+                readOnly
+                value={epgOutputUrl}
                 onFocus={(event) => event.currentTarget.select()}
               />
               <small>

@@ -58,6 +58,8 @@ function repository(
       issueCount: 0,
       unchanged: false,
     })),
+    saveEpgSnapshot: vi.fn(),
+    getLatestEpg: vi.fn(async () => ({ channels: [], programmes: [] })),
     getLatestPlaylistEntries: vi.fn(async () => []),
     listGroups: vi.fn(async () => []),
     saveGroupPolicy: vi.fn(),
