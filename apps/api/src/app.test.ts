@@ -10,6 +10,8 @@ import {
 
 import { buildApp } from './app.js';
 import type {
+  BulkUpdateChannelInput,
+  BulkUpdateChannelResult,
   ChannelListFilters,
   ChannelListPage,
   ChannelSummary,
@@ -17,6 +19,8 @@ import type {
   CreatedOutputProfile,
   GroupSummary,
   ResolvedOutputProfile,
+  ReconciliationCandidate,
+  ReconciliationReview,
   SafeSource,
   SaveGroupPolicyInput,
   SourceCredentials,
@@ -44,6 +48,7 @@ class MemorySourceRepository implements SourceRepository {
   outputProfile: ResolvedOutputProfile | null = null;
   latestEpg: StoredEpgGuide = { channels: [], programmes: [] };
   channels: ChannelSummary[] = [];
+  reviewCandidates: ReconciliationCandidate[] = [];
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -238,6 +243,124 @@ class MemorySourceRepository implements SourceRepository {
     }
     this.channels[index] = updated;
     return updated;
+  }
+
+  async bulkUpdateChannels(
+    sourceId: string,
+    channelIds: string[],
+    input: BulkUpdateChannelInput,
+  ): Promise<BulkUpdateChannelResult> {
+    const selected = new Set(channelIds);
+    let updatedCount = 0;
+    this.channels = this.channels.map((channel) => {
+      if (channel.sourceId !== sourceId || !selected.has(channel.id)) {
+        return channel;
+      }
+      updatedCount += 1;
+      const updated = { ...channel };
+      if (input.enabled !== undefined) updated.enabled = input.enabled;
+      for (const [key, value] of [
+        ['customGroup', input.customGroup],
+        ['customLogoUrl', input.customLogoUrl],
+      ] as const) {
+        if (value === undefined) continue;
+        if (value === null) delete updated[key];
+        else updated[key] = value;
+      }
+      return updated;
+    });
+    return { updatedCount };
+  }
+
+  async getReconciliationReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<ReconciliationReview> {
+    const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const unresolved = this.channels.filter(
+      (channel) =>
+        channel.sourceId === sourceId &&
+        ['ambiguous', 'missing'].includes(channel.reconciliationStatus) &&
+        (!normalizedSearch ||
+          [
+            channel.providerName,
+            channel.providerGroup,
+            channel.tvgId ?? '',
+          ].some((value) =>
+            value.toLocaleLowerCase().includes(normalizedSearch),
+          )),
+    );
+    const candidates = this.reviewCandidates.filter(
+      (candidate) =>
+        !normalizedSearch ||
+        [
+          candidate.providerName,
+          candidate.providerGroup,
+          candidate.tvgId ?? '',
+        ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)),
+    );
+    return {
+      unresolvedChannels: unresolved.slice(0, limit),
+      candidates: candidates.slice(0, limit),
+      ambiguousCount: this.channels.filter(
+        (channel) => channel.reconciliationStatus === 'ambiguous',
+      ).length,
+      missingCount: this.channels.filter(
+        (channel) => channel.reconciliationStatus === 'missing',
+      ).length,
+      newCount: this.channels.filter(
+        (channel) => channel.reconciliationStatus === 'new',
+      ).length,
+      candidateTotal: candidates.length,
+      truncated: unresolved.length > limit || candidates.length > limit,
+    };
+  }
+
+  async resolveChannelMatch(
+    sourceId: string,
+    channelId: string,
+    upstreamItemId: string,
+  ): Promise<ChannelSummary | null> {
+    const candidate = this.reviewCandidates.find(
+      (value) => value.upstreamItemId === upstreamItemId,
+    );
+    const target = this.channels.find(
+      (channel) => channel.sourceId === sourceId && channel.id === channelId,
+    );
+    if (!candidate || !target) return null;
+    this.channels = this.channels.filter(
+      (channel) =>
+        channel.id === target.id || channel.id !== candidate.linkedChannelId,
+    );
+    const updated: ChannelSummary = {
+      ...target,
+      providerName: candidate.providerName,
+      providerGroup: candidate.providerGroup,
+      ...(candidate.tvgId ? { tvgId: candidate.tvgId } : {}),
+      matchLocked: true,
+      matchConfidence: 1,
+      reconciliationStatus: 'matched',
+    };
+    this.channels = this.channels.map((channel) =>
+      channel.id === target.id ? updated : channel,
+    );
+    this.reviewCandidates = this.reviewCandidates.filter(
+      (value) => value.upstreamItemId !== upstreamItemId,
+    );
+    return updated;
+  }
+
+  async unlockChannelMatch(
+    sourceId: string,
+    channelId: string,
+  ): Promise<ChannelSummary | null> {
+    const channel = this.channels.find(
+      (value) => value.sourceId === sourceId && value.id === channelId,
+    );
+    if (!channel) return null;
+    channel.matchLocked = false;
+    return channel;
   }
 
   async createOutputProfile(
@@ -567,6 +690,107 @@ describe('IPTVMaster API', () => {
       }),
     );
     expect(unsafeLogoResponse.statusCode).toBe(400);
+  });
+
+  it('reviews, manually resolves, unlocks, and bulk-updates channel changes', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const missingChannelId = '00000000-0000-4000-8000-000000000010';
+    const newChannelId = '00000000-0000-4000-8000-000000000011';
+    const upstreamItemId = '00000000-0000-4000-8000-000000000012';
+    repository.channels = [
+      {
+        id: missingChannelId,
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        enabled: true,
+        customName: 'Yle One',
+        sortOrder: 2,
+        matchLocked: false,
+        reconciliationStatus: 'missing',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+      {
+        id: newChannelId,
+        sourceId: source.id,
+        providerName: 'Yle News HD',
+        providerGroup: 'Finland',
+        enabled: true,
+        tvgId: 'yle-news.fi',
+        sortOrder: 4,
+        matchLocked: false,
+        reconciliationStatus: 'new',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    repository.reviewCandidates = [
+      {
+        upstreamItemId,
+        providerName: 'Yle News HD',
+        providerGroup: 'Finland',
+        tvgId: 'yle-news.fi',
+        linkedChannelId: newChannelId,
+        linkedChannelStatus: 'new',
+      },
+    ];
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const reviewResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/channel-review`,
+    });
+    const resolveResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/channels/${missingChannelId}/resolve`,
+      payload: { upstreamItemId },
+    });
+    const unlockResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/channels/${missingChannelId}/unlock-match`,
+    });
+    const bulkResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels`,
+      payload: {
+        channelIds: [missingChannelId],
+        update: { enabled: false, customGroup: 'Reviewed channels' },
+      },
+    });
+
+    expect(reviewResponse.statusCode).toBe(200);
+    expect(reviewResponse.json()).toEqual(
+      expect.objectContaining({ missingCount: 1, newCount: 1 }),
+    );
+    expect(resolveResponse.statusCode).toBe(200);
+    expect(resolveResponse.json().channel).toEqual(
+      expect.objectContaining({
+        id: missingChannelId,
+        providerName: 'Yle News HD',
+        customName: 'Yle One',
+        matchLocked: true,
+        reconciliationStatus: 'matched',
+      }),
+    );
+    expect(unlockResponse.statusCode).toBe(200);
+    expect(unlockResponse.json().channel.matchLocked).toBe(false);
+    expect(bulkResponse.statusCode).toBe(200);
+    expect(bulkResponse.json()).toEqual({ updatedCount: 1 });
+    expect(repository.channels).toHaveLength(1);
+    expect(repository.channels[0]).toEqual(
+      expect.objectContaining({
+        id: missingChannelId,
+        enabled: false,
+        customGroup: 'Reviewed channels',
+      }),
+    );
   });
 
   it('publishes a token-protected M3U with event policies applied', async () => {

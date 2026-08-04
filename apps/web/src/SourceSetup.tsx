@@ -59,6 +59,8 @@ interface ChannelSummary {
   customGroup?: string;
   customLogoUrl?: string;
   sortOrder: number;
+  matchLocked: boolean;
+  matchConfidence?: number;
   reconciliationStatus: ChannelStatus;
 }
 
@@ -74,6 +76,25 @@ interface ChannelDraft {
   customGroup: string;
   customLogoUrl: string;
   sortOrder: string;
+}
+
+interface ReconciliationCandidate {
+  upstreamItemId: string;
+  providerName: string;
+  providerGroup: string;
+  tvgId?: string;
+  linkedChannelId?: string;
+  linkedChannelStatus?: ChannelStatus;
+}
+
+interface ReconciliationReview {
+  unresolvedChannels: ChannelSummary[];
+  candidates: ReconciliationCandidate[];
+  ambiguousCount: number;
+  missingCount: number;
+  newCount: number;
+  candidateTotal: number;
+  truncated: boolean;
 }
 
 interface CreatedOutputProfile {
@@ -129,6 +150,14 @@ export function SourceSetup() {
     customLogoUrl: '',
     sortOrder: '0',
   });
+  const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
+  const [bulkGroup, setBulkGroup] = useState('');
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [review, setReview] = useState<ReconciliationReview | null>(null);
+  const [reviewMatches, setReviewMatches] = useState<Record<string, string>>(
+    {},
+  );
+  const [resolvingChannel, setResolvingChannel] = useState<string | null>(null);
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputProfile, setOutputProfile] =
     useState<CreatedOutputProfile | null>(null);
@@ -152,9 +181,27 @@ export function SourceSetup() {
       const payload = await readJson<ChannelListPage>(response);
       setChannels(payload.channels);
       setChannelTotal(payload.total);
+      setSelectedChannelIds([]);
     } finally {
       setLoadingChannels(false);
     }
+  }
+
+  async function loadReconciliationReview(sourceId: string, search = '') {
+    const parameters = new URLSearchParams({ limit: '100' });
+    if (search.trim()) parameters.set('search', search.trim());
+    const response = await fetch(
+      `/api/v1/sources/${sourceId}/channel-review?${parameters.toString()}`,
+    );
+    const payload = await readJson<ReconciliationReview>(response);
+    setReview(payload);
+    setReviewMatches((current) => {
+      const next: Record<string, string> = {};
+      for (const channel of payload.unresolvedChannels) {
+        if (current[channel.id]) next[channel.id] = current[channel.id];
+      }
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -178,6 +225,7 @@ export function SourceSetup() {
               await Promise.all([
                 loadGroups(firstSource.id),
                 loadChannels(firstSource.id),
+                loadReconciliationReview(firstSource.id),
               ]);
             }
           }
@@ -235,7 +283,11 @@ export function SourceSetup() {
       });
       const payload = await readJson<{ summary: ImportSummary }>(response);
       setImportSummary(payload.summary);
-      await Promise.all([loadGroups(source.id), loadChannels(source.id)]);
+      await Promise.all([
+        loadGroups(source.id),
+        loadChannels(source.id, channelSearch),
+        loadReconciliationReview(source.id, channelSearch),
+      ]);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not inspect source',
@@ -298,7 +350,10 @@ export function SourceSetup() {
             : candidate,
         ),
       );
-      await loadChannels(source.id, channelSearch);
+      await Promise.all([
+        loadChannels(source.id, channelSearch),
+        loadReconciliationReview(source.id, channelSearch),
+      ]);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -373,11 +428,118 @@ export function SourceSetup() {
     event.preventDefault();
     if (!primarySource) return;
     try {
-      await loadChannels(primarySource.id, channelSearch);
+      await Promise.all([
+        loadChannels(primarySource.id, channelSearch),
+        loadReconciliationReview(primarySource.id, channelSearch),
+      ]);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not load channels',
       );
+    }
+  }
+
+  function toggleChannelSelection(channelId: string) {
+    setSelectedChannelIds((current) =>
+      current.includes(channelId)
+        ? current.filter((value) => value !== channelId)
+        : [...current, channelId],
+    );
+  }
+
+  function toggleAllVisibleChannels() {
+    setSelectedChannelIds((current) =>
+      current.length === channels.length
+        ? []
+        : channels.map((channel) => channel.id),
+    );
+  }
+
+  async function applyBulkChannelUpdate(
+    source: SafeSource,
+    update: Record<string, unknown>,
+  ) {
+    if (selectedChannelIds.length === 0) return;
+    setBulkSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/sources/${source.id}/channels`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ channelIds: selectedChannelIds, update }),
+      });
+      await readJson<{ updatedCount: number }>(response);
+      await Promise.all([
+        loadChannels(source.id, channelSearch),
+        loadReconciliationReview(source.id, channelSearch),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Bulk update failed');
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
+  async function applyBulkGroup(event: FormEvent, source: SafeSource) {
+    event.preventDefault();
+    if (!bulkGroup.trim()) return;
+    await applyBulkChannelUpdate(source, { customGroup: bulkGroup.trim() });
+  }
+
+  async function resolveChannelMatch(
+    source: SafeSource,
+    channel: ChannelSummary,
+  ) {
+    const upstreamItemId = reviewMatches[channel.id];
+    if (!upstreamItemId) return;
+    setResolvingChannel(channel.id);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/channels/${channel.id}/resolve`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ upstreamItemId }),
+        },
+      );
+      await readJson<{ channel: ChannelSummary }>(response);
+      await Promise.all([
+        loadChannels(source.id, channelSearch),
+        loadReconciliationReview(source.id, channelSearch),
+      ]);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Manual match failed',
+      );
+    } finally {
+      setResolvingChannel(null);
+    }
+  }
+
+  async function unlockChannelMatch(
+    source: SafeSource,
+    channel: ChannelSummary,
+  ) {
+    setSavingChannel(channel.id);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/channels/${channel.id}/unlock-match`,
+        { method: 'POST' },
+      );
+      const payload = await readJson<{ channel: ChannelSummary }>(response);
+      setChannels((current) =>
+        current.map((candidate) =>
+          candidate.id === channel.id ? payload.channel : candidate,
+        ),
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not unlock match',
+      );
+    } finally {
+      setSavingChannel(null);
     }
   }
 
@@ -702,12 +864,192 @@ export function SourceSetup() {
                 {loadingChannels ? 'Loading…' : 'Search'}
               </button>
             </form>
+
+            {review &&
+            review.ambiguousCount + review.missingCount + review.newCount >
+              0 ? (
+              <section className="reconciliation-review" aria-live="polite">
+                <div className="review-heading">
+                  <div>
+                    <small>PROVIDER CHANGE REVIEW</small>
+                    <strong>Resolve uncertain channel changes</strong>
+                  </div>
+                  <div className="review-counts">
+                    <span>{review.newCount} new</span>
+                    <span>{review.missingCount} missing</span>
+                    <span>{review.ambiguousCount} ambiguous</span>
+                  </div>
+                </div>
+                <p className="secret-note">
+                  Select a current provider entry only when it is the same
+                  channel. The match is locked and an untouched duplicate is
+                  archived with an audit record.
+                </p>
+                {review.unresolvedChannels.length > 0 ? (
+                  <div className="review-list">
+                    {review.unresolvedChannels.map((channel) => (
+                      <div className="review-row" key={channel.id}>
+                        <div className="review-channel">
+                          <strong>
+                            {channel.customName ?? channel.providerName}
+                          </strong>
+                          <small>
+                            Previous: {channel.providerName} ·{' '}
+                            {channel.providerGroup || '(Ungrouped)'}
+                          </small>
+                        </div>
+                        <span
+                          className={`reconciliation-badge ${channel.reconciliationStatus}`}
+                        >
+                          {channel.reconciliationStatus}
+                        </span>
+                        <select
+                          aria-label={`Provider match for ${channel.customName ?? channel.providerName}`}
+                          value={reviewMatches[channel.id] ?? ''}
+                          onChange={(event) =>
+                            setReviewMatches((current) => ({
+                              ...current,
+                              [channel.id]: event.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">
+                            Choose current provider entry
+                          </option>
+                          {review.candidates.map((candidate) => (
+                            <option
+                              value={candidate.upstreamItemId}
+                              key={candidate.upstreamItemId}
+                            >
+                              {candidate.providerName} —{' '}
+                              {candidate.providerGroup || '(Ungrouped)'}
+                              {candidate.linkedChannelStatus === 'new'
+                                ? ' [NEW]'
+                                : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          disabled={
+                            resolvingChannel !== null ||
+                            !reviewMatches[channel.id]
+                          }
+                          onClick={() =>
+                            void resolveChannelMatch(primarySource, channel)
+                          }
+                        >
+                          {resolvingChannel === channel.id
+                            ? 'Matching…'
+                            : 'Match and lock'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="review-clear">
+                    No missing or ambiguous channels need a manual decision.
+                  </p>
+                )}
+                {review.truncated ? (
+                  <small className="channel-limit-note">
+                    Review results are limited to 100 entries. Use channel
+                    search to narrow large updates.
+                  </small>
+                ) : null}
+              </section>
+            ) : null}
+
+            {channels.length > 0 ? (
+              <div className="bulk-toolbar">
+                <label className="bulk-select-all">
+                  <input
+                    type="checkbox"
+                    checked={
+                      channels.length > 0 &&
+                      selectedChannelIds.length === channels.length
+                    }
+                    onChange={toggleAllVisibleChannels}
+                  />
+                  Select visible
+                </label>
+                <strong>{selectedChannelIds.length} selected</strong>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={bulkSaving || selectedChannelIds.length === 0}
+                  onClick={() =>
+                    void applyBulkChannelUpdate(primarySource, {
+                      enabled: true,
+                    })
+                  }
+                >
+                  Show
+                </button>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={bulkSaving || selectedChannelIds.length === 0}
+                  onClick={() =>
+                    void applyBulkChannelUpdate(primarySource, {
+                      enabled: false,
+                    })
+                  }
+                >
+                  Hide
+                </button>
+                <form
+                  className="bulk-group-form"
+                  onSubmit={(event) =>
+                    void applyBulkGroup(event, primarySource)
+                  }
+                >
+                  <input
+                    aria-label="Bulk output group"
+                    placeholder="Output group"
+                    value={bulkGroup}
+                    onChange={(event) => setBulkGroup(event.target.value)}
+                  />
+                  <button
+                    className="secondary-button compact"
+                    type="submit"
+                    disabled={
+                      bulkSaving ||
+                      selectedChannelIds.length === 0 ||
+                      !bulkGroup.trim()
+                    }
+                  >
+                    Set group
+                  </button>
+                  <button
+                    className="secondary-button compact"
+                    type="button"
+                    disabled={bulkSaving || selectedChannelIds.length === 0}
+                    onClick={() =>
+                      void applyBulkChannelUpdate(primarySource, {
+                        customGroup: null,
+                      })
+                    }
+                  >
+                    Reset group
+                  </button>
+                </form>
+              </div>
+            ) : null}
             <div className="channel-list" aria-live="polite">
               {channels.map((channel) => (
                 <article
                   className={`channel-row ${channel.enabled ? '' : 'disabled'}`}
                   key={channel.id}
                 >
+                  <input
+                    className="channel-select"
+                    type="checkbox"
+                    aria-label={`Select ${channel.customName ?? channel.providerName}`}
+                    checked={selectedChannelIds.includes(channel.id)}
+                    onChange={() => toggleChannelSelection(channel.id)}
+                  />
                   <div className="channel-summary">
                     <strong>
                       {channel.customName ?? channel.providerName}
@@ -724,6 +1066,18 @@ export function SourceSetup() {
                     {channel.reconciliationStatus}
                   </span>
                   <div className="channel-actions">
+                    {channel.matchLocked ? (
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        disabled={savingChannel !== null}
+                        onClick={() =>
+                          void unlockChannelMatch(primarySource, channel)
+                        }
+                      >
+                        Unlock match
+                      </button>
+                    ) : null}
                     <button
                       className="secondary-button compact"
                       type="button"

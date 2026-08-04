@@ -109,6 +109,73 @@ try {
     limit: 20,
     offset: 0,
   });
+  const reviewStreamUrl = 'http://provider.test/synthetic-stream/99';
+  const reviewInspection = {
+    ...refreshedInspection,
+    fingerprint: 'f'.repeat(64),
+    entries: refreshedInspection.entries.map((entry, index) =>
+      index === 0
+        ? {
+            ...entry,
+            name: 'Yle News HD',
+            url: reviewStreamUrl,
+            attributes: {
+              ...entry.attributes,
+              'tvg-id': 'yle-news.fi',
+              'tvg-name': 'Yle News HD',
+            },
+          }
+        : entry,
+    ),
+  };
+  const reviewSnapshot = await repository.savePlaylistSnapshot(
+    source.id,
+    reviewInspection,
+  );
+  const reviewBefore = await repository.getReconciliationReview(
+    source.id,
+    'Yle One',
+    100,
+  );
+  const reviewChannel = reviewBefore.unresolvedChannels.find(
+    (channel) => channel.id === yleChannel.id,
+  );
+  const reviewCandidate = reviewBefore.candidates.find(
+    (candidate) => candidate.providerName === 'Yle News HD',
+  );
+  if (!reviewChannel || !reviewCandidate) {
+    throw new Error('Synthetic channel review setup failed');
+  }
+  const manualResolved = await repository.resolveChannelMatch(
+    source.id,
+    reviewChannel.id,
+    reviewCandidate.upstreamItemId,
+  );
+  const bulkHidden = await repository.bulkUpdateChannels(
+    source.id,
+    [reviewChannel.id],
+    { enabled: false, customGroup: 'Bulk favourites' },
+  );
+  const hiddenEntries = await repository.getLatestPlaylistEntries(source.id);
+  const bulkRestored = await repository.bulkUpdateChannels(
+    source.id,
+    [reviewChannel.id],
+    { enabled: true, customGroup: 'Finnish favourites' },
+  );
+  const unlocked = await repository.unlockChannelMatch(
+    source.id,
+    reviewChannel.id,
+  );
+  const reviewAfter = await repository.getReconciliationReview(
+    source.id,
+    undefined,
+    100,
+  );
+  const activeResolvedChannels = await repository.listChannels(source.id, {
+    search: 'Yle One',
+    limit: 20,
+    offset: 0,
+  });
   const entries = await repository.getLatestPlaylistEntries(source.id);
   const groups = await repository.listGroups(source.id);
   await repository.saveGroupPolicy(source.id, {
@@ -174,11 +241,26 @@ try {
     secondUnchanged: second.unchanged,
     changedSnapshotImported: !changedSnapshot.unchanged,
     entryCount: entries.length,
-    streamUrlRoundTrip: entries[0]?.url === streamUrl,
+    streamUrlRoundTrip: entries[0]?.url === reviewStreamUrl,
     channelReconciled: channelPage.total === 1,
     channelEditSurvivedRefresh:
       reconciledChannels.channels[0]?.id === yleChannel.id &&
       reconciledChannels.channels[0]?.reconciliationStatus === 'matched',
+    reviewSnapshotImported: !reviewSnapshot.unchanged,
+    reviewDetected:
+      reviewBefore.missingCount === 1 && reviewBefore.newCount === 1,
+    manualMatchPreservedIdentity:
+      manualResolved?.id === yleChannel.id &&
+      manualResolved.customName === 'Yle One' &&
+      manualResolved.matchLocked,
+    displacedNewChannelArchived: activeResolvedChannels.total === 1,
+    bulkHideApplied:
+      bulkHidden.updatedCount === 1 &&
+      !hiddenEntries.some((entry) => entry.name === 'Yle One'),
+    bulkRestoreApplied: bulkRestored.updatedCount === 1,
+    manualMatchUnlocked: unlocked?.matchLocked === false,
+    reviewResolved:
+      reviewAfter.missingCount === 0 && reviewAfter.newCount === 0,
     channelNameOverridden: entries[0]?.name === 'Yle One',
     channelGroupOverridden:
       entries[0]?.attributes['group-title'] === 'Finnish favourites',
@@ -211,6 +293,14 @@ try {
     !report.streamUrlRoundTrip ||
     !report.channelReconciled ||
     !report.channelEditSurvivedRefresh ||
+    !report.reviewSnapshotImported ||
+    !report.reviewDetected ||
+    !report.manualMatchPreservedIdentity ||
+    !report.displacedNewChannelArchived ||
+    !report.bulkHideApplied ||
+    !report.bulkRestoreApplied ||
+    !report.manualMatchUnlocked ||
+    !report.reviewResolved ||
     !report.channelNameOverridden ||
     !report.channelGroupOverridden ||
     !report.channelLogoOverridden ||

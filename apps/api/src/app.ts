@@ -21,6 +21,7 @@ import { resolve } from 'node:path';
 import { z } from 'zod';
 
 import {
+  ManualMatchConflictError,
   PostgresSourceRepository,
   type SourceRepository,
 } from './source-repository.js';
@@ -114,6 +115,31 @@ const channelUpdateSchema = z
   .refine((value) => Object.values(value).some((item) => item !== undefined), {
     message: 'At least one channel field is required',
   });
+
+const bulkChannelUpdateSchema = z.object({
+  channelIds: z.array(z.uuid()).min(1).max(500),
+  update: z
+    .object({
+      enabled: z.boolean().optional(),
+      customGroup: nullableChannelText(500),
+      customLogoUrl: z.union([z.url().max(4_000), z.null()]).optional(),
+    })
+    .refine(
+      (value) => Object.values(value).some((item) => item !== undefined),
+      {
+        message: 'At least one bulk update field is required',
+      },
+    ),
+});
+
+const reconciliationReviewSchema = z.object({
+  search: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+const manualMatchSchema = z.object({
+  upstreamItemId: z.uuid(),
+});
 
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
@@ -521,6 +547,128 @@ export async function buildApp(
     }
     return sourceRepository.listChannels(sourceId.data, filters.data);
   });
+
+  app.patch<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/channels',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const update = bulkChannelUpdateSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!update.success) {
+        return reply.code(400).send({ error: validationMessage(update.error) });
+      }
+      if (
+        update.data.update.customLogoUrl &&
+        !['http:', 'https:'].includes(
+          new URL(update.data.update.customLogoUrl).protocol,
+        )
+      ) {
+        return reply
+          .code(400)
+          .send({ error: 'customLogoUrl must use HTTP or HTTPS' });
+      }
+      return sourceRepository.bulkUpdateChannels(
+        sourceId.data,
+        update.data.channelIds,
+        update.data.update,
+      );
+    },
+  );
+
+  app.get<{
+    Params: { sourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/sources/:sourceId/channel-review', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const sourceId = z.uuid().safeParse(request.params.sourceId);
+    const query = reconciliationReviewSchema.safeParse(request.query);
+    if (!sourceId.success) {
+      return reply.code(400).send({ error: 'sourceId must be a UUID' });
+    }
+    if (!query.success) {
+      return reply.code(400).send({ error: validationMessage(query.error) });
+    }
+    return sourceRepository.getReconciliationReview(
+      sourceId.data,
+      query.data.search,
+      query.data.limit,
+    );
+  });
+
+  app.post<{ Params: { sourceId: string; channelId: string } }>(
+    '/api/v1/sources/:sourceId/channels/:channelId/resolve',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const channelId = z.uuid().safeParse(request.params.channelId);
+      const match = manualMatchSchema.safeParse(request.body);
+      if (!sourceId.success || !channelId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and channelId must be UUIDs' });
+      }
+      if (!match.success) {
+        return reply.code(400).send({ error: validationMessage(match.error) });
+      }
+      try {
+        const channel = await sourceRepository.resolveChannelMatch(
+          sourceId.data,
+          channelId.data,
+          match.data.upstreamItemId,
+        );
+        if (!channel) {
+          return reply
+            .code(404)
+            .send({ error: 'Channel or provider entry not found' });
+        }
+        return { channel };
+      } catch (error) {
+        if (error instanceof ManualMatchConflictError) {
+          return reply.code(409).send({ error: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { sourceId: string; channelId: string } }>(
+    '/api/v1/sources/:sourceId/channels/:channelId/unlock-match',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const channelId = z.uuid().safeParse(request.params.channelId);
+      if (!sourceId.success || !channelId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and channelId must be UUIDs' });
+      }
+      const channel = await sourceRepository.unlockChannelMatch(
+        sourceId.data,
+        channelId.data,
+      );
+      if (!channel) return reply.code(404).send({ error: 'Channel not found' });
+      return { channel };
+    },
+  );
 
   app.patch<{ Params: { sourceId: string; channelId: string } }>(
     '/api/v1/sources/:sourceId/channels/:channelId',

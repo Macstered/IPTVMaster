@@ -36,6 +36,8 @@ Permanent channels store provider identity separately from snapshot-scoped upstr
 
 Hide/show, custom name, custom group, custom logo, and sort order are user-owned fields on the permanent channel and are not overwritten during reconciliation. Playlist publication joins the current upstream item to these fields, omits disabled channels, and applies the remaining event/group policies before serialization.
 
+The review API exposes missing and ambiguous permanent channels alongside unmatched current provider entries. A manual match retains the established channel row and its user-owned fields, locks the selected provider identity, and only displaces a completely untouched auto-created `new` channel. Displaced rows are archived rather than deleted, and manual match/unlock actions are written to an audit table. Bulk editing is intentionally limited to reversible visibility, group, and logo overrides.
+
 XMLTV follows the same bounded refresh model on an independent schedule. The SAX parser normalizes explicit XMLTV offsets to UTC, detects duplicate/invalid channel IDs, caps channel/programme counts, and does not apply the event-title timezone rule. A valid guide replaces its predecessor in one PostgreSQL transaction; an unchanged fingerprint skips replacement and a suspicious count drop retains the prior guide.
 
 ## Time handling

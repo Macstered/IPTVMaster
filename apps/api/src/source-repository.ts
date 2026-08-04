@@ -141,6 +141,43 @@ export interface UpdateChannelInput {
   sortOrder?: number;
 }
 
+export interface BulkUpdateChannelInput {
+  enabled?: boolean;
+  customGroup?: string | null;
+  customLogoUrl?: string | null;
+}
+
+export interface BulkUpdateChannelResult {
+  updatedCount: number;
+}
+
+export interface ReconciliationCandidate {
+  upstreamItemId: string;
+  providerName: string;
+  providerGroup: string;
+  tvgId?: string;
+  providerLogoUrl?: string;
+  linkedChannelId?: string;
+  linkedChannelStatus?: ChannelReconciliationStatus;
+}
+
+export interface ReconciliationReview {
+  unresolvedChannels: ChannelSummary[];
+  candidates: ReconciliationCandidate[];
+  ambiguousCount: number;
+  missingCount: number;
+  newCount: number;
+  candidateTotal: number;
+  truncated: boolean;
+}
+
+export class ManualMatchConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManualMatchConflictError';
+  }
+}
+
 export interface CreatedOutputProfile {
   id: string;
   name: string;
@@ -182,6 +219,25 @@ export interface SourceRepository {
     sourceId: string,
     channelId: string,
     input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null>;
+  bulkUpdateChannels(
+    sourceId: string,
+    channelIds: string[],
+    input: BulkUpdateChannelInput,
+  ): Promise<BulkUpdateChannelResult>;
+  getReconciliationReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<ReconciliationReview>;
+  resolveChannelMatch(
+    sourceId: string,
+    channelId: string,
+    upstreamItemId: string,
+  ): Promise<ChannelSummary | null>;
+  unlockChannelMatch(
+    sourceId: string,
+    channelId: string,
   ): Promise<ChannelSummary | null>;
   listOutputGroupPolicies(
     sourceId: string,
@@ -629,7 +685,8 @@ export class PostgresSourceRepository implements SourceRepository {
               c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order
        FROM source_snapshot s
        JOIN upstream_item i ON i.snapshot_id = s.id
-       LEFT JOIN channel c ON c.current_upstream_item_id = i.id
+       LEFT JOIN channel c
+         ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
          AND (c.id IS NULL OR c.enabled = TRUE)
        ORDER BY COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
@@ -972,6 +1029,7 @@ export class PostgresSourceRepository implements SourceRepository {
     const values: unknown[] = [sourceId];
     const conditions = [
       'c.source_id = $1',
+      'c.archived_at IS NULL',
       "COALESCE(p.behavior, 'permanent') = 'permanent'",
     ];
     if (filters.search) {
@@ -1042,7 +1100,7 @@ export class PostgresSourceRepository implements SourceRepository {
     const result = await this.#pool.query<ChannelRow>(
       `UPDATE channel
        SET ${updates.join(', ')}, updated_at = NOW()
-       WHERE source_id = $1 AND id = $2
+       WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
        RETURNING id, source_id, provider_name, provider_group, tvg_id,
                  provider_logo_url, enabled, custom_name, custom_group,
                  custom_logo_url, sort_order, match_locked, match_confidence,
@@ -1050,6 +1108,347 @@ export class PostgresSourceRepository implements SourceRepository {
       values,
     );
     return result.rows[0] ? toChannelSummary(result.rows[0]) : null;
+  }
+
+  async bulkUpdateChannels(
+    sourceId: string,
+    channelIds: string[],
+    input: BulkUpdateChannelInput,
+  ): Promise<BulkUpdateChannelResult> {
+    const values: unknown[] = [sourceId, channelIds];
+    const updates: string[] = [];
+    const addUpdate = (column: string, value: unknown) => {
+      values.push(value);
+      updates.push(`${column} = $${values.length}`);
+    };
+    if (input.enabled !== undefined) addUpdate('enabled', input.enabled);
+    if (input.customGroup !== undefined)
+      addUpdate('custom_group', input.customGroup);
+    if (input.customLogoUrl !== undefined)
+      addUpdate('custom_logo_url', input.customLogoUrl);
+    if (updates.length === 0) return { updatedCount: 0 };
+
+    const result = await this.#pool.query(
+      `UPDATE channel
+       SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE source_id = $1 AND id = ANY($2::uuid[])
+         AND archived_at IS NULL`,
+      values,
+    );
+    return { updatedCount: result.rowCount ?? 0 };
+  }
+
+  async getReconciliationReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<ReconciliationReview> {
+    const countsResult = await this.#pool.query<{
+      ambiguous_count: string | number;
+      missing_count: string | number;
+      new_count: string | number;
+    }>(
+      `SELECT COUNT(*) FILTER (
+                WHERE c.reconciliation_status = 'ambiguous'
+              ) AS ambiguous_count,
+              COUNT(*) FILTER (
+                WHERE c.reconciliation_status = 'missing'
+              ) AS missing_count,
+              COUNT(*) FILTER (
+                WHERE c.reconciliation_status = 'new'
+              ) AS new_count
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'`,
+      [sourceId],
+    );
+    const counts = countsResult.rows[0];
+    const ambiguousCount = Number(counts?.ambiguous_count ?? 0);
+    const missingCount = Number(counts?.missing_count ?? 0);
+    const newCount = Number(counts?.new_count ?? 0);
+
+    const channelValues: unknown[] = [sourceId];
+    let channelSearch = '';
+    if (search) {
+      channelValues.push(`%${search}%`);
+      channelSearch = `AND (
+        c.provider_name ILIKE $2 OR COALESCE(c.custom_name, '') ILIKE $2
+        OR c.provider_group ILIKE $2 OR COALESCE(c.tvg_id, '') ILIKE $2
+      )`;
+    }
+    channelValues.push(limit);
+    const unresolvedResult = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.source_id, c.provider_name, c.provider_group, c.tvg_id,
+              c.provider_logo_url, c.enabled, c.custom_name, c.custom_group,
+              c.custom_logo_url, c.sort_order, c.match_locked,
+              c.match_confidence, c.reconciliation_status, c.last_seen_at,
+              c.updated_at
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND c.reconciliation_status IN ('ambiguous', 'missing')
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         ${channelSearch}
+       ORDER BY c.reconciliation_status, c.provider_group, c.provider_name
+       LIMIT $${channelValues.length}`,
+      channelValues,
+    );
+
+    const candidateValues: unknown[] = [sourceId, limit];
+    const candidateResult = await this.#pool.query<{
+      upstream_item_id: string;
+      provider_name: string;
+      provider_group: string;
+      tvg_id: string | null;
+      provider_logo_url: string | null;
+      linked_channel_id: string | null;
+      linked_channel_status: ChannelReconciliationStatus | null;
+      total_count: string | number;
+    }>(
+      `SELECT i.id AS upstream_item_id, i.original_name AS provider_name,
+              i.provider_group, i.tvg_id, i.logo_url AS provider_logo_url,
+              linked.id AS linked_channel_id,
+              linked.reconciliation_status AS linked_channel_status,
+              COUNT(*) OVER() AS total_count
+       FROM source_snapshot s
+       JOIN upstream_item i ON i.snapshot_id = s.id
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+       LEFT JOIN channel linked
+         ON linked.current_upstream_item_id = i.id
+        AND linked.archived_at IS NULL
+       WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+         AND i.media_type = 'live'
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         AND (linked.id IS NULL OR linked.reconciliation_status = 'new')
+       ORDER BY i.provider_group, i.original_name, i.id
+       LIMIT $2`,
+      candidateValues,
+    );
+    const candidates = candidateResult.rows.map((row) => ({
+      upstreamItemId: row.upstream_item_id,
+      providerName: row.provider_name,
+      providerGroup: row.provider_group,
+      ...(row.tvg_id ? { tvgId: row.tvg_id } : {}),
+      ...(row.provider_logo_url
+        ? { providerLogoUrl: row.provider_logo_url }
+        : {}),
+      ...(row.linked_channel_id
+        ? { linkedChannelId: row.linked_channel_id }
+        : {}),
+      ...(row.linked_channel_status
+        ? { linkedChannelStatus: row.linked_channel_status }
+        : {}),
+    }));
+    const candidateTotal = Number(candidateResult.rows[0]?.total_count ?? 0);
+    return {
+      unresolvedChannels: unresolvedResult.rows.map(toChannelSummary),
+      candidates,
+      ambiguousCount,
+      missingCount,
+      newCount,
+      candidateTotal,
+      truncated:
+        ambiguousCount + missingCount > unresolvedResult.rows.length ||
+        candidateTotal > candidates.length,
+    };
+  }
+
+  async resolveChannelMatch(
+    sourceId: string,
+    channelId: string,
+    upstreamItemId: string,
+  ): Promise<ChannelSummary | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const targetResult = await client.query<ChannelRow>(
+        `SELECT id, source_id, provider_name, provider_group, tvg_id,
+                provider_logo_url, enabled, custom_name, custom_group,
+                custom_logo_url, sort_order, match_locked, match_confidence,
+                reconciliation_status, last_seen_at, updated_at
+         FROM channel
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         FOR UPDATE`,
+        [sourceId, channelId],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (!['ambiguous', 'missing'].includes(target.reconciliation_status)) {
+        throw new ManualMatchConflictError(
+          'Only ambiguous or missing channels can be matched manually',
+        );
+      }
+
+      const itemResult = await client.query<{
+        id: string;
+        provider_stream_id: string | null;
+        tvg_id: string | null;
+        provider_name: string;
+        provider_group: string;
+        provider_logo_url: string | null;
+      }>(
+        `SELECT i.id, i.provider_stream_id, i.tvg_id,
+                i.original_name AS provider_name, i.provider_group,
+                i.logo_url AS provider_logo_url
+         FROM source_snapshot s
+         JOIN upstream_item i ON i.snapshot_id = s.id
+         LEFT JOIN group_policy p
+           ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+         WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+           AND i.id = $2 AND i.media_type = 'live'
+           AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         FOR UPDATE OF i`,
+        [sourceId, upstreamItemId],
+      );
+      const item = itemResult.rows[0];
+      if (!item) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      const occupantResult = await client.query<
+        ChannelRow & { current_upstream_item_id: string | null }
+      >(
+        `SELECT id, source_id, provider_name, provider_group, tvg_id,
+                provider_logo_url, enabled, custom_name, custom_group,
+                custom_logo_url, sort_order, match_locked, match_confidence,
+                reconciliation_status, last_seen_at, updated_at,
+                current_upstream_item_id
+         FROM channel
+         WHERE source_id = $1 AND current_upstream_item_id = $2
+           AND archived_at IS NULL
+         FOR UPDATE`,
+        [sourceId, upstreamItemId],
+      );
+      const occupant = occupantResult.rows[0];
+      let displacedChannelId: string | null = null;
+      if (occupant && occupant.id !== channelId) {
+        const isUntouchedNewChannel =
+          occupant.reconciliation_status === 'new' &&
+          occupant.enabled &&
+          !occupant.custom_name &&
+          !occupant.custom_group &&
+          !occupant.custom_logo_url &&
+          !occupant.match_locked;
+        if (!isUntouchedNewChannel) {
+          throw new ManualMatchConflictError(
+            'The selected provider entry is already attached to an edited channel',
+          );
+        }
+        displacedChannelId = occupant.id;
+        await client.query(
+          `UPDATE channel
+           SET current_upstream_item_id = NULL, archived_at = NOW(),
+               reconciliation_status = 'missing', updated_at = NOW()
+           WHERE id = $1`,
+          [occupant.id],
+        );
+      }
+
+      const savedResult = await client.query<ChannelRow>(
+        `UPDATE channel
+         SET current_upstream_item_id = $3,
+             provider_stream_id = $4,
+             tvg_id = $5,
+             provider_name = $6,
+             provider_group = $7,
+             provider_logo_url = $8,
+             match_locked = TRUE,
+             match_confidence = 1,
+             reconciliation_status = 'matched',
+             last_seen_at = NOW(),
+             updated_at = NOW()
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         RETURNING id, source_id, provider_name, provider_group, tvg_id,
+                   provider_logo_url, enabled, custom_name, custom_group,
+                   custom_logo_url, sort_order, match_locked, match_confidence,
+                   reconciliation_status, last_seen_at, updated_at`,
+        [
+          sourceId,
+          channelId,
+          item.id,
+          item.provider_stream_id,
+          item.tvg_id,
+          item.provider_name,
+          item.provider_group,
+          item.provider_logo_url,
+        ],
+      );
+      const saved = savedResult.rows[0];
+      if (!saved) throw new Error('Manual channel match was not persisted');
+      await client.query(
+        `INSERT INTO channel_match_audit
+          (source_id, channel_id, displaced_channel_id, upstream_item_id,
+           action, details)
+         VALUES ($1, $2, $3, $4, 'manual-match', $5::jsonb)`,
+        [
+          sourceId,
+          channelId,
+          displacedChannelId,
+          upstreamItemId,
+          JSON.stringify({
+            previousProviderName: target.provider_name,
+            providerName: item.provider_name,
+            providerGroup: item.provider_group,
+          }),
+        ],
+      );
+      await client.query('COMMIT');
+      return toChannelSummary(saved);
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async unlockChannelMatch(
+    sourceId: string,
+    channelId: string,
+  ): Promise<ChannelSummary | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<
+        ChannelRow & { current_upstream_item_id: string | null }
+      >(
+        `UPDATE channel
+         SET match_locked = FALSE, updated_at = NOW()
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         RETURNING id, source_id, provider_name, provider_group, tvg_id,
+                   provider_logo_url, enabled, custom_name, custom_group,
+                   custom_logo_url, sort_order, match_locked, match_confidence,
+                   reconciliation_status, last_seen_at, updated_at,
+                   current_upstream_item_id`,
+        [sourceId, channelId],
+      );
+      const channel = result.rows[0];
+      if (!channel) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      await client.query(
+        `INSERT INTO channel_match_audit
+          (source_id, channel_id, upstream_item_id, action)
+         VALUES ($1, $2, $3, 'manual-unlock')`,
+        [sourceId, channelId, channel.current_upstream_item_id],
+      );
+      await client.query('COMMIT');
+      return toChannelSummary(channel);
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listOutputGroupPolicies(
@@ -1167,6 +1566,7 @@ export class PostgresSourceRepository implements SourceRepository {
        LEFT JOIN group_policy p
          ON p.source_id = c.source_id AND p.provider_group = c.provider_group
        WHERE c.source_id = $1
+         AND c.archived_at IS NULL
          AND COALESCE(p.behavior, 'permanent') = 'permanent'`,
       [sourceId],
     );
@@ -1219,7 +1619,7 @@ export class PostgresSourceRepository implements SourceRepository {
            reconciliation_status = 'missing',
            match_confidence = NULL,
            updated_at = NOW()
-       WHERE source_id = $1`,
+       WHERE source_id = $1 AND archived_at IS NULL`,
       [sourceId],
     );
 
