@@ -117,12 +117,9 @@ export function SourceSetup() {
     setImportSummary(null);
     setError(null);
     try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/preview-import`,
-        {
-          method: 'POST',
-        },
-      );
+      const response = await fetch(`/api/v1/sources/${source.id}/import`, {
+        method: 'POST',
+      });
       const payload = await readJson<{ summary: ImportSummary }>(response);
       setImportSummary(payload.summary);
     } catch (caught) {
@@ -225,8 +222,8 @@ export function SourceSetup() {
                 onClick={() => void inspectSource(source)}
               >
                 {inspectingId === source.id
-                  ? 'Inspecting…'
-                  : 'Inspect live playlist'}
+                  ? 'Importing…'
+                  : 'Import live playlist'}
               </button>
             </article>
           ))}

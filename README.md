@@ -13,6 +13,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Event-title timezone localization using IANA timezones.
 - AES-256-GCM encrypted provider source storage in PostgreSQL.
 - A live-only remote playlist inspection flow with bounded streaming downloads.
+- Transactional last-known-good snapshots with encrypted stream URLs and unchanged-feed detection.
 - A small API and browser UI for source setup and validating conversions.
 - Docker and Proxmox-oriented deployment scaffolding.
 

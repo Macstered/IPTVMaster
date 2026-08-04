@@ -26,7 +26,7 @@ Imports use a staging-and-promote workflow:
 6. Validate the generated M3U/XMLTV.
 7. Atomically promote database and artifacts.
 
-Provider downloads are not retained after successful parsing. Stream URL fields are treated as secrets and never returned in ordinary API responses.
+Provider downloads are not retained after successful parsing. Stream URL fields are encrypted individually before snapshot persistence and never returned in ordinary API responses. A fingerprint prevents identical refreshes from duplicating snapshot data, while a partial or failed transaction leaves the previous last-known-good snapshot active.
 
 ## Time handling
 

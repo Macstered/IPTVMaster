@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { PlaylistInspection } from '@iptvmaster/core';
+import {
+  SnapshotRejectedError,
+  type M3uEntry,
+  type PlaylistInspection,
+} from '@iptvmaster/core';
 
 import { buildApp } from './app.js';
 import type {
@@ -8,6 +12,7 @@ import type {
   SafeSource,
   SourceCredentials,
   SourceRepository,
+  StoredSnapshotSummary,
 } from './source-repository.js';
 
 const applications: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -22,6 +27,7 @@ function syntheticProviderUrl(path: string): string {
 class MemorySourceRepository implements SourceRepository {
   readonly inputs: CreateSourceInput[] = [];
   readonly sources: SafeSource[] = [];
+  latestEntries: M3uEntry[] = [];
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -46,6 +52,33 @@ class MemorySourceRepository implements SourceRepository {
 
   async getSourceCredentials(): Promise<SourceCredentials | null> {
     return this.inputs[0]?.credentials ?? null;
+  }
+
+  async savePlaylistSnapshot(
+    sourceId: string,
+    inspection: PlaylistInspection,
+  ): Promise<StoredSnapshotSummary> {
+    this.latestEntries = inspection.entries;
+    return {
+      id: '00000000-0000-4000-8000-000000000002',
+      sourceId,
+      fingerprint: inspection.fingerprint,
+      importedAt: '2026-08-04T00:00:00.000Z',
+      liveCount: inspection.entries.length,
+      skippedEntries: inspection.skippedEntries,
+      issueCount: inspection.issues.length,
+      unchanged: false,
+    };
+  }
+
+  async getLatestPlaylistEntries(): Promise<M3uEntry[]> {
+    return this.latestEntries;
+  }
+}
+
+class RejectingSourceRepository extends MemorySourceRepository {
+  override async savePlaylistSnapshot(): Promise<StoredSnapshotSummary> {
+    throw new SnapshotRejectedError('Synthetic suspicious count drop');
   }
 }
 
@@ -193,5 +226,79 @@ describe('IPTVMaster API', () => {
     expect(response.json().summary).toEqual(
       expect.objectContaining({ retainedLiveEntries: 1, skippedEntries: 2 }),
     );
+  });
+
+  it('stores a validated import as the latest snapshot', async () => {
+    const repository = new MemorySourceRepository();
+    await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const inspection: PlaylistInspection = {
+      fingerprint: 'b'.repeat(64),
+      totalBytes: 80,
+      entries: [
+        {
+          duration: -1,
+          attributes: { 'group-title': 'Finland' },
+          name: 'Yle TV1',
+          url: 'http://provider.test/synthetic/1',
+          mediaType: 'live',
+          lineNumber: 2,
+        },
+      ],
+      issues: [],
+      mediaCounts: { live: 1, vod: 0, series: 0, unknown: 0 },
+      skippedEntries: 0,
+    };
+    const app = await buildApp({
+      sourceRepository: repository,
+      playlistInspector: async () => inspection,
+    });
+    applications.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources/00000000-0000-4000-8000-000000000001/import',
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().snapshot).toEqual(
+      expect.objectContaining({ liveCount: 1, unchanged: false }),
+    );
+    expect(repository.latestEntries).toHaveLength(1);
+  });
+
+  it('reports a rejected snapshot without promoting it', async () => {
+    const repository = new RejectingSourceRepository();
+    await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const app = await buildApp({
+      sourceRepository: repository,
+      playlistInspector: async () => ({
+        fingerprint: 'e'.repeat(64),
+        totalBytes: 20,
+        entries: [],
+        issues: [],
+        mediaCounts: { live: 0, vod: 0, series: 0, unknown: 0 },
+        skippedEntries: 0,
+      }),
+    });
+    applications.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources/00000000-0000-4000-8000-000000000001/import',
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().error).toContain('suspicious count drop');
+    expect(repository.latestEntries).toHaveLength(0);
   });
 });

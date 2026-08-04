@@ -6,6 +6,7 @@ import {
   localizeEventName,
   parseM3uText,
   redactStreamUrl,
+  SnapshotRejectedError,
   type EventGroupPolicy,
   type M3uEntry,
   type PlaylistInspection,
@@ -18,6 +19,7 @@ import { z } from 'zod';
 import {
   PostgresSourceRepository,
   type SourceRepository,
+  type StoredSnapshotSummary,
 } from './source-repository.js';
 
 const timePolicySchema = z.object({
@@ -202,6 +204,51 @@ export async function buildApp(
         entries: inspection.entries.slice(0, 200).map(safeEntry),
         truncated: inspection.entries.length > 200,
       };
+    },
+  );
+
+  app.post<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/import',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      const credentials = await sourceRepository.getSourceCredentials(
+        sourceId.data,
+      );
+      if (!credentials)
+        return reply.code(404).send({ error: 'Source not found' });
+
+      const inspection = await playlistInspector(credentials.playlistUrl);
+      let snapshot: StoredSnapshotSummary;
+      try {
+        snapshot = await sourceRepository.savePlaylistSnapshot(
+          sourceId.data,
+          inspection,
+        );
+      } catch (error) {
+        if (error instanceof SnapshotRejectedError) {
+          return reply.code(422).send({ error: error.message });
+        }
+        throw error;
+      }
+      return reply.code(snapshot.unchanged ? 200 : 201).send({
+        snapshot,
+        summary: {
+          fingerprint: inspection.fingerprint,
+          totalBytes: inspection.totalBytes,
+          retainedLiveEntries: inspection.entries.length,
+          skippedEntries: inspection.skippedEntries,
+          mediaCounts: inspection.mediaCounts,
+          issues: inspection.issues.length,
+        },
+      });
     },
   );
 
