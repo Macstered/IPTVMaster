@@ -153,6 +153,20 @@ const manualMatchSchema = z.object({
   upstreamItemId: z.uuid(),
 });
 
+const epgMappingReviewSchema = z.object({
+  search: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+});
+
+const epgChannelSearchSchema = z.object({
+  search: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+const manualEpgMappingSchema = z.object({
+  epgChannelId: z.string().trim().min(1).max(500),
+});
+
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
   playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
@@ -848,6 +862,115 @@ export async function buildApp(
       );
       if (!channel) return reply.code(404).send({ error: 'Channel not found' });
       return { channel };
+    },
+  );
+
+  app.get<{
+    Params: { sourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/sources/:sourceId/epg-mappings', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const sourceId = z.uuid().safeParse(request.params.sourceId);
+    const query = epgMappingReviewSchema.safeParse(request.query);
+    if (!sourceId.success) {
+      return reply.code(400).send({ error: 'sourceId must be a UUID' });
+    }
+    if (!query.success) {
+      return reply.code(400).send({ error: validationMessage(query.error) });
+    }
+    return sourceRepository.getEpgMappingReview(
+      sourceId.data,
+      query.data.search,
+      query.data.limit,
+    );
+  });
+
+  app.get<{
+    Params: { sourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/sources/:sourceId/epg-channels', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const sourceId = z.uuid().safeParse(request.params.sourceId);
+    const query = epgChannelSearchSchema.safeParse(request.query);
+    if (!sourceId.success) {
+      return reply.code(400).send({ error: 'sourceId must be a UUID' });
+    }
+    if (!query.success) {
+      return reply.code(400).send({ error: validationMessage(query.error) });
+    }
+    return sourceRepository.searchEpgChannels(
+      sourceId.data,
+      query.data.search,
+      query.data.limit,
+    );
+  });
+
+  app.put<{ Params: { sourceId: string; channelId: string } }>(
+    '/api/v1/sources/:sourceId/channels/:channelId/epg-mapping',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const channelId = z.uuid().safeParse(request.params.channelId);
+      const mapping = manualEpgMappingSchema.safeParse(request.body);
+      if (!sourceId.success || !channelId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and channelId must be UUIDs' });
+      }
+      if (!mapping.success) {
+        return reply
+          .code(400)
+          .send({ error: validationMessage(mapping.error) });
+      }
+      const saved = await sourceRepository.saveManualEpgMapping(
+        sourceId.data,
+        channelId.data,
+        mapping.data.epgChannelId,
+      );
+      if (!saved) {
+        return reply
+          .code(404)
+          .send({ error: 'Playlist or EPG channel not found' });
+      }
+      return { saved: true };
+    },
+  );
+
+  app.delete<{ Params: { sourceId: string; channelId: string } }>(
+    '/api/v1/sources/:sourceId/channels/:channelId/epg-mapping',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const channelId = z.uuid().safeParse(request.params.channelId);
+      if (!sourceId.success || !channelId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and channelId must be UUIDs' });
+      }
+      const unlocked = await sourceRepository.unlockEpgMapping(
+        sourceId.data,
+        channelId.data,
+      );
+      if (!unlocked) {
+        return reply.code(404).send({ error: 'Locked EPG mapping not found' });
+      }
+      return reply.code(204).send();
     },
   );
 

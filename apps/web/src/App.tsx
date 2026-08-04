@@ -90,8 +90,8 @@ export function App() {
           <a className="nav-link" href="#events">
             <span>◷</span> Live events <em>ready</em>
           </a>
-          <a className="nav-link muted" href="#guide">
-            <span>▦</span> EPG mappings <em>soon</em>
+          <a className="nav-link" href="#epg-mappings">
+            <span>▦</span> EPG mappings <em>ready</em>
           </a>
         </nav>
 
@@ -244,25 +244,32 @@ export function App() {
                   <small>Live and VOD classification</small>
                 </div>
               </li>
-              <li className="active">
+              <li className="done">
                 <span>3</span>
                 <div>
                   <strong>Event policies</strong>
                   <small>Timezone and placeholder rules</small>
                 </div>
               </li>
-              <li>
+              <li className="done">
                 <span>4</span>
                 <div>
                   <strong>Persistent editor</strong>
                   <small>Database and channel overrides</small>
                 </div>
               </li>
-              <li>
+              <li className="done">
                 <span>5</span>
                 <div>
                   <strong>TiviMate output</strong>
                   <small>Stable M3U and XMLTV endpoints</small>
+                </div>
+              </li>
+              <li className="active">
+                <span>6</span>
+                <div>
+                  <strong>EPG reconciliation</strong>
+                  <small>Coverage review and persistent locks</small>
                 </div>
               </li>
             </ol>

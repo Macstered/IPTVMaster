@@ -44,6 +44,8 @@ Event groups are evaluated dynamically from the current snapshot and their persi
 
 XMLTV follows the same bounded refresh model on an independent schedule. The SAX parser normalizes explicit XMLTV offsets to UTC, detects duplicate/invalid channel IDs, caps channel/programme counts, and does not apply the event-title timezone rule. A valid guide replaces its predecessor in one PostgreSQL transaction; an unchanged fingerprint skips replacement and a suspicious count drop retains the prior guide.
 
+EPG reconciliation runs after playlist, group-policy, channel-edit, and XMLTV changes. Exact TVG IDs take priority, followed by a unique normalized display-name match; duplicate candidates remain ambiguous instead of being guessed. Manual mappings store the provider's stable XMLTV channel ID separately from the replaceable `epg_channel` row, so a full guide refresh can reconnect the lock transactionally. Published M3U entries receive the canonical mapped `tvg-id`, while XMLTV IDs remain provider-native. Manual map/unlock actions are audited and exposed in source activity.
+
 ## Time handling
 
 All instants are stored as UTC. Provider source and output display zones are stored as IANA timezone names. Event-title localization is applied through selected event-group policies and never as a global EPG offset.

@@ -17,6 +17,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Retained playlist history with two-step restoration, automatic reactivation on a later provider refresh, and a user-visible activity trail.
 - Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
 - An event-rule editor and review that show provider/Finnish labels side by side, expose parse warnings and placeholders, and order each event group by calculated Finnish start time.
+- Persistent EPG reconciliation that pairs exact TVG IDs and unique normalized names automatically, reports missing/ambiguous coverage, and supports audited manual XMLTV locks that survive guide refreshes.
 - Persistent permanent-channel reconciliation using provider IDs, TVG IDs, and normalized name/group fallbacks, with ambiguous matches left unresolved.
 - A searchable channel editor for hide/show, rename, regroup, logo, and ordering overrides, including bulk visibility and group actions.
 - A provider-change review queue for missing or ambiguous permanent channels, with conservative manual matching, match locks, and an audit trail.
@@ -73,8 +74,9 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 5. Search the permanent-channel list and apply individual or bulk visibility/group overrides. Name, group, logo, and order edits are retained when a later provider snapshot can be matched safely.
 6. If a refresh reports missing or ambiguous channels, use the provider-change review to choose a current provider entry. The original channel identity and edits are preserved and the manual match is locked until explicitly unlocked.
 7. Review update history after imports. If an accepted provider playlist is bad, restore a retained snapshot; current channel overrides are reconciled against it and the action is audited.
-8. Create the TiviMate URLs and copy both the M3U playlist and XMLTV EPG addresses immediately. Only the shared token's SHA-256 hash is stored, so the complete URLs cannot be shown again later.
-9. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
+8. Review EPG mappings. Safe exact-ID/name matches are automatic; search the XMLTV channel list and lock a manual choice only for missing or ambiguous channels.
+9. Create the TiviMate URLs and copy both the M3U playlist and XMLTV EPG addresses immediately. Only the shared token's SHA-256 hash is stored, so the complete URLs cannot be shown again later.
+10. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
 
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 

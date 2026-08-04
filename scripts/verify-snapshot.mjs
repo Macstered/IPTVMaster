@@ -240,7 +240,27 @@ try {
     issuesTruncated: false,
   };
   const firstEpg = await repository.saveEpgSnapshot(source.id, epgInspection);
+  const epgReviewBefore = await repository.getEpgMappingReview(
+    source.id,
+    undefined,
+    100,
+  );
+  const manualEpgSaved = await repository.saveManualEpgMapping(
+    source.id,
+    reviewChannel.id,
+    'synthetic.yle1',
+  );
+  const mappedEntries = await repository.getLatestPlaylistEntries(source.id);
   const secondEpg = await repository.saveEpgSnapshot(source.id, epgInspection);
+  const refreshedEpg = await repository.saveEpgSnapshot(source.id, {
+    ...epgInspection,
+    fingerprint: '9'.repeat(64),
+  });
+  const epgReviewAfterRefresh = await repository.getEpgMappingReview(
+    source.id,
+    undefined,
+    100,
+  );
   const guide = await repository.getLatestEpg(source.id);
   const profile = await repository.createOutputProfile(
     source.id,
@@ -261,6 +281,16 @@ try {
   const publishedEpg = publishedEpgResponse
     ? await publishedEpgResponse.text()
     : '';
+  const epgHistory = await repository.listSourceHistory(source.id, 50);
+  const manualEpgUnlocked = await repository.unlockEpgMapping(
+    source.id,
+    reviewChannel.id,
+  );
+  const epgReviewAfterUnlock = await repository.getEpgMappingReview(
+    source.id,
+    undefined,
+    100,
+  );
   const revoked = await repository.revokeOutputProfile(profile.id);
   const revokedProfile = await repository.resolveOutputProfile(
     profile.accessToken,
@@ -330,9 +360,24 @@ try {
       (publishedResponse.ok && publishedOutput.includes('18:00 Tennis 8/4')),
     firstEpgUnchanged: firstEpg.unchanged,
     secondEpgUnchanged: secondEpg.unchanged,
+    refreshedEpgImported: !refreshedEpg.unchanged,
     epgRoundTrip:
       guide.channels.length === 1 &&
       guide.programmes[0]?.title === 'Synthetic news',
+    epgMissingDetected:
+      epgReviewBefore.missingCount === 1 && epgReviewBefore.matchedCount === 0,
+    manualEpgMappingPublished:
+      manualEpgSaved &&
+      mappedEntries[0]?.attributes['tvg-id'] === 'synthetic.yle1' &&
+      publishedOutput.includes('tvg-id="synthetic.yle1"'),
+    manualEpgMappingSurvivedRefresh:
+      epgReviewAfterRefresh.matchedCount === 1 &&
+      epgReviewAfterRefresh.manualCount === 1,
+    epgMappingAudited: epgHistory.activity.some(
+      (activity) => activity.kind === 'manual-epg-map',
+    ),
+    manualEpgMappingUnlocked:
+      manualEpgUnlocked && epgReviewAfterUnlock.missingCount === 1,
     publishedEpgEndpointOk:
       publishedEpgResponse === undefined ||
       (publishedEpgResponse.ok && publishedEpg.includes('Synthetic news')),
@@ -368,7 +413,13 @@ try {
     !report.outputTokenResolves ||
     !report.publishedEndpointOk ||
     !report.secondEpgUnchanged ||
+    !report.refreshedEpgImported ||
     !report.epgRoundTrip ||
+    !report.epgMissingDetected ||
+    !report.manualEpgMappingPublished ||
+    !report.manualEpgMappingSurvivedRefresh ||
+    !report.epgMappingAudited ||
+    !report.manualEpgMappingUnlocked ||
     !report.publishedEpgEndpointOk ||
     !report.outputTokenRevoked
   ) {

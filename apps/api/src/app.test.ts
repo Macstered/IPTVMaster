@@ -56,6 +56,7 @@ class MemorySourceRepository implements SourceRepository {
   snapshots: SnapshotHistoryItem[] = [];
   activity: SourceActivityEvent[] = [];
   snapshotEntries = new Map<string, M3uEntry[]>();
+  epgMappings = new Map<string, string>();
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -433,6 +434,124 @@ class MemorySourceRepository implements SourceRepository {
     if (!channel) return null;
     channel.matchLocked = false;
     return channel;
+  }
+
+  async getEpgMappingReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ) {
+    const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const mappings = this.channels
+      .filter(
+        (channel) =>
+          channel.sourceId === sourceId &&
+          (!normalizedSearch ||
+            [channel.providerName, channel.providerGroup, channel.tvgId ?? '']
+              .join(' ')
+              .toLocaleLowerCase()
+              .includes(normalizedSearch)),
+      )
+      .map((channel) => {
+        const manualId = this.epgMappings.get(channel.id);
+        const candidates = this.latestEpg.channels.filter(
+          (guide) =>
+            (manualId && guide.id === manualId) ||
+            (!manualId &&
+              ((channel.tvgId && guide.id === channel.tvgId) ||
+                guide.displayName.toLocaleLowerCase() ===
+                  channel.providerName
+                    .replace(/\s+(?:hd|fhd|uhd|4k)$/iu, '')
+                    .toLocaleLowerCase())),
+        );
+        const selected = candidates.length === 1 ? candidates[0] : undefined;
+        return {
+          channelId: channel.id,
+          channelName: channel.customName ?? channel.providerName,
+          providerGroup: channel.providerGroup,
+          ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
+          status: selected
+            ? ('matched' as const)
+            : candidates.length > 1
+              ? ('ambiguous' as const)
+              : ('missing' as const),
+          manuallyLocked: manualId !== undefined,
+          ...(selected
+            ? {
+                epgChannelId: selected.id,
+                epgDisplayName: selected.displayName,
+                confidence: manualId || channel.tvgId ? 1 : 0.85,
+              }
+            : manualId
+              ? { epgChannelId: manualId }
+              : {}),
+          candidateIds: candidates.map((candidate) => candidate.id),
+        };
+      });
+    return {
+      mappings: mappings.slice(0, limit),
+      matchedCount: mappings.filter((mapping) => mapping.status === 'matched')
+        .length,
+      missingCount: mappings.filter((mapping) => mapping.status === 'missing')
+        .length,
+      ambiguousCount: mappings.filter(
+        (mapping) => mapping.status === 'ambiguous',
+      ).length,
+      manualCount: mappings.filter((mapping) => mapping.manuallyLocked).length,
+      total: mappings.length,
+      truncated: mappings.length > limit,
+    };
+  }
+
+  async searchEpgChannels(
+    _sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ) {
+    const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const channels = this.latestEpg.channels.filter(
+      (channel) =>
+        !normalizedSearch ||
+        [channel.id, channel.displayName].some((value) =>
+          value.toLocaleLowerCase().includes(normalizedSearch),
+        ),
+    );
+    return {
+      channels: channels.slice(0, limit),
+      total: channels.length,
+      truncated: channels.length > limit,
+    };
+  }
+
+  async saveManualEpgMapping(
+    sourceId: string,
+    channelId: string,
+    epgChannelId: string,
+  ): Promise<boolean> {
+    if (
+      !this.channels.some(
+        (channel) => channel.sourceId === sourceId && channel.id === channelId,
+      ) ||
+      !this.latestEpg.channels.some((channel) => channel.id === epgChannelId)
+    ) {
+      return false;
+    }
+    this.epgMappings.set(channelId, epgChannelId);
+    return true;
+  }
+
+  async unlockEpgMapping(
+    sourceId: string,
+    channelId: string,
+  ): Promise<boolean> {
+    if (
+      !this.channels.some(
+        (channel) => channel.sourceId === sourceId && channel.id === channelId,
+      )
+    ) {
+      return false;
+    }
+    return this.epgMappings.delete(channelId);
   }
 
   async createOutputProfile(
@@ -939,6 +1058,81 @@ describe('IPTVMaster API', () => {
         customGroup: 'Reviewed channels',
       }),
     );
+  });
+
+  it('reviews, locks, searches, and unlocks EPG mappings', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const channelId = '00000000-0000-4000-8000-000000000021';
+    repository.channels = [
+      {
+        id: channelId,
+        sourceId: source.id,
+        providerName: 'YLE Primary',
+        providerGroup: 'Finland',
+        tvgId: 'wrong-id',
+        enabled: true,
+        sortOrder: 1,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    repository.latestEpg = {
+      channels: [{ id: 'yle1.fi', displayName: 'Yle TV1' }],
+      programmes: [],
+    };
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const initialReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    const guideSearch = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-channels?search=yle`,
+    });
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}/epg-mapping`,
+      payload: { epgChannelId: 'yle1.fi' },
+    });
+    const lockedReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    const unlockResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}/epg-mapping`,
+    });
+
+    expect(initialReview.statusCode).toBe(200);
+    expect(initialReview.json()).toEqual(
+      expect.objectContaining({ missingCount: 1, matchedCount: 0 }),
+    );
+    expect(guideSearch.statusCode).toBe(200);
+    expect(guideSearch.json().channels).toEqual([
+      expect.objectContaining({ id: 'yle1.fi', displayName: 'Yle TV1' }),
+    ]);
+    expect(saveResponse.statusCode).toBe(200);
+    expect(lockedReview.json()).toEqual(
+      expect.objectContaining({ matchedCount: 1, manualCount: 1 }),
+    );
+    expect(lockedReview.json().mappings[0]).toEqual(
+      expect.objectContaining({
+        channelId,
+        epgChannelId: 'yle1.fi',
+        manuallyLocked: true,
+      }),
+    );
+    expect(unlockResponse.statusCode).toBe(204);
   });
 
   it('publishes a token-protected M3U with event policies applied', async () => {
