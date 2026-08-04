@@ -60,4 +60,23 @@ describe('output group policies', () => {
     expect(result.entries.map((value) => value.name)).toEqual(['Yle TV1']);
     expect(result.hiddenEntries).toBe(1);
   });
+
+  it('sorts each event group by its localized start while preserving other slots', () => {
+    const result = applyOutputGroupPolicies(
+      [
+        entry('20:00 Late match 8/4', 'MTV Urheilu Events FI'),
+        entry('Yle TV1', 'Finland'),
+        entry('17:00 Early match 8/4', 'MTV Urheilu Events FI'),
+        entry('Schedule pending', 'MTV Urheilu Events FI'),
+      ],
+      policies,
+    );
+
+    expect(result.entries.map((value) => value.name)).toEqual([
+      '18:00 Early match 8/4',
+      'Yle TV1',
+      '21:00 Late match 8/4',
+      'Schedule pending',
+    ]);
+  });
 });

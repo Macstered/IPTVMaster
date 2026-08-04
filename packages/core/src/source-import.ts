@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
 import { parseM3u } from './m3u.js';
+import { ProviderHttpError } from './provider-error.js';
 import type { M3uEntry, M3uParseIssue, MediaType } from './types.js';
 
 export interface PlaylistInspection {
@@ -68,7 +69,7 @@ export async function inspectRemotePlaylist(
   });
 
   if (!response.ok) {
-    throw new Error(`Provider returned HTTP ${response.status}`);
+    throw new ProviderHttpError(response.status);
   }
 
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { PlaylistInspection } from '@iptvmaster/core';
+import { ProviderHttpError, type PlaylistInspection } from '@iptvmaster/core';
 
 import {
   PlaylistRefreshCoordinator,
@@ -42,7 +42,7 @@ function inspection(): PlaylistInspection {
 function repository(
   overrides: Partial<SourceRepository> = {},
 ): SourceRepository {
-  return {
+  const base: SourceRepository = {
     createSource: vi.fn(),
     listSources: vi.fn(async () => [source()]),
     getSourceCredentials: vi.fn(async (): Promise<SourceCredentials> => ({
@@ -58,17 +58,54 @@ function repository(
       issueCount: 0,
       unchanged: false,
     })),
+    listSourceHistory: vi.fn(async () => ({ snapshots: [], activity: [] })),
+    activateSnapshot: vi.fn(async () => null),
     saveEpgSnapshot: vi.fn(),
     getLatestEpg: vi.fn(async () => ({ channels: [], programmes: [] })),
     getLatestPlaylistEntries: vi.fn(async () => []),
     listGroups: vi.fn(async () => []),
     saveGroupPolicy: vi.fn(),
+    listChannels: vi.fn(async (_sourceId, filters) => ({
+      channels: [],
+      total: 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    })),
+    updateChannel: vi.fn(async () => null),
+    bulkUpdateChannels: vi.fn(async () => ({ updatedCount: 0 })),
+    getReconciliationReview: vi.fn(async () => ({
+      unresolvedChannels: [],
+      candidates: [],
+      ambiguousCount: 0,
+      missingCount: 0,
+      newCount: 0,
+      candidateTotal: 0,
+      truncated: false,
+    })),
+    resolveChannelMatch: vi.fn(async () => null),
+    unlockChannelMatch: vi.fn(async () => null),
+    getEpgMappingReview: vi.fn(async () => ({
+      mappings: [],
+      matchedCount: 0,
+      missingCount: 0,
+      ambiguousCount: 0,
+      manualCount: 0,
+      total: 0,
+      truncated: false,
+    })),
+    searchEpgChannels: vi.fn(async () => ({
+      channels: [],
+      total: 0,
+      truncated: false,
+    })),
+    saveManualEpgMapping: vi.fn(async () => false),
+    unlockEpgMapping: vi.fn(async () => false),
     listOutputGroupPolicies: vi.fn(async () => []),
     createOutputProfile: vi.fn(),
     resolveOutputProfile: vi.fn(async () => null),
     revokeOutputProfile: vi.fn(async () => false),
-    ...overrides,
   };
+  return Object.assign(base, overrides);
 }
 
 describe('playlist refresh automation', () => {
@@ -118,6 +155,25 @@ describe('playlist refresh automation', () => {
       }),
     );
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient provider failure before saving once', async () => {
+    const data = repository();
+    const inspector = vi
+      .fn<() => Promise<PlaylistInspection>>()
+      .mockRejectedValueOnce(new ProviderHttpError(503))
+      .mockResolvedValue(inspection());
+    const coordinator = new PlaylistRefreshCoordinator(data, inspector, {
+      maxAttempts: 3,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    const result = await coordinator.refresh(source().id);
+
+    expect(result.attempts).toBe(2);
+    expect(inspector).toHaveBeenCalledTimes(2);
+    expect(data.savePlaylistSnapshot).toHaveBeenCalledTimes(1);
+    expect(coordinator.listStates()[0]?.attempts).toBe(2);
   });
 
   it('redacts provider URLs and credential query values from errors', () => {

@@ -28,7 +28,12 @@ function displayInstant(value: string | undefined, timeZone: string): string {
   }).format(new Date(value));
 }
 
-export function App() {
+interface AppProps {
+  authUsername?: string;
+  onLogout?: () => void;
+}
+
+export function App({ authUsername, onLogout }: AppProps) {
   const [name, setName] = useState(initialEvent);
   const [referenceDate, setReferenceDate] = useState('2026-08-04');
   const [result, setResult] = useState<PreviewResult | null>(null);
@@ -81,23 +86,31 @@ export function App() {
           <a className="nav-link active" href="#dashboard">
             <span>⌂</span> Dashboard
           </a>
-          <a className="nav-link muted" href="#channels">
-            <span>▤</span> Channels <em>soon</em>
+          <a className="nav-link" href="#channels">
+            <span>▤</span> Channels <em>ready</em>
           </a>
-          <a className="nav-link muted" href="#events">
-            <span>◷</span> Live events <em>soon</em>
+          <a className="nav-link" href="#updates">
+            <span>↻</span> Updates <em>ready</em>
           </a>
-          <a className="nav-link muted" href="#guide">
-            <span>▦</span> EPG mappings <em>soon</em>
+          <a className="nav-link" href="#events">
+            <span>◷</span> Live events <em>ready</em>
+          </a>
+          <a className="nav-link" href="#epg-mappings">
+            <span>▦</span> EPG mappings <em>ready</em>
           </a>
         </nav>
 
         <div className="status-card">
           <span className="status-dot" />
           <div>
-            <strong>Foundation running</strong>
-            <small>Provider not configured</small>
+            <strong>{authUsername ?? 'Foundation running'}</strong>
+            <small>{authUsername ? 'Local administrator' : 'Local mode'}</small>
           </div>
+          {onLogout ? (
+            <button className="sign-out" type="button" onClick={onLogout}>
+              Sign out
+            </button>
+          ) : null}
         </div>
       </aside>
 
@@ -241,25 +254,46 @@ export function App() {
                   <small>Live and VOD classification</small>
                 </div>
               </li>
-              <li className="active">
+              <li className="done">
                 <span>3</span>
                 <div>
                   <strong>Event policies</strong>
                   <small>Timezone and placeholder rules</small>
                 </div>
               </li>
-              <li>
+              <li className="done">
                 <span>4</span>
                 <div>
                   <strong>Persistent editor</strong>
                   <small>Database and channel overrides</small>
                 </div>
               </li>
-              <li>
+              <li className="done">
                 <span>5</span>
                 <div>
                   <strong>TiviMate output</strong>
                   <small>Stable M3U and XMLTV endpoints</small>
+                </div>
+              </li>
+              <li className="done">
+                <span>6</span>
+                <div>
+                  <strong>EPG reconciliation</strong>
+                  <small>Coverage review and persistent locks</small>
+                </div>
+              </li>
+              <li className="done">
+                <span>7</span>
+                <div>
+                  <strong>Recovery tooling</strong>
+                  <small>Verified database backup and restore</small>
+                </div>
+              </li>
+              <li className="active">
+                <span>8</span>
+                <div>
+                  <strong>Administrator access</strong>
+                  <small>Sessions, CSRF, and login protection</small>
                 </div>
               </li>
             </ol>

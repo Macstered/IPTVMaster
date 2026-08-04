@@ -1,4 +1,5 @@
 import {
+  DEFAULT_PLACEHOLDER_PATTERNS,
   decryptSecret,
   encryptSecret,
   SnapshotRejectedError,
@@ -13,6 +14,18 @@ import {
 } from '@iptvmaster/core';
 import { createHash, randomBytes } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
+
+import {
+  reconcileChannels,
+  type ReconciliationChannel,
+  type ReconciliationItem,
+} from './channel-reconciliation.js';
+import {
+  reconcileEpgMappings,
+  type EpgGuideChannel,
+  type EpgPlaylistChannel,
+  type LockedEpgMapping,
+} from './epg-reconciliation.js';
 
 export interface SourceCredentials {
   playlistUrl: string;
@@ -50,6 +63,41 @@ export interface StoredSnapshotSummary {
   unchanged: boolean;
 }
 
+export interface SnapshotHistoryItem {
+  id: string;
+  sourceId: string;
+  fingerprint: string;
+  importedAt: string;
+  liveCount: number;
+  skippedEntries: number;
+  issueCount: number;
+  isCurrent: boolean;
+}
+
+export type SourceActivityKind =
+  | 'playlist-sync'
+  | 'epg-sync'
+  | 'manual-match'
+  | 'manual-unlock'
+  | 'manual-epg-map'
+  | 'manual-epg-unlock'
+  | 'snapshot-activate'
+  | 'snapshot-reactivate';
+
+export interface SourceActivityEvent {
+  id: string;
+  kind: SourceActivityKind;
+  occurredAt: string;
+  title: string;
+  detail: string;
+  status?: 'succeeded' | 'failed' | 'rejected';
+}
+
+export interface SourceHistory {
+  snapshots: SnapshotHistoryItem[];
+  activity: SourceActivityEvent[];
+}
+
 export interface StoredEpgSummary {
   sourceId: string;
   fingerprint: string;
@@ -73,6 +121,7 @@ export interface GroupSummary {
   enabled: boolean;
   outputGroupName?: string;
   hidePlaceholders: boolean;
+  placeholderPatterns?: string[];
   sourceTimeZone: string;
   displayTimeZone: string;
   numericDateOrder: NumericDateOrder;
@@ -88,6 +137,132 @@ export interface SaveGroupPolicyInput {
   sourceTimeZone?: string;
   displayTimeZone?: string;
   numericDateOrder?: NumericDateOrder;
+}
+
+export type ChannelReconciliationStatus =
+  'matched' | 'new' | 'missing' | 'ambiguous';
+
+export interface ChannelSummary {
+  id: string;
+  sourceId: string;
+  providerName: string;
+  providerGroup: string;
+  tvgId?: string;
+  providerLogoUrl?: string;
+  enabled: boolean;
+  customName?: string;
+  customGroup?: string;
+  customLogoUrl?: string;
+  sortOrder: number;
+  matchLocked: boolean;
+  matchConfidence?: number;
+  reconciliationStatus: ChannelReconciliationStatus;
+  lastSeenAt?: string;
+  updatedAt: string;
+}
+
+export interface ChannelListFilters {
+  search?: string;
+  group?: string;
+  status?: ChannelReconciliationStatus;
+  limit: number;
+  offset: number;
+}
+
+export interface ChannelListPage {
+  channels: ChannelSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface UpdateChannelInput {
+  enabled?: boolean;
+  customName?: string | null;
+  customGroup?: string | null;
+  customLogoUrl?: string | null;
+  sortOrder?: number;
+}
+
+export interface BulkUpdateChannelInput {
+  enabled?: boolean;
+  customGroup?: string | null;
+  customLogoUrl?: string | null;
+}
+
+export interface BulkUpdateChannelResult {
+  updatedCount: number;
+}
+
+export interface ReconciliationCandidate {
+  upstreamItemId: string;
+  providerName: string;
+  providerGroup: string;
+  tvgId?: string;
+  providerLogoUrl?: string;
+  linkedChannelId?: string;
+  linkedChannelStatus?: ChannelReconciliationStatus;
+}
+
+export interface ReconciliationReview {
+  unresolvedChannels: ChannelSummary[];
+  candidates: ReconciliationCandidate[];
+  ambiguousCount: number;
+  missingCount: number;
+  newCount: number;
+  candidateTotal: number;
+  truncated: boolean;
+}
+
+export type EpgMappingStatus = 'matched' | 'missing' | 'ambiguous';
+
+export interface EpgGuideChannelSummary {
+  id: string;
+  displayName: string;
+  iconUrl?: string;
+}
+
+export interface EpgMappingReviewItem {
+  channelId: string;
+  channelName: string;
+  providerGroup: string;
+  tvgId?: string;
+  status: EpgMappingStatus;
+  manuallyLocked: boolean;
+  epgChannelId?: string;
+  epgDisplayName?: string;
+  confidence?: number;
+  candidateIds: string[];
+}
+
+export interface EpgMappingReview {
+  mappings: EpgMappingReviewItem[];
+  matchedCount: number;
+  missingCount: number;
+  ambiguousCount: number;
+  manualCount: number;
+  total: number;
+  truncated: boolean;
+}
+
+export interface EpgGuideChannelPage {
+  channels: EpgGuideChannelSummary[];
+  total: number;
+  truncated: boolean;
+}
+
+export class ManualMatchConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManualMatchConflictError';
+  }
+}
+
+export class SnapshotActivationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SnapshotActivationConflictError';
+  }
 }
 
 export interface CreatedOutputProfile {
@@ -112,6 +287,11 @@ export interface SourceRepository {
     sourceId: string,
     inspection: PlaylistInspection,
   ): Promise<StoredSnapshotSummary>;
+  listSourceHistory(sourceId: string, limit: number): Promise<SourceHistory>;
+  activateSnapshot(
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<SnapshotHistoryItem | null>;
   saveEpgSnapshot(
     sourceId: string,
     inspection: XmltvInspection,
@@ -123,6 +303,50 @@ export interface SourceRepository {
     sourceId: string,
     input: SaveGroupPolicyInput,
   ): Promise<GroupSummary>;
+  listChannels(
+    sourceId: string,
+    filters: ChannelListFilters,
+  ): Promise<ChannelListPage>;
+  updateChannel(
+    sourceId: string,
+    channelId: string,
+    input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null>;
+  bulkUpdateChannels(
+    sourceId: string,
+    channelIds: string[],
+    input: BulkUpdateChannelInput,
+  ): Promise<BulkUpdateChannelResult>;
+  getReconciliationReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<ReconciliationReview>;
+  resolveChannelMatch(
+    sourceId: string,
+    channelId: string,
+    upstreamItemId: string,
+  ): Promise<ChannelSummary | null>;
+  unlockChannelMatch(
+    sourceId: string,
+    channelId: string,
+  ): Promise<ChannelSummary | null>;
+  getEpgMappingReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<EpgMappingReview>;
+  searchEpgChannels(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<EpgGuideChannelPage>;
+  saveManualEpgMapping(
+    sourceId: string,
+    channelId: string,
+    epgChannelId: string,
+  ): Promise<boolean>;
+  unlockEpgMapping(sourceId: string, channelId: string): Promise<boolean>;
   listOutputGroupPolicies(
     sourceId: string,
     referenceDate: string,
@@ -160,6 +384,43 @@ interface SnapshotRow {
   issue_count: number;
 }
 
+interface SnapshotHistoryRow extends SnapshotRow {
+  is_last_known_good: boolean;
+}
+
+interface SyncRunHistoryRow {
+  id: string;
+  sync_type: 'playlist' | 'epg';
+  status: 'succeeded' | 'failed' | 'rejected';
+  started_at: Date;
+  finished_at: Date | null;
+  summary: unknown;
+  safe_error: string | null;
+}
+
+interface ChannelAuditHistoryRow {
+  id: string;
+  action: 'manual-match' | 'manual-unlock';
+  details: unknown;
+  created_at: Date;
+  display_name: string;
+}
+
+interface SourceAuditHistoryRow {
+  id: string;
+  action: 'snapshot-activate' | 'snapshot-reactivate';
+  created_at: Date;
+  target_live_count: number | null;
+}
+
+interface EpgMappingAuditHistoryRow {
+  id: string;
+  action: 'manual-map' | 'manual-unlock';
+  epg_channel_upstream_id: string | null;
+  created_at: Date;
+  display_name: string;
+}
+
 interface EpgStateRow {
   source_id: string;
   fingerprint: string;
@@ -178,6 +439,31 @@ interface StoredEntryRow {
     duration?: number | null;
     lineNumber?: number;
   };
+  custom_name: string | null;
+  custom_group: string | null;
+  custom_logo_url: string | null;
+  sort_order: number | null;
+  epg_channel_upstream_id: string | null;
+}
+
+interface ChannelRow {
+  id: string;
+  source_id: string;
+  provider_name: string;
+  provider_group: string;
+  tvg_id: string | null;
+  provider_logo_url: string | null;
+  enabled: boolean;
+  custom_name: string | null;
+  custom_group: string | null;
+  custom_logo_url: string | null;
+  sort_order: number;
+  match_locked: boolean;
+  match_confidence: string | number | null;
+  reconciliation_status: ChannelReconciliationStatus;
+  last_seen_at: Date | null;
+  updated_at: Date;
+  total_count?: string | number;
 }
 
 interface GroupRow {
@@ -198,6 +484,15 @@ interface OutputProfileRow {
   id: string;
   name: string;
   source_id: string;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((item) => typeof item === 'string')
+  );
 }
 
 function toSafeSource(row: SourceRow, hasEpgUrl: boolean): SafeSource {
@@ -244,7 +539,25 @@ function toSnapshotSummary(
   };
 }
 
+function toSnapshotHistoryItem(row: SnapshotHistoryRow): SnapshotHistoryItem {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    fingerprint: row.fingerprint,
+    importedAt: row.imported_at.toISOString(),
+    liveCount: row.live_count,
+    skippedEntries: row.skipped_vod_count,
+    issueCount: row.issue_count,
+    isCurrent: row.is_last_known_good,
+  };
+}
+
 function toGroupSummary(row: GroupRow): GroupSummary {
+  const patterns = Array.isArray(row.placeholder_patterns)
+    ? row.placeholder_patterns.filter(
+        (value): value is string => typeof value === 'string',
+      )
+    : [];
   return {
     providerGroup: row.provider_group,
     channelCount: Number(row.channel_count),
@@ -253,9 +566,40 @@ function toGroupSummary(row: GroupRow): GroupSummary {
     enabled: row.enabled,
     ...(row.output_group ? { outputGroupName: row.output_group } : {}),
     hidePlaceholders: row.hide_placeholders,
+    ...(row.behavior === 'event'
+      ? {
+          placeholderPatterns:
+            patterns.length > 0 ? patterns : [...DEFAULT_PLACEHOLDER_PATTERNS],
+        }
+      : {}),
     sourceTimeZone: row.source_timezone,
     displayTimeZone: row.display_timezone,
     numericDateOrder: row.numeric_date_order,
+  };
+}
+
+function toChannelSummary(row: ChannelRow): ChannelSummary {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    providerName: row.provider_name,
+    providerGroup: row.provider_group,
+    ...(row.tvg_id ? { tvgId: row.tvg_id } : {}),
+    ...(row.provider_logo_url
+      ? { providerLogoUrl: row.provider_logo_url }
+      : {}),
+    enabled: row.enabled,
+    ...(row.custom_name ? { customName: row.custom_name } : {}),
+    ...(row.custom_group ? { customGroup: row.custom_group } : {}),
+    ...(row.custom_logo_url ? { customLogoUrl: row.custom_logo_url } : {}),
+    sortOrder: row.sort_order,
+    matchLocked: row.match_locked,
+    ...(row.match_confidence === null
+      ? {}
+      : { matchConfidence: Number(row.match_confidence) }),
+    reconciliationStatus: row.reconciliation_status,
+    ...(row.last_seen_at ? { lastSeenAt: row.last_seen_at.toISOString() } : {}),
+    updatedAt: row.updated_at.toISOString(),
   };
 }
 
@@ -374,21 +718,41 @@ export class PostgresSourceRepository implements SourceRepository {
       if (!syncRunId)
         throw new Error('Sync run insert did not return an identifier');
 
-      const existing = await client.query<SnapshotRow>(
+      await client.query('BEGIN');
+      const sourceLock = await client.query<{ id: string }>(
+        'SELECT id FROM source WHERE id = $1 FOR UPDATE',
+        [sourceId],
+      );
+      if (!sourceLock.rows[0]) throw new Error('Source not found');
+
+      const existing = await client.query<SnapshotHistoryRow>(
         `SELECT id, source_id, fingerprint, imported_at, live_count,
-                skipped_vod_count, issue_count
+                skipped_vod_count, issue_count, is_last_known_good
          FROM source_snapshot
          WHERE source_id = $1 AND fingerprint = $2`,
         [sourceId, inspection.fingerprint],
       );
-      if (existing.rows[0]) {
-        const summary = toSnapshotSummary(existing.rows[0], true);
+      const existingSnapshot = existing.rows[0];
+      if (existingSnapshot) {
+        if (!existingSnapshot.is_last_known_good) {
+          await this.#activateStoredSnapshot(
+            client,
+            sourceId,
+            existingSnapshot.id,
+            'snapshot-reactivate',
+          );
+        }
+        const summary = toSnapshotSummary(
+          existingSnapshot,
+          existingSnapshot.is_last_known_good,
+        );
         await client.query(
           `UPDATE sync_run
            SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
            WHERE id = $1`,
           [syncRunId, JSON.stringify(summary)],
         );
+        await client.query('COMMIT');
         return summary;
       }
 
@@ -402,6 +766,7 @@ export class PostgresSourceRepository implements SourceRepository {
         validateSnapshotCandidate(inspection, baseline.rows[0]?.live_count);
       } catch (error) {
         if (error instanceof SnapshotRejectedError) {
+          await client.query('ROLLBACK');
           await client.query(
             `UPDATE sync_run
              SET status = 'rejected', finished_at = NOW(), safe_error = $2
@@ -413,7 +778,6 @@ export class PostgresSourceRepository implements SourceRepository {
         throw error;
       }
 
-      await client.query('BEGIN');
       await client.query(
         'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
         [sourceId],
@@ -483,6 +847,8 @@ export class PostgresSourceRepository implements SourceRepository {
         );
       }
 
+      await this.#reconcileChannels(client, sourceId, snapshot.id);
+
       const summary = toSnapshotSummary(snapshot, false);
       await client.query(
         `UPDATE sync_run
@@ -512,23 +878,211 @@ export class PostgresSourceRepository implements SourceRepository {
     }
   }
 
+  async listSourceHistory(
+    sourceId: string,
+    limit: number,
+  ): Promise<SourceHistory> {
+    const [
+      snapshotsResult,
+      syncResult,
+      channelAuditResult,
+      sourceAuditResult,
+      epgMappingAuditResult,
+    ] = await Promise.all([
+      this.#pool.query<SnapshotHistoryRow>(
+        `SELECT id, source_id, fingerprint, imported_at, live_count,
+                  skipped_vod_count, issue_count, is_last_known_good
+           FROM source_snapshot
+           WHERE source_id = $1
+           ORDER BY imported_at DESC, id DESC
+           LIMIT $2`,
+        [sourceId, limit],
+      ),
+      this.#pool.query<SyncRunHistoryRow>(
+        `SELECT id, sync_type, status, started_at, finished_at, summary,
+                  safe_error
+           FROM sync_run
+           WHERE source_id = $1 AND status <> 'running'
+           ORDER BY started_at DESC, id DESC
+           LIMIT $2`,
+        [sourceId, limit],
+      ),
+      this.#pool.query<ChannelAuditHistoryRow>(
+        `SELECT a.id, a.action, a.details, a.created_at,
+                  COALESCE(c.custom_name, c.provider_name) AS display_name
+           FROM channel_match_audit a
+           JOIN channel c ON c.id = a.channel_id
+           WHERE a.source_id = $1
+           ORDER BY a.created_at DESC, a.id DESC
+           LIMIT $2`,
+        [sourceId, limit],
+      ),
+      this.#pool.query<SourceAuditHistoryRow>(
+        `SELECT a.id, a.action, a.created_at,
+                  target.live_count AS target_live_count
+           FROM source_audit_event a
+           LEFT JOIN source_snapshot target ON target.id = a.to_snapshot_id
+           WHERE a.source_id = $1
+           ORDER BY a.created_at DESC, a.id DESC
+           LIMIT $2`,
+        [sourceId, limit],
+      ),
+      this.#pool.query<EpgMappingAuditHistoryRow>(
+        `SELECT audit.id, audit.action, audit.epg_channel_upstream_id,
+                  audit.created_at,
+                  COALESCE(c.custom_name, c.provider_name) AS display_name
+           FROM epg_mapping_audit audit
+           JOIN channel c ON c.id = audit.channel_id
+           WHERE audit.source_id = $1
+           ORDER BY audit.created_at DESC, audit.id DESC
+           LIMIT $2`,
+        [sourceId, limit],
+      ),
+    ]);
+
+    const activity: SourceActivityEvent[] = [
+      ...syncResult.rows.map((row) => this.#toSyncActivity(row)),
+      ...channelAuditResult.rows.map((row) => {
+        const details = isStringRecord(row.details) ? row.details : {};
+        const providerName = details.providerName;
+        return {
+          id: row.id,
+          kind: row.action,
+          occurredAt: row.created_at.toISOString(),
+          title:
+            row.action === 'manual-match'
+              ? `Matched ${row.display_name}`
+              : `Unlocked ${row.display_name}`,
+          detail:
+            row.action === 'manual-match' && providerName
+              ? `Linked to provider entry ${providerName}`
+              : 'Automatic reconciliation may update this channel again.',
+          status: 'succeeded' as const,
+        };
+      }),
+      ...sourceAuditResult.rows.map((row) => ({
+        id: row.id,
+        kind: row.action,
+        occurredAt: row.created_at.toISOString(),
+        title:
+          row.action === 'snapshot-activate'
+            ? 'Snapshot restored'
+            : 'Provider snapshot reactivated',
+        detail:
+          row.target_live_count !== null
+            ? `${row.target_live_count.toLocaleString()} retained live entries became current.`
+            : 'The selected retained snapshot became current.',
+        status: 'succeeded' as const,
+      })),
+      ...epgMappingAuditResult.rows.map((row) => ({
+        id: row.id,
+        kind:
+          row.action === 'manual-map'
+            ? ('manual-epg-map' as const)
+            : ('manual-epg-unlock' as const),
+        occurredAt: row.created_at.toISOString(),
+        title:
+          row.action === 'manual-map'
+            ? `Mapped EPG for ${row.display_name}`
+            : `Unlocked EPG for ${row.display_name}`,
+        detail:
+          row.action === 'manual-map' && row.epg_channel_upstream_id
+            ? `Linked to XMLTV channel ${row.epg_channel_upstream_id}.`
+            : 'Automatic EPG matching may update this channel again.',
+        status: 'succeeded' as const,
+      })),
+    ]
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .slice(0, limit);
+
+    return {
+      snapshots: snapshotsResult.rows.map(toSnapshotHistoryItem),
+      activity,
+    };
+  }
+
+  async activateSnapshot(
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<SnapshotHistoryItem | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sourceLock = await client.query<{ id: string }>(
+        'SELECT id FROM source WHERE id = $1 FOR UPDATE',
+        [sourceId],
+      );
+      if (!sourceLock.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const targetResult = await client.query<SnapshotHistoryRow>(
+        `SELECT id, source_id, fingerprint, imported_at, live_count,
+                skipped_vod_count, issue_count, is_last_known_good
+         FROM source_snapshot
+         WHERE source_id = $1 AND id = $2
+         FOR UPDATE`,
+        [sourceId, snapshotId],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (target.is_last_known_good) {
+        throw new SnapshotActivationConflictError(
+          'The selected snapshot is already current',
+        );
+      }
+      await this.#activateStoredSnapshot(
+        client,
+        sourceId,
+        snapshotId,
+        'snapshot-activate',
+      );
+      await client.query('COMMIT');
+      return { ...toSnapshotHistoryItem(target), isCurrent: true };
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
     const result = await this.#pool.query<StoredEntryRow>(
-      `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata
+      `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata,
+              c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order,
+              mapping.epg_channel_upstream_id
        FROM source_snapshot s
        JOIN upstream_item i ON i.snapshot_id = s.id
+       LEFT JOIN channel c
+         ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
+       LEFT JOIN epg_mapping mapping ON mapping.channel_id = c.id
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
-       ORDER BY COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
+         AND (c.id IS NULL OR c.enabled = TRUE)
+       ORDER BY COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
+                COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
       [sourceId],
     );
-    return result.rows.map((row) => ({
-      duration: row.metadata.duration ?? null,
-      attributes: row.metadata.attributes ?? {},
-      name: row.original_name,
-      url: decryptSecret(row.encrypted_stream_url, this.#masterKey),
-      mediaType: row.media_type,
-      lineNumber: row.metadata.lineNumber ?? 0,
-    }));
+    return result.rows.map((row) => {
+      const attributes = { ...(row.metadata.attributes ?? {}) };
+      if (row.custom_name) attributes['tvg-name'] = row.custom_name;
+      if (row.custom_group) attributes['group-title'] = row.custom_group;
+      if (row.custom_logo_url) attributes['tvg-logo'] = row.custom_logo_url;
+      if (row.epg_channel_upstream_id) {
+        attributes['tvg-id'] = row.epg_channel_upstream_id;
+      }
+      return {
+        duration: row.metadata.duration ?? null,
+        attributes,
+        name: row.custom_name ?? row.original_name,
+        url: decryptSecret(row.encrypted_stream_url, this.#masterKey),
+        mediaType: row.media_type,
+        lineNumber: row.metadata.lineNumber ?? 0,
+      };
+    });
   }
 
   async saveEpgSnapshot(
@@ -654,6 +1208,8 @@ export class PostgresSourceRepository implements SourceRepository {
           [sourceId, JSON.stringify(values)],
         );
       }
+
+      await this.#reconcileEpgMappings(client, sourceId);
 
       const stateResult = await client.query<EpgStateRow>(
         `INSERT INTO epg_snapshot_state
@@ -788,41 +1344,731 @@ export class PostgresSourceRepository implements SourceRepository {
     sourceId: string,
     input: SaveGroupPolicyInput,
   ): Promise<GroupSummary> {
-    await this.#pool.query(
-      `INSERT INTO group_policy
-        (source_id, provider_group, behavior, enabled, output_group,
-         hide_placeholders, placeholder_patterns, source_timezone,
-         display_timezone, numeric_date_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
-       ON CONFLICT (source_id, provider_group) DO UPDATE SET
-         behavior = EXCLUDED.behavior,
-         enabled = EXCLUDED.enabled,
-         output_group = EXCLUDED.output_group,
-         hide_placeholders = EXCLUDED.hide_placeholders,
-         placeholder_patterns = EXCLUDED.placeholder_patterns,
-         source_timezone = EXCLUDED.source_timezone,
-         display_timezone = EXCLUDED.display_timezone,
-         numeric_date_order = EXCLUDED.numeric_date_order,
-         updated_at = NOW()`,
-      [
-        sourceId,
-        input.groupName,
-        input.behavior,
-        input.enabled,
-        input.outputGroupName ?? null,
-        input.hidePlaceholders,
-        JSON.stringify(input.placeholderPatterns ?? []),
-        input.sourceTimeZone ?? null,
-        input.displayTimeZone ?? null,
-        input.numericDateOrder ?? 'month-day',
-      ],
-    );
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO group_policy
+          (source_id, provider_group, behavior, enabled, output_group,
+           hide_placeholders, placeholder_patterns, source_timezone,
+           display_timezone, numeric_date_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+         ON CONFLICT (source_id, provider_group) DO UPDATE SET
+           behavior = EXCLUDED.behavior,
+           enabled = EXCLUDED.enabled,
+           output_group = EXCLUDED.output_group,
+           hide_placeholders = EXCLUDED.hide_placeholders,
+           placeholder_patterns = EXCLUDED.placeholder_patterns,
+           source_timezone = EXCLUDED.source_timezone,
+           display_timezone = EXCLUDED.display_timezone,
+           numeric_date_order = EXCLUDED.numeric_date_order,
+           updated_at = NOW()`,
+        [
+          sourceId,
+          input.groupName,
+          input.behavior,
+          input.enabled,
+          input.outputGroupName ?? null,
+          input.hidePlaceholders,
+          JSON.stringify(input.placeholderPatterns ?? []),
+          input.sourceTimeZone ?? null,
+          input.displayTimeZone ?? null,
+          input.numericDateOrder ?? 'month-day',
+        ],
+      );
+      const snapshot = await client.query<{ id: string }>(
+        `SELECT id
+         FROM source_snapshot
+         WHERE source_id = $1 AND is_last_known_good = TRUE`,
+        [sourceId],
+      );
+      if (snapshot.rows[0]) {
+        await this.#reconcileChannels(client, sourceId, snapshot.rows[0].id);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
     const group = (await this.listGroups(sourceId)).find(
       (candidate) => candidate.providerGroup === input.groupName,
     );
     if (!group)
       throw new Error('Saved group policy does not match a current group');
     return group;
+  }
+
+  async listChannels(
+    sourceId: string,
+    filters: ChannelListFilters,
+  ): Promise<ChannelListPage> {
+    const values: unknown[] = [sourceId];
+    const conditions = [
+      'c.source_id = $1',
+      'c.archived_at IS NULL',
+      "COALESCE(p.behavior, 'permanent') = 'permanent'",
+    ];
+    if (filters.search) {
+      values.push(`%${filters.search}%`);
+      conditions.push(
+        `(c.provider_name ILIKE $${values.length}
+          OR COALESCE(c.custom_name, '') ILIKE $${values.length}
+          OR c.provider_group ILIKE $${values.length}
+          OR COALESCE(c.custom_group, '') ILIKE $${values.length}
+          OR COALESCE(c.tvg_id, '') ILIKE $${values.length})`,
+      );
+    }
+    if (filters.group !== undefined) {
+      values.push(filters.group);
+      conditions.push(`c.provider_group = $${values.length}`);
+    }
+    if (filters.status) {
+      values.push(filters.status);
+      conditions.push(`c.reconciliation_status = $${values.length}`);
+    }
+    values.push(filters.limit, filters.offset);
+    const limitParameter = `$${values.length - 1}`;
+    const offsetParameter = `$${values.length}`;
+    const result = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.source_id, c.provider_name, c.provider_group, c.tvg_id,
+              c.provider_logo_url, c.enabled, c.custom_name, c.custom_group,
+              c.custom_logo_url, c.sort_order, c.match_locked,
+              c.match_confidence, c.reconciliation_status, c.last_seen_at,
+              c.updated_at, COUNT(*) OVER() AS total_count
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY COALESCE(c.custom_group, c.provider_group), c.sort_order,
+                COALESCE(c.custom_name, c.provider_name), c.id
+       LIMIT ${limitParameter} OFFSET ${offsetParameter}`,
+      values,
+    );
+    return {
+      channels: result.rows.map(toChannelSummary),
+      total: Number(result.rows[0]?.total_count ?? 0),
+      limit: filters.limit,
+      offset: filters.offset,
+    };
+  }
+
+  async updateChannel(
+    sourceId: string,
+    channelId: string,
+    input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null> {
+    const values: unknown[] = [sourceId, channelId];
+    const updates: string[] = [];
+    const addUpdate = (column: string, value: unknown) => {
+      values.push(value);
+      updates.push(`${column} = $${values.length}`);
+    };
+    if (input.enabled !== undefined) addUpdate('enabled', input.enabled);
+    if (input.customName !== undefined)
+      addUpdate('custom_name', input.customName);
+    if (input.customGroup !== undefined)
+      addUpdate('custom_group', input.customGroup);
+    if (input.customLogoUrl !== undefined)
+      addUpdate('custom_logo_url', input.customLogoUrl);
+    if (input.sortOrder !== undefined) addUpdate('sort_order', input.sortOrder);
+    if (updates.length === 0) return null;
+
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<ChannelRow>(
+        `UPDATE channel
+         SET ${updates.join(', ')}, updated_at = NOW()
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         RETURNING id, source_id, provider_name, provider_group, tvg_id,
+                   provider_logo_url, enabled, custom_name, custom_group,
+                   custom_logo_url, sort_order, match_locked, match_confidence,
+                   reconciliation_status, last_seen_at, updated_at`,
+        values,
+      );
+      const row = result.rows[0];
+      if (row) await this.#reconcileEpgMappings(client, sourceId);
+      await client.query('COMMIT');
+      return row ? toChannelSummary(row) : null;
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async bulkUpdateChannels(
+    sourceId: string,
+    channelIds: string[],
+    input: BulkUpdateChannelInput,
+  ): Promise<BulkUpdateChannelResult> {
+    const values: unknown[] = [sourceId, channelIds];
+    const updates: string[] = [];
+    const addUpdate = (column: string, value: unknown) => {
+      values.push(value);
+      updates.push(`${column} = $${values.length}`);
+    };
+    if (input.enabled !== undefined) addUpdate('enabled', input.enabled);
+    if (input.customGroup !== undefined)
+      addUpdate('custom_group', input.customGroup);
+    if (input.customLogoUrl !== undefined)
+      addUpdate('custom_logo_url', input.customLogoUrl);
+    if (updates.length === 0) return { updatedCount: 0 };
+
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `UPDATE channel
+         SET ${updates.join(', ')}, updated_at = NOW()
+         WHERE source_id = $1 AND id = ANY($2::uuid[])
+           AND archived_at IS NULL`,
+        values,
+      );
+      if ((result.rowCount ?? 0) > 0) {
+        await this.#reconcileEpgMappings(client, sourceId);
+      }
+      await client.query('COMMIT');
+      return { updatedCount: result.rowCount ?? 0 };
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getReconciliationReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<ReconciliationReview> {
+    const countsResult = await this.#pool.query<{
+      ambiguous_count: string | number;
+      missing_count: string | number;
+      new_count: string | number;
+    }>(
+      `SELECT COUNT(*) FILTER (
+                WHERE c.reconciliation_status = 'ambiguous'
+              ) AS ambiguous_count,
+              COUNT(*) FILTER (
+                WHERE c.reconciliation_status = 'missing'
+              ) AS missing_count,
+              COUNT(*) FILTER (
+                WHERE c.reconciliation_status = 'new'
+              ) AS new_count
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'`,
+      [sourceId],
+    );
+    const counts = countsResult.rows[0];
+    const ambiguousCount = Number(counts?.ambiguous_count ?? 0);
+    const missingCount = Number(counts?.missing_count ?? 0);
+    const newCount = Number(counts?.new_count ?? 0);
+
+    const channelValues: unknown[] = [sourceId];
+    let channelSearch = '';
+    if (search) {
+      channelValues.push(`%${search}%`);
+      channelSearch = `AND (
+        c.provider_name ILIKE $2 OR COALESCE(c.custom_name, '') ILIKE $2
+        OR c.provider_group ILIKE $2 OR COALESCE(c.tvg_id, '') ILIKE $2
+      )`;
+    }
+    channelValues.push(limit);
+    const unresolvedResult = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.source_id, c.provider_name, c.provider_group, c.tvg_id,
+              c.provider_logo_url, c.enabled, c.custom_name, c.custom_group,
+              c.custom_logo_url, c.sort_order, c.match_locked,
+              c.match_confidence, c.reconciliation_status, c.last_seen_at,
+              c.updated_at
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND c.reconciliation_status IN ('ambiguous', 'missing')
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         ${channelSearch}
+       ORDER BY c.reconciliation_status, c.provider_group, c.provider_name
+       LIMIT $${channelValues.length}`,
+      channelValues,
+    );
+
+    const candidateValues: unknown[] = [sourceId, limit];
+    const candidateResult = await this.#pool.query<{
+      upstream_item_id: string;
+      provider_name: string;
+      provider_group: string;
+      tvg_id: string | null;
+      provider_logo_url: string | null;
+      linked_channel_id: string | null;
+      linked_channel_status: ChannelReconciliationStatus | null;
+      total_count: string | number;
+    }>(
+      `SELECT i.id AS upstream_item_id, i.original_name AS provider_name,
+              i.provider_group, i.tvg_id, i.logo_url AS provider_logo_url,
+              linked.id AS linked_channel_id,
+              linked.reconciliation_status AS linked_channel_status,
+              COUNT(*) OVER() AS total_count
+       FROM source_snapshot s
+       JOIN upstream_item i ON i.snapshot_id = s.id
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+       LEFT JOIN channel linked
+         ON linked.current_upstream_item_id = i.id
+        AND linked.archived_at IS NULL
+       WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+         AND i.media_type = 'live'
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         AND (linked.id IS NULL OR linked.reconciliation_status = 'new')
+       ORDER BY i.provider_group, i.original_name, i.id
+       LIMIT $2`,
+      candidateValues,
+    );
+    const candidates = candidateResult.rows.map((row) => ({
+      upstreamItemId: row.upstream_item_id,
+      providerName: row.provider_name,
+      providerGroup: row.provider_group,
+      ...(row.tvg_id ? { tvgId: row.tvg_id } : {}),
+      ...(row.provider_logo_url
+        ? { providerLogoUrl: row.provider_logo_url }
+        : {}),
+      ...(row.linked_channel_id
+        ? { linkedChannelId: row.linked_channel_id }
+        : {}),
+      ...(row.linked_channel_status
+        ? { linkedChannelStatus: row.linked_channel_status }
+        : {}),
+    }));
+    const candidateTotal = Number(candidateResult.rows[0]?.total_count ?? 0);
+    return {
+      unresolvedChannels: unresolvedResult.rows.map(toChannelSummary),
+      candidates,
+      ambiguousCount,
+      missingCount,
+      newCount,
+      candidateTotal,
+      truncated:
+        ambiguousCount + missingCount > unresolvedResult.rows.length ||
+        candidateTotal > candidates.length,
+    };
+  }
+
+  async resolveChannelMatch(
+    sourceId: string,
+    channelId: string,
+    upstreamItemId: string,
+  ): Promise<ChannelSummary | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const targetResult = await client.query<ChannelRow>(
+        `SELECT id, source_id, provider_name, provider_group, tvg_id,
+                provider_logo_url, enabled, custom_name, custom_group,
+                custom_logo_url, sort_order, match_locked, match_confidence,
+                reconciliation_status, last_seen_at, updated_at
+         FROM channel
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         FOR UPDATE`,
+        [sourceId, channelId],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (!['ambiguous', 'missing'].includes(target.reconciliation_status)) {
+        throw new ManualMatchConflictError(
+          'Only ambiguous or missing channels can be matched manually',
+        );
+      }
+
+      const itemResult = await client.query<{
+        id: string;
+        provider_stream_id: string | null;
+        tvg_id: string | null;
+        provider_name: string;
+        provider_group: string;
+        provider_logo_url: string | null;
+      }>(
+        `SELECT i.id, i.provider_stream_id, i.tvg_id,
+                i.original_name AS provider_name, i.provider_group,
+                i.logo_url AS provider_logo_url
+         FROM source_snapshot s
+         JOIN upstream_item i ON i.snapshot_id = s.id
+         LEFT JOIN group_policy p
+           ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+         WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+           AND i.id = $2 AND i.media_type = 'live'
+           AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         FOR UPDATE OF i`,
+        [sourceId, upstreamItemId],
+      );
+      const item = itemResult.rows[0];
+      if (!item) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      const occupantResult = await client.query<
+        ChannelRow & { current_upstream_item_id: string | null }
+      >(
+        `SELECT id, source_id, provider_name, provider_group, tvg_id,
+                provider_logo_url, enabled, custom_name, custom_group,
+                custom_logo_url, sort_order, match_locked, match_confidence,
+                reconciliation_status, last_seen_at, updated_at,
+                current_upstream_item_id
+         FROM channel
+         WHERE source_id = $1 AND current_upstream_item_id = $2
+           AND archived_at IS NULL
+         FOR UPDATE`,
+        [sourceId, upstreamItemId],
+      );
+      const occupant = occupantResult.rows[0];
+      let displacedChannelId: string | null = null;
+      if (occupant && occupant.id !== channelId) {
+        const isUntouchedNewChannel =
+          occupant.reconciliation_status === 'new' &&
+          occupant.enabled &&
+          !occupant.custom_name &&
+          !occupant.custom_group &&
+          !occupant.custom_logo_url &&
+          !occupant.match_locked;
+        if (!isUntouchedNewChannel) {
+          throw new ManualMatchConflictError(
+            'The selected provider entry is already attached to an edited channel',
+          );
+        }
+        displacedChannelId = occupant.id;
+        await client.query(
+          `UPDATE channel
+           SET current_upstream_item_id = NULL, archived_at = NOW(),
+               reconciliation_status = 'missing', updated_at = NOW()
+           WHERE id = $1`,
+          [occupant.id],
+        );
+      }
+
+      const savedResult = await client.query<ChannelRow>(
+        `UPDATE channel
+         SET current_upstream_item_id = $3,
+             provider_stream_id = $4,
+             tvg_id = $5,
+             provider_name = $6,
+             provider_group = $7,
+             provider_logo_url = $8,
+             match_locked = TRUE,
+             match_confidence = 1,
+             reconciliation_status = 'matched',
+             last_seen_at = NOW(),
+             updated_at = NOW()
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         RETURNING id, source_id, provider_name, provider_group, tvg_id,
+                   provider_logo_url, enabled, custom_name, custom_group,
+                   custom_logo_url, sort_order, match_locked, match_confidence,
+                   reconciliation_status, last_seen_at, updated_at`,
+        [
+          sourceId,
+          channelId,
+          item.id,
+          item.provider_stream_id,
+          item.tvg_id,
+          item.provider_name,
+          item.provider_group,
+          item.provider_logo_url,
+        ],
+      );
+      const saved = savedResult.rows[0];
+      if (!saved) throw new Error('Manual channel match was not persisted');
+      await this.#reconcileEpgMappings(client, sourceId);
+      await client.query(
+        `INSERT INTO channel_match_audit
+          (source_id, channel_id, displaced_channel_id, upstream_item_id,
+           action, details)
+         VALUES ($1, $2, $3, $4, 'manual-match', $5::jsonb)`,
+        [
+          sourceId,
+          channelId,
+          displacedChannelId,
+          upstreamItemId,
+          JSON.stringify({
+            previousProviderName: target.provider_name,
+            providerName: item.provider_name,
+            providerGroup: item.provider_group,
+          }),
+        ],
+      );
+      await client.query('COMMIT');
+      return toChannelSummary(saved);
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async unlockChannelMatch(
+    sourceId: string,
+    channelId: string,
+  ): Promise<ChannelSummary | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<
+        ChannelRow & { current_upstream_item_id: string | null }
+      >(
+        `UPDATE channel
+         SET match_locked = FALSE, updated_at = NOW()
+         WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
+         RETURNING id, source_id, provider_name, provider_group, tvg_id,
+                   provider_logo_url, enabled, custom_name, custom_group,
+                   custom_logo_url, sort_order, match_locked, match_confidence,
+                   reconciliation_status, last_seen_at, updated_at,
+                   current_upstream_item_id`,
+        [sourceId, channelId],
+      );
+      const channel = result.rows[0];
+      if (!channel) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      await client.query(
+        `INSERT INTO channel_match_audit
+          (source_id, channel_id, upstream_item_id, action)
+         VALUES ($1, $2, $3, 'manual-unlock')`,
+        [sourceId, channelId, channel.current_upstream_item_id],
+      );
+      await client.query('COMMIT');
+      return toChannelSummary(channel);
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getEpgMappingReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<EpgMappingReview> {
+    const { channels, guideChannels, lockedMappings, reconciliation } =
+      await this.#loadEpgReconciliation(this.#pool, sourceId);
+    const matchesByChannel = new Map(
+      reconciliation.matches.map((match) => [match.channelId, match]),
+    );
+    const unresolvedByChannel = new Map(
+      reconciliation.unresolved.map((item) => [item.channelId, item]),
+    );
+    const lockedIds = new Set(
+      lockedMappings.map((mapping) => mapping.channelId),
+    );
+    const guideById = new Map(
+      guideChannels.map((channel) => [channel.id, channel]),
+    );
+    const mappings: EpgMappingReviewItem[] = channels.map((channel) => {
+      const match = matchesByChannel.get(channel.id);
+      const unresolved = unresolvedByChannel.get(channel.id);
+      const lockedId = unresolved?.lockedEpgChannelId;
+      const lockedGuide = lockedId ? guideById.get(lockedId) : undefined;
+      return {
+        channelId: channel.id,
+        channelName: channel.displayName,
+        providerGroup: channel.providerGroup,
+        ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
+        status: match ? 'matched' : (unresolved?.status ?? 'missing'),
+        manuallyLocked: lockedIds.has(channel.id),
+        ...(match
+          ? {
+              epgChannelId: match.epgChannel.id,
+              epgDisplayName: match.epgChannel.displayName,
+              confidence: match.confidence,
+            }
+          : lockedId
+            ? {
+                epgChannelId: lockedId,
+                ...(lockedGuide
+                  ? { epgDisplayName: lockedGuide.displayName }
+                  : {}),
+              }
+            : {}),
+        candidateIds: unresolved?.candidateIds ?? [],
+      };
+    });
+    const normalizedSearch = search?.trim().toLocaleLowerCase('en-US') ?? '';
+    const visible = mappings
+      .filter(
+        (mapping) =>
+          !normalizedSearch ||
+          [
+            mapping.channelName,
+            mapping.providerGroup,
+            mapping.tvgId ?? '',
+            mapping.epgChannelId ?? '',
+            mapping.epgDisplayName ?? '',
+          ].some((value) =>
+            value.toLocaleLowerCase('en-US').includes(normalizedSearch),
+          ),
+      )
+      .sort(
+        (left, right) =>
+          Number(left.status === 'matched') -
+            Number(right.status === 'matched') ||
+          left.channelName.localeCompare(right.channelName),
+      );
+    return {
+      mappings: visible.slice(0, limit),
+      matchedCount: reconciliation.matches.length,
+      missingCount: reconciliation.unresolved.filter(
+        (item) => item.status === 'missing',
+      ).length,
+      ambiguousCount: reconciliation.unresolved.filter(
+        (item) => item.status === 'ambiguous',
+      ).length,
+      manualCount: lockedMappings.length,
+      total: channels.length,
+      truncated: visible.length > limit,
+    };
+  }
+
+  async searchEpgChannels(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<EpgGuideChannelPage> {
+    const values: unknown[] = [sourceId];
+    let filter = '';
+    if (search) {
+      values.push(`%${search}%`);
+      filter = `AND (upstream_id ILIKE $${values.length}
+                     OR display_name ILIKE $${values.length})`;
+    }
+    values.push(limit);
+    const result = await this.#pool.query<{
+      upstream_id: string;
+      display_name: string;
+      icon_url: string | null;
+      total_count: string | number;
+    }>(
+      `SELECT upstream_id, display_name, icon_url, COUNT(*) OVER() AS total_count
+       FROM epg_channel
+       WHERE source_id = $1 ${filter}
+       ORDER BY display_name, upstream_id
+       LIMIT $${values.length}`,
+      values,
+    );
+    const total = Number(result.rows[0]?.total_count ?? 0);
+    return {
+      channels: result.rows.map((row) => ({
+        id: row.upstream_id,
+        displayName: row.display_name,
+        ...(row.icon_url ? { iconUrl: row.icon_url } : {}),
+      })),
+      total,
+      truncated: total > limit,
+    };
+  }
+
+  async saveManualEpgMapping(
+    sourceId: string,
+    channelId: string,
+    epgChannelId: string,
+  ): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{ channel_id: string }>(
+        `SELECT c.id AS channel_id
+         FROM channel c
+         JOIN epg_channel guide
+           ON guide.source_id = c.source_id AND guide.upstream_id = $3
+         LEFT JOIN group_policy policy
+           ON policy.source_id = c.source_id
+          AND policy.provider_group = c.provider_group
+         WHERE c.source_id = $1 AND c.id = $2 AND c.archived_at IS NULL
+           AND COALESCE(policy.behavior, 'permanent') = 'permanent'
+         FOR UPDATE OF c`,
+        [sourceId, channelId, epgChannelId],
+      );
+      if (!result.rows[0]) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      await client.query(
+        `INSERT INTO epg_mapping
+          (channel_id, epg_channel_id, epg_channel_upstream_id, confidence,
+           manually_locked)
+         SELECT $2, guide.id, guide.upstream_id, 1, TRUE
+         FROM epg_channel guide
+         WHERE guide.source_id = $1 AND guide.upstream_id = $3
+         ON CONFLICT (channel_id) DO UPDATE SET
+           epg_channel_id = EXCLUDED.epg_channel_id,
+           epg_channel_upstream_id = EXCLUDED.epg_channel_upstream_id,
+           confidence = 1,
+           manually_locked = TRUE,
+           updated_at = NOW()`,
+        [sourceId, channelId, epgChannelId],
+      );
+      await client.query(
+        `INSERT INTO epg_mapping_audit
+          (source_id, channel_id, epg_channel_upstream_id, action)
+         VALUES ($1, $2, $3, 'manual-map')`,
+        [sourceId, channelId, epgChannelId],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async unlockEpgMapping(
+    sourceId: string,
+    channelId: string,
+  ): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const deleted = await client.query<{ epg_channel_upstream_id: string }>(
+        `DELETE FROM epg_mapping mapping
+         USING channel c
+         WHERE mapping.channel_id = c.id
+           AND c.source_id = $1 AND c.id = $2
+           AND mapping.manually_locked = TRUE
+         RETURNING mapping.epg_channel_upstream_id`,
+        [sourceId, channelId],
+      );
+      const previous = deleted.rows[0];
+      if (!previous) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      await client.query(
+        `INSERT INTO epg_mapping_audit
+          (source_id, channel_id, epg_channel_upstream_id, action)
+         VALUES ($1, $2, $3, 'manual-unlock')`,
+        [sourceId, channelId, previous.epg_channel_upstream_id],
+      );
+      await this.#reconcileEpgMappings(client, sourceId);
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listOutputGroupPolicies(
@@ -919,6 +2165,391 @@ export class PostgresSourceRepository implements SourceRepository {
       [profileId],
     );
     return result.rowCount === 1;
+  }
+
+  #toSyncActivity(row: SyncRunHistoryRow): SourceActivityEvent {
+    const summary =
+      typeof row.summary === 'object' && row.summary !== null
+        ? (row.summary as Record<string, unknown>)
+        : {};
+    const kind = row.sync_type === 'playlist' ? 'playlist-sync' : 'epg-sync';
+    const label = row.sync_type === 'playlist' ? 'Playlist' : 'EPG';
+    let detail = row.safe_error ?? `${label} refresh completed.`;
+    if (row.status === 'succeeded') {
+      if (summary.unchanged === true) {
+        detail = `${label} data was unchanged.`;
+      } else if (
+        row.sync_type === 'playlist' &&
+        typeof summary.liveCount === 'number'
+      ) {
+        detail = `${summary.liveCount.toLocaleString()} live entries accepted.`;
+      } else if (
+        row.sync_type === 'epg' &&
+        typeof summary.programmeCount === 'number'
+      ) {
+        detail = `${summary.programmeCount.toLocaleString()} programmes accepted.`;
+      }
+    }
+    return {
+      id: row.id,
+      kind,
+      occurredAt: (row.finished_at ?? row.started_at).toISOString(),
+      title: `${label} refresh ${row.status}`,
+      detail,
+      status: row.status,
+    };
+  }
+
+  async #activateStoredSnapshot(
+    client: PoolClient,
+    sourceId: string,
+    snapshotId: string,
+    action: 'snapshot-activate' | 'snapshot-reactivate',
+  ): Promise<void> {
+    const currentResult = await client.query<{ id: string }>(
+      `SELECT id
+       FROM source_snapshot
+       WHERE source_id = $1 AND is_last_known_good = TRUE
+       FOR UPDATE`,
+      [sourceId],
+    );
+    const fromSnapshotId = currentResult.rows[0]?.id ?? null;
+    await client.query(
+      'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
+      [sourceId],
+    );
+    const activated = await client.query(
+      `UPDATE source_snapshot
+       SET is_last_known_good = TRUE
+       WHERE source_id = $1 AND id = $2`,
+      [sourceId, snapshotId],
+    );
+    if (activated.rowCount !== 1) {
+      throw new Error('Snapshot activation target disappeared');
+    }
+    await this.#reconcileChannels(client, sourceId, snapshotId);
+    await client.query(
+      `INSERT INTO source_audit_event
+        (source_id, action, from_snapshot_id, to_snapshot_id, details)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [
+        sourceId,
+        action,
+        fromSnapshotId,
+        snapshotId,
+        JSON.stringify({
+          trigger: action === 'snapshot-activate' ? 'manual' : 'refresh',
+        }),
+      ],
+    );
+    await client.query('UPDATE source SET updated_at = NOW() WHERE id = $1', [
+      sourceId,
+    ]);
+  }
+
+  async #reconcileChannels(
+    client: PoolClient,
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<void> {
+    const existingResult = await client.query<{
+      id: string;
+      provider_stream_id: string | null;
+      tvg_id: string | null;
+      provider_name: string;
+      provider_group: string;
+      match_locked: boolean;
+    }>(
+      `SELECT c.id, c.provider_stream_id, c.tvg_id, c.provider_name,
+              c.provider_group, c.match_locked
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1
+         AND c.archived_at IS NULL
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'`,
+      [sourceId],
+    );
+    const itemResult = await client.query<{
+      id: string;
+      provider_stream_id: string | null;
+      tvg_id: string | null;
+      provider_name: string;
+      provider_group: string;
+      provider_logo_url: string | null;
+      sort_order: number;
+    }>(
+      `SELECT i.id, i.provider_stream_id, i.tvg_id,
+              i.original_name AS provider_name, i.provider_group,
+              i.logo_url AS provider_logo_url,
+              COALESCE((i.metadata->>'lineNumber')::int, 0) AS sort_order
+       FROM upstream_item i
+       JOIN source_snapshot s ON s.id = i.snapshot_id
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+       WHERE i.snapshot_id = $1 AND i.media_type = 'live'
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+       ORDER BY sort_order, i.id`,
+      [snapshotId],
+    );
+    const channels: ReconciliationChannel[] = existingResult.rows.map(
+      (row) => ({
+        id: row.id,
+        providerStreamId: row.provider_stream_id,
+        tvgId: row.tvg_id,
+        providerName: row.provider_name,
+        providerGroup: row.provider_group,
+        matchLocked: row.match_locked,
+      }),
+    );
+    const items: ReconciliationItem[] = itemResult.rows.map((row) => ({
+      id: row.id,
+      providerStreamId: row.provider_stream_id,
+      tvgId: row.tvg_id,
+      providerName: row.provider_name,
+      providerGroup: row.provider_group,
+      providerLogoUrl: row.provider_logo_url,
+      sortOrder: row.sort_order,
+    }));
+    const reconciliation = reconcileChannels(channels, items);
+
+    await client.query(
+      `UPDATE channel
+       SET current_upstream_item_id = NULL,
+           reconciliation_status = 'missing',
+           match_confidence = NULL,
+           updated_at = NOW()
+       WHERE source_id = $1 AND archived_at IS NULL`,
+      [sourceId],
+    );
+
+    if (reconciliation.matches.length > 0) {
+      const values = reconciliation.matches.map((match) => ({
+        channel_id: match.channelId,
+        item_id: match.item.id,
+        provider_stream_id: match.item.providerStreamId,
+        tvg_id: match.item.tvgId,
+        provider_name: match.item.providerName,
+        provider_group: match.item.providerGroup,
+        provider_logo_url: match.item.providerLogoUrl,
+        confidence: match.confidence,
+      }));
+      await client.query(
+        `UPDATE channel c
+         SET current_upstream_item_id = item.item_id::uuid,
+             provider_stream_id = item.provider_stream_id,
+             tvg_id = item.tvg_id,
+             provider_name = item.provider_name,
+             provider_group = item.provider_group,
+             provider_logo_url = item.provider_logo_url,
+             match_confidence = item.confidence,
+             reconciliation_status = 'matched',
+             last_seen_at = NOW(),
+             updated_at = NOW()
+         FROM jsonb_to_recordset($1::jsonb) AS item(
+           channel_id UUID,
+           item_id TEXT,
+           provider_stream_id TEXT,
+           tvg_id TEXT,
+           provider_name TEXT,
+           provider_group TEXT,
+           provider_logo_url TEXT,
+           confidence NUMERIC
+         )
+         WHERE c.id = item.channel_id`,
+        [JSON.stringify(values)],
+      );
+    }
+
+    if (reconciliation.ambiguousChannelIds.length > 0) {
+      await client.query(
+        `UPDATE channel
+         SET reconciliation_status = 'ambiguous', updated_at = NOW()
+         WHERE source_id = $1 AND id = ANY($2::uuid[])`,
+        [sourceId, reconciliation.ambiguousChannelIds],
+      );
+    }
+
+    if (reconciliation.newItems.length > 0) {
+      const values = reconciliation.newItems.map((item) => ({
+        item_id: item.id,
+        provider_stream_id: item.providerStreamId,
+        tvg_id: item.tvgId,
+        provider_name: item.providerName,
+        provider_group: item.providerGroup,
+        provider_logo_url: item.providerLogoUrl,
+        sort_order: item.sortOrder,
+      }));
+      await client.query(
+        `INSERT INTO channel
+          (source_id, current_upstream_item_id, provider_stream_id, tvg_id,
+           provider_name, provider_group, provider_logo_url, sort_order,
+           reconciliation_status, last_seen_at)
+         SELECT $1, item.item_id::uuid, item.provider_stream_id, item.tvg_id,
+                item.provider_name, item.provider_group, item.provider_logo_url,
+                item.sort_order, 'new', NOW()
+         FROM jsonb_to_recordset($2::jsonb) AS item(
+           item_id TEXT,
+           provider_stream_id TEXT,
+           tvg_id TEXT,
+           provider_name TEXT,
+           provider_group TEXT,
+           provider_logo_url TEXT,
+           sort_order INTEGER
+         )`,
+        [sourceId, JSON.stringify(values)],
+      );
+    }
+
+    await this.#reconcileEpgMappings(client, sourceId);
+  }
+
+  async #loadEpgReconciliation(
+    client: Pool | PoolClient,
+    sourceId: string,
+  ): Promise<{
+    channels: EpgPlaylistChannel[];
+    guideChannels: EpgGuideChannel[];
+    lockedMappings: LockedEpgMapping[];
+    reconciliation: ReturnType<typeof reconcileEpgMappings>;
+  }> {
+    const channelResult = await client.query<{
+      id: string;
+      tvg_id: string | null;
+      display_name: string;
+      provider_group: string;
+    }>(
+      `SELECT c.id, c.tvg_id,
+                COALESCE(c.custom_name, c.provider_name) AS display_name,
+                COALESCE(c.custom_group, c.provider_group) AS provider_group
+         FROM channel c
+         LEFT JOIN group_policy policy
+           ON policy.source_id = c.source_id
+          AND policy.provider_group = c.provider_group
+         WHERE c.source_id = $1 AND c.archived_at IS NULL
+           AND c.enabled = TRUE AND c.current_upstream_item_id IS NOT NULL
+           AND COALESCE(policy.behavior, 'permanent') = 'permanent'
+         ORDER BY display_name, c.id`,
+      [sourceId],
+    );
+    const guideResult = await client.query<{
+      upstream_id: string;
+      display_name: string;
+    }>(
+      `SELECT upstream_id, display_name
+         FROM epg_channel
+         WHERE source_id = $1 AND upstream_id IS NOT NULL
+         ORDER BY display_name, upstream_id`,
+      [sourceId],
+    );
+    const lockedResult = await client.query<{
+      channel_id: string;
+      epg_channel_upstream_id: string;
+    }>(
+      `SELECT mapping.channel_id, mapping.epg_channel_upstream_id
+         FROM epg_mapping mapping
+         JOIN channel c ON c.id = mapping.channel_id
+         LEFT JOIN group_policy policy
+           ON policy.source_id = c.source_id
+          AND policy.provider_group = c.provider_group
+         WHERE c.source_id = $1 AND mapping.manually_locked = TRUE
+           AND c.archived_at IS NULL AND c.enabled = TRUE
+           AND c.current_upstream_item_id IS NOT NULL
+           AND COALESCE(policy.behavior, 'permanent') = 'permanent'`,
+      [sourceId],
+    );
+    const channels: EpgPlaylistChannel[] = channelResult.rows.map((row) => ({
+      id: row.id,
+      tvgId: row.tvg_id,
+      displayName: row.display_name,
+      providerGroup: row.provider_group,
+    }));
+    const guideChannels: EpgGuideChannel[] = guideResult.rows.map((row) => ({
+      id: row.upstream_id,
+      displayName: row.display_name,
+    }));
+    const lockedMappings: LockedEpgMapping[] = lockedResult.rows.map((row) => ({
+      channelId: row.channel_id,
+      epgChannelId: row.epg_channel_upstream_id,
+    }));
+    return {
+      channels,
+      guideChannels,
+      lockedMappings,
+      reconciliation: reconcileEpgMappings(
+        channels,
+        guideChannels,
+        lockedMappings,
+      ),
+    };
+  }
+
+  async #reconcileEpgMappings(
+    client: PoolClient,
+    sourceId: string,
+  ): Promise<void> {
+    const { reconciliation } = await this.#loadEpgReconciliation(
+      client,
+      sourceId,
+    );
+    await client.query(
+      `DELETE FROM epg_mapping mapping
+       USING channel c
+       WHERE mapping.channel_id = c.id AND c.source_id = $1
+         AND mapping.manually_locked = FALSE`,
+      [sourceId],
+    );
+    await client.query(
+      `UPDATE epg_mapping mapping
+       SET epg_channel_id = NULL, updated_at = NOW()
+       FROM channel c
+       WHERE mapping.channel_id = c.id AND c.source_id = $1
+         AND mapping.manually_locked = TRUE`,
+      [sourceId],
+    );
+    await client.query(
+      `UPDATE epg_mapping mapping
+       SET epg_channel_id = guide.id, updated_at = NOW()
+       FROM channel c, epg_channel guide
+       WHERE mapping.channel_id = c.id AND c.source_id = $1
+         AND mapping.manually_locked = TRUE
+         AND guide.source_id = c.source_id
+         AND guide.upstream_id = mapping.epg_channel_upstream_id`,
+      [sourceId],
+    );
+
+    const automaticMatches = reconciliation.matches.filter(
+      (match) => !match.manuallyLocked,
+    );
+    if (automaticMatches.length === 0) return;
+    const values = automaticMatches.map((match) => ({
+      channel_id: match.channelId,
+      epg_channel_upstream_id: match.epgChannel.id,
+      confidence: match.confidence,
+    }));
+    await client.query(
+      `INSERT INTO epg_mapping
+        (channel_id, epg_channel_id, epg_channel_upstream_id, confidence,
+         manually_locked)
+       SELECT item.channel_id, guide.id, item.epg_channel_upstream_id,
+              item.confidence, FALSE
+       FROM jsonb_to_recordset($2::jsonb) AS item(
+         channel_id UUID,
+         epg_channel_upstream_id TEXT,
+         confidence NUMERIC
+       )
+       JOIN channel c ON c.id = item.channel_id AND c.source_id = $1
+       JOIN epg_channel guide
+         ON guide.source_id = c.source_id
+        AND guide.upstream_id = item.epg_channel_upstream_id
+       ON CONFLICT (channel_id) DO UPDATE SET
+         epg_channel_id = EXCLUDED.epg_channel_id,
+         epg_channel_upstream_id = EXCLUDED.epg_channel_upstream_id,
+         confidence = EXCLUDED.confidence,
+         manually_locked = FALSE,
+         updated_at = NOW()`,
+      [sourceId, JSON.stringify(values)],
+    );
   }
 
   async close(): Promise<void> {

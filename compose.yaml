@@ -10,7 +10,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
       interval: 10s
@@ -19,15 +18,41 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    init: true
+  migrate:
+    image: postgres:17-alpine
+    restart: 'no'
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-iptvmaster}
+      PGUSER: ${POSTGRES_USER:-iptvmaster}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      IPTVMASTER_MIGRATIONS_DIR: /migrations
+    volumes:
+      - ./deploy/postgres/init:/migrations:ro
+      - ./scripts/migrate-postgres.sh:/usr/local/bin/migrate-postgres:ro
+    command: ['/bin/sh', '/usr/local/bin/migrate-postgres']
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    image: ${IPTVMASTER_IMAGE:-iptvmaster:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        IPTVMASTER_VERSION: ${IPTVMASTER_VERSION:-development}
+        IPTVMASTER_REVISION: ${IPTVMASTER_REVISION:-unknown}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
@@ -39,6 +64,14 @@ services:
       EPG_REFRESH_ENABLED: ${EPG_REFRESH_ENABLED:-true}
       EPG_REFRESH_INTERVAL_MINUTES: ${EPG_REFRESH_INTERVAL_MINUTES:-720}
       EPG_REFRESH_INITIAL_DELAY_SECONDS: ${EPG_REFRESH_INITIAL_DELAY_SECONDS:-60}
+      PROVIDER_RETRY_ATTEMPTS: ${PROVIDER_RETRY_ATTEMPTS:-3}
+      PROVIDER_RETRY_INITIAL_DELAY_SECONDS: ${PROVIDER_RETRY_INITIAL_DELAY_SECONDS:-2}
+      PROVIDER_RETRY_MAX_DELAY_SECONDS: ${PROVIDER_RETRY_MAX_DELAY_SECONDS:-30}
+      MAINTENANCE_ENABLED: ${MAINTENANCE_ENABLED:-true}
+      MAINTENANCE_INTERVAL_MINUTES: ${MAINTENANCE_INTERVAL_MINUTES:-1440}
+      MAINTENANCE_INITIAL_DELAY_SECONDS: ${MAINTENANCE_INITIAL_DELAY_SECONDS:-300}
+      IPTVMASTER_SESSION_HOURS: ${IPTVMASTER_SESSION_HOURS:-168}
+      IPTVMASTER_SECURE_COOKIES: ${IPTVMASTER_SECURE_COOKIES:-false}
       DATABASE_URL: postgresql://${POSTGRES_USER:-iptvmaster}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-iptvmaster}
       IPTVMASTER_MASTER_KEY: ${IPTVMASTER_MASTER_KEY:?Set IPTVMASTER_MASTER_KEY in .env}
     ports:
@@ -49,7 +82,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/ready']
       interval: 30s
       timeout: 5s
       retries: 5

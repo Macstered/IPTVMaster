@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { ProviderHttpError } from './provider-error.js';
 import { inspectRemotePlaylist } from './source-import.js';
 
 function responseFor(
@@ -60,4 +61,28 @@ describe('remote playlist inspection', () => {
       }),
     ).rejects.toThrow(/exceeds/);
   });
+
+  it.each([
+    [503, true],
+    [429, true],
+    [401, false],
+    [404, false],
+  ])(
+    'classifies provider HTTP %i retryability without exposing the URL',
+    async (status, retryable) => {
+      const request = inspectRemotePlaylist(
+        'http://provider.test/get.php?token=synthetic',
+        {
+          fetchImplementation: async () => new Response('', { status }),
+        },
+      );
+
+      await expect(request).rejects.toMatchObject({
+        name: 'ProviderHttpError',
+        message: `Provider returned HTTP ${status}`,
+        status,
+        retryable,
+      } satisfies Partial<ProviderHttpError>);
+    },
+  );
 });

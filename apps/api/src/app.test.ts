@@ -9,18 +9,30 @@ import {
 } from '@iptvmaster/core';
 
 import { buildApp } from './app.js';
+import { SnapshotActivationConflictError } from './source-repository.js';
 import type {
+  BulkUpdateChannelInput,
+  BulkUpdateChannelResult,
+  ChannelListFilters,
+  ChannelListPage,
+  ChannelSummary,
   CreateSourceInput,
   CreatedOutputProfile,
   GroupSummary,
   ResolvedOutputProfile,
+  ReconciliationCandidate,
+  ReconciliationReview,
   SafeSource,
   SaveGroupPolicyInput,
+  SnapshotHistoryItem,
+  SourceActivityEvent,
+  SourceHistory,
   SourceCredentials,
   SourceRepository,
   StoredEpgGuide,
   StoredEpgSummary,
   StoredSnapshotSummary,
+  UpdateChannelInput,
 } from './source-repository.js';
 
 const applications: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -39,6 +51,12 @@ class MemorySourceRepository implements SourceRepository {
   policies: OutputGroupPolicy[] = [];
   outputProfile: ResolvedOutputProfile | null = null;
   latestEpg: StoredEpgGuide = { channels: [], programmes: [] };
+  channels: ChannelSummary[] = [];
+  reviewCandidates: ReconciliationCandidate[] = [];
+  snapshots: SnapshotHistoryItem[] = [];
+  activity: SourceActivityEvent[] = [];
+  snapshotEntries = new Map<string, M3uEntry[]>();
+  epgMappings = new Map<string, string>();
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -69,17 +87,87 @@ class MemorySourceRepository implements SourceRepository {
     sourceId: string,
     inspection: PlaylistInspection,
   ): Promise<StoredSnapshotSummary> {
+    const existing = this.snapshots.find(
+      (snapshot) => snapshot.fingerprint === inspection.fingerprint,
+    );
+    if (existing) {
+      const wasCurrent = existing.isCurrent;
+      if (!wasCurrent) await this.activateSnapshot(sourceId, existing.id);
+      return { ...existing, unchanged: wasCurrent };
+    }
     this.latestEntries = inspection.entries;
-    return {
-      id: '00000000-0000-4000-8000-000000000002',
+    this.snapshots = this.snapshots.map((snapshot) => ({
+      ...snapshot,
+      isCurrent: false,
+    }));
+    const suffix = String(this.snapshots.length + 2).padStart(12, '0');
+    const snapshot: SnapshotHistoryItem = {
+      id: `00000000-0000-4000-8000-${suffix}`,
       sourceId,
       fingerprint: inspection.fingerprint,
       importedAt: '2026-08-04T00:00:00.000Z',
       liveCount: inspection.entries.length,
       skippedEntries: inspection.skippedEntries,
       issueCount: inspection.issues.length,
-      unchanged: false,
+      isCurrent: true,
     };
+    this.snapshots.unshift(snapshot);
+    this.snapshotEntries.set(snapshot.id, inspection.entries);
+    this.activity.unshift({
+      id: `10000000-0000-4000-8000-${suffix}`,
+      kind: 'playlist-sync',
+      occurredAt: snapshot.importedAt,
+      title: 'Playlist refresh succeeded',
+      detail: `${snapshot.liveCount} live entries accepted.`,
+      status: 'succeeded',
+    });
+    return { ...snapshot, unchanged: false };
+  }
+
+  async listSourceHistory(
+    sourceId: string,
+    limit: number,
+  ): Promise<SourceHistory> {
+    return {
+      snapshots: this.snapshots
+        .filter((snapshot) => snapshot.sourceId === sourceId)
+        .slice(0, limit),
+      activity: this.activity.slice(0, limit),
+    };
+  }
+
+  async activateSnapshot(
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<SnapshotHistoryItem | null> {
+    const target = this.snapshots.find(
+      (snapshot) =>
+        snapshot.sourceId === sourceId && snapshot.id === snapshotId,
+    );
+    if (!target) return null;
+    if (target.isCurrent) {
+      throw new SnapshotActivationConflictError(
+        'The selected snapshot is already current',
+      );
+    }
+    this.snapshots = this.snapshots.map((snapshot) => ({
+      ...snapshot,
+      isCurrent: snapshot.id === snapshotId,
+    }));
+    this.latestEntries = this.snapshotEntries.get(snapshotId) ?? [];
+    const activated = this.snapshots.find(
+      (snapshot) => snapshot.id === snapshotId,
+    );
+    if (!activated) return null;
+    this.activity.unshift({
+      id: `20000000-0000-4000-8000-${String(this.activity.length + 1).padStart(12, '0')}`,
+      kind: 'snapshot-activate',
+      occurredAt: '2026-08-04T02:00:00.000Z',
+      title: 'Snapshot restored',
+      detail: `${activated.liveCount} live entries restored.`,
+      status: 'succeeded',
+    });
+    return activated;
   }
 
   async getLatestPlaylistEntries(): Promise<M3uEntry[]> {
@@ -169,6 +257,9 @@ class MemorySourceRepository implements SourceRepository {
         ? { outputGroupName: input.outputGroupName }
         : {}),
       hidePlaceholders: input.hidePlaceholders,
+      ...(input.placeholderPatterns
+        ? { placeholderPatterns: input.placeholderPatterns }
+        : {}),
       sourceTimeZone: input.sourceTimeZone ?? 'Europe/Stockholm',
       displayTimeZone: input.displayTimeZone ?? 'Europe/Helsinki',
       numericDateOrder: input.numericDateOrder ?? 'month-day',
@@ -177,6 +268,290 @@ class MemorySourceRepository implements SourceRepository {
 
   async listOutputGroupPolicies(): Promise<OutputGroupPolicy[]> {
     return this.policies;
+  }
+
+  async listChannels(
+    sourceId: string,
+    filters: ChannelListFilters,
+  ): Promise<ChannelListPage> {
+    const search = filters.search?.toLocaleLowerCase() ?? '';
+    const matches = this.channels.filter(
+      (channel) =>
+        channel.sourceId === sourceId &&
+        (!filters.group || channel.providerGroup === filters.group) &&
+        (!filters.status || channel.reconciliationStatus === filters.status) &&
+        (!search ||
+          [
+            channel.providerName,
+            channel.providerGroup,
+            channel.customName ?? '',
+            channel.customGroup ?? '',
+            channel.tvgId ?? '',
+          ].some((value) => value.toLocaleLowerCase().includes(search))),
+    );
+    return {
+      channels: matches.slice(filters.offset, filters.offset + filters.limit),
+      total: matches.length,
+      limit: filters.limit,
+      offset: filters.offset,
+    };
+  }
+
+  async updateChannel(
+    sourceId: string,
+    channelId: string,
+    input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null> {
+    const index = this.channels.findIndex(
+      (channel) => channel.sourceId === sourceId && channel.id === channelId,
+    );
+    const current = this.channels[index];
+    if (!current) return null;
+    const updated: ChannelSummary = {
+      ...current,
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      ...(input.sortOrder === undefined ? {} : { sortOrder: input.sortOrder }),
+      updatedAt: '2026-08-04T01:00:00.000Z',
+    };
+    for (const [key, value] of [
+      ['customName', input.customName],
+      ['customGroup', input.customGroup],
+      ['customLogoUrl', input.customLogoUrl],
+    ] as const) {
+      if (value === undefined) continue;
+      if (value === null) delete updated[key];
+      else updated[key] = value;
+    }
+    this.channels[index] = updated;
+    return updated;
+  }
+
+  async bulkUpdateChannels(
+    sourceId: string,
+    channelIds: string[],
+    input: BulkUpdateChannelInput,
+  ): Promise<BulkUpdateChannelResult> {
+    const selected = new Set(channelIds);
+    let updatedCount = 0;
+    this.channels = this.channels.map((channel) => {
+      if (channel.sourceId !== sourceId || !selected.has(channel.id)) {
+        return channel;
+      }
+      updatedCount += 1;
+      const updated = { ...channel };
+      if (input.enabled !== undefined) updated.enabled = input.enabled;
+      for (const [key, value] of [
+        ['customGroup', input.customGroup],
+        ['customLogoUrl', input.customLogoUrl],
+      ] as const) {
+        if (value === undefined) continue;
+        if (value === null) delete updated[key];
+        else updated[key] = value;
+      }
+      return updated;
+    });
+    return { updatedCount };
+  }
+
+  async getReconciliationReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ): Promise<ReconciliationReview> {
+    const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const unresolved = this.channels.filter(
+      (channel) =>
+        channel.sourceId === sourceId &&
+        ['ambiguous', 'missing'].includes(channel.reconciliationStatus) &&
+        (!normalizedSearch ||
+          [
+            channel.providerName,
+            channel.providerGroup,
+            channel.tvgId ?? '',
+          ].some((value) =>
+            value.toLocaleLowerCase().includes(normalizedSearch),
+          )),
+    );
+    const candidates = this.reviewCandidates;
+    return {
+      unresolvedChannels: unresolved.slice(0, limit),
+      candidates: candidates.slice(0, limit),
+      ambiguousCount: this.channels.filter(
+        (channel) => channel.reconciliationStatus === 'ambiguous',
+      ).length,
+      missingCount: this.channels.filter(
+        (channel) => channel.reconciliationStatus === 'missing',
+      ).length,
+      newCount: this.channels.filter(
+        (channel) => channel.reconciliationStatus === 'new',
+      ).length,
+      candidateTotal: candidates.length,
+      truncated: unresolved.length > limit || candidates.length > limit,
+    };
+  }
+
+  async resolveChannelMatch(
+    sourceId: string,
+    channelId: string,
+    upstreamItemId: string,
+  ): Promise<ChannelSummary | null> {
+    const candidate = this.reviewCandidates.find(
+      (value) => value.upstreamItemId === upstreamItemId,
+    );
+    const target = this.channels.find(
+      (channel) => channel.sourceId === sourceId && channel.id === channelId,
+    );
+    if (!candidate || !target) return null;
+    this.channels = this.channels.filter(
+      (channel) =>
+        channel.id === target.id || channel.id !== candidate.linkedChannelId,
+    );
+    const updated: ChannelSummary = {
+      ...target,
+      providerName: candidate.providerName,
+      providerGroup: candidate.providerGroup,
+      ...(candidate.tvgId ? { tvgId: candidate.tvgId } : {}),
+      matchLocked: true,
+      matchConfidence: 1,
+      reconciliationStatus: 'matched',
+    };
+    this.channels = this.channels.map((channel) =>
+      channel.id === target.id ? updated : channel,
+    );
+    this.reviewCandidates = this.reviewCandidates.filter(
+      (value) => value.upstreamItemId !== upstreamItemId,
+    );
+    return updated;
+  }
+
+  async unlockChannelMatch(
+    sourceId: string,
+    channelId: string,
+  ): Promise<ChannelSummary | null> {
+    const channel = this.channels.find(
+      (value) => value.sourceId === sourceId && value.id === channelId,
+    );
+    if (!channel) return null;
+    channel.matchLocked = false;
+    return channel;
+  }
+
+  async getEpgMappingReview(
+    sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ) {
+    const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const mappings = this.channels
+      .filter(
+        (channel) =>
+          channel.sourceId === sourceId &&
+          (!normalizedSearch ||
+            [channel.providerName, channel.providerGroup, channel.tvgId ?? '']
+              .join(' ')
+              .toLocaleLowerCase()
+              .includes(normalizedSearch)),
+      )
+      .map((channel) => {
+        const manualId = this.epgMappings.get(channel.id);
+        const candidates = this.latestEpg.channels.filter(
+          (guide) =>
+            (manualId && guide.id === manualId) ||
+            (!manualId &&
+              ((channel.tvgId && guide.id === channel.tvgId) ||
+                guide.displayName.toLocaleLowerCase() ===
+                  channel.providerName
+                    .replace(/\s+(?:hd|fhd|uhd|4k)$/iu, '')
+                    .toLocaleLowerCase())),
+        );
+        const selected = candidates.length === 1 ? candidates[0] : undefined;
+        return {
+          channelId: channel.id,
+          channelName: channel.customName ?? channel.providerName,
+          providerGroup: channel.providerGroup,
+          ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
+          status: selected
+            ? ('matched' as const)
+            : candidates.length > 1
+              ? ('ambiguous' as const)
+              : ('missing' as const),
+          manuallyLocked: manualId !== undefined,
+          ...(selected
+            ? {
+                epgChannelId: selected.id,
+                epgDisplayName: selected.displayName,
+                confidence: manualId || channel.tvgId ? 1 : 0.85,
+              }
+            : manualId
+              ? { epgChannelId: manualId }
+              : {}),
+          candidateIds: candidates.map((candidate) => candidate.id),
+        };
+      });
+    return {
+      mappings: mappings.slice(0, limit),
+      matchedCount: mappings.filter((mapping) => mapping.status === 'matched')
+        .length,
+      missingCount: mappings.filter((mapping) => mapping.status === 'missing')
+        .length,
+      ambiguousCount: mappings.filter(
+        (mapping) => mapping.status === 'ambiguous',
+      ).length,
+      manualCount: mappings.filter((mapping) => mapping.manuallyLocked).length,
+      total: mappings.length,
+      truncated: mappings.length > limit,
+    };
+  }
+
+  async searchEpgChannels(
+    _sourceId: string,
+    search: string | undefined,
+    limit: number,
+  ) {
+    const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const channels = this.latestEpg.channels.filter(
+      (channel) =>
+        !normalizedSearch ||
+        [channel.id, channel.displayName].some((value) =>
+          value.toLocaleLowerCase().includes(normalizedSearch),
+        ),
+    );
+    return {
+      channels: channels.slice(0, limit),
+      total: channels.length,
+      truncated: channels.length > limit,
+    };
+  }
+
+  async saveManualEpgMapping(
+    sourceId: string,
+    channelId: string,
+    epgChannelId: string,
+  ): Promise<boolean> {
+    if (
+      !this.channels.some(
+        (channel) => channel.sourceId === sourceId && channel.id === channelId,
+      ) ||
+      !this.latestEpg.channels.some((channel) => channel.id === epgChannelId)
+    ) {
+      return false;
+    }
+    this.epgMappings.set(channelId, epgChannelId);
+    return true;
+  }
+
+  async unlockEpgMapping(
+    sourceId: string,
+    channelId: string,
+  ): Promise<boolean> {
+    if (
+      !this.channels.some(
+        (channel) => channel.sourceId === sourceId && channel.id === channelId,
+      )
+    ) {
+      return false;
+    }
+    return this.epgMappings.delete(channelId);
   }
 
   async createOutputProfile(
@@ -233,6 +608,8 @@ describe('IPTVMaster API', () => {
     expect(response.json()).toEqual({
       status: 'ok',
       service: 'iptvmaster-api',
+      version: 'development',
+      revision: 'unknown',
     });
   });
 
@@ -442,6 +819,324 @@ describe('IPTVMaster API', () => {
     expect(repository.latestEntries).toHaveLength(0);
   });
 
+  it('lists retained snapshots and safely restores an older version', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const inspection = (
+      fingerprint: string,
+      name: string,
+    ): PlaylistInspection => ({
+      fingerprint: fingerprint.repeat(64),
+      totalBytes: 80,
+      entries: [
+        {
+          duration: -1,
+          attributes: { 'group-title': 'Finland' },
+          name,
+          url: `http://provider.test/synthetic/${fingerprint}`,
+          mediaType: 'live',
+          lineNumber: 2,
+        },
+      ],
+      issues: [],
+      mediaCounts: { live: 1, vod: 0, series: 0, unknown: 0 },
+      skippedEntries: 0,
+    });
+    const older = await repository.savePlaylistSnapshot(
+      source.id,
+      inspection('a', 'Yle TV1'),
+    );
+    const newer = await repository.savePlaylistSnapshot(
+      source.id,
+      inspection('b', 'Yle TV1 HD'),
+    );
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/history?limit=10`,
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    expect(historyResponse.json().snapshots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: older.id, isCurrent: false }),
+        expect.objectContaining({ id: newer.id, isCurrent: true }),
+      ]),
+    );
+
+    const activateResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/snapshots/${older.id}/activate`,
+    });
+    expect(activateResponse.statusCode).toBe(200);
+    expect(activateResponse.json().snapshot).toEqual(
+      expect.objectContaining({ id: older.id, isCurrent: true }),
+    );
+    expect(repository.latestEntries[0]?.name).toBe('Yle TV1');
+
+    const updatedHistory = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/history?limit=10`,
+    });
+    expect(updatedHistory.json().activity[0]).toEqual(
+      expect.objectContaining({ kind: 'snapshot-activate' }),
+    );
+    const conflictResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/snapshots/${older.id}/activate`,
+    });
+    expect(conflictResponse.statusCode).toBe(409);
+  });
+
+  it('lists and updates permanent channel overrides without exposing streams', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const channelId = '00000000-0000-4000-8000-000000000004';
+    repository.channels = [
+      {
+        id: channelId,
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        tvgId: 'yle1.fi',
+        enabled: true,
+        sortOrder: 2,
+        matchLocked: false,
+        matchConfidence: 1,
+        reconciliationStatus: 'matched',
+        lastSeenAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/channels?search=yle&limit=20`,
+    });
+    const updateResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}`,
+      payload: {
+        enabled: false,
+        customName: 'Yle One',
+        customGroup: 'Finnish favourites',
+        customLogoUrl: 'https://images.test/yle-one.png',
+        sortOrder: 10,
+      },
+    });
+    const unsafeLogoResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}`,
+      payload: { customLogoUrl: 'ftp://images.test/yle.png' },
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json()).toEqual(
+      expect.objectContaining({ total: 1, limit: 20 }),
+    );
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json().channel).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        customName: 'Yle One',
+        customGroup: 'Finnish favourites',
+        sortOrder: 10,
+      }),
+    );
+    expect(unsafeLogoResponse.statusCode).toBe(400);
+  });
+
+  it('reviews, manually resolves, unlocks, and bulk-updates channel changes', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const missingChannelId = '00000000-0000-4000-8000-000000000010';
+    const newChannelId = '00000000-0000-4000-8000-000000000011';
+    const upstreamItemId = '00000000-0000-4000-8000-000000000012';
+    repository.channels = [
+      {
+        id: missingChannelId,
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        enabled: true,
+        customName: 'Yle One',
+        sortOrder: 2,
+        matchLocked: false,
+        reconciliationStatus: 'missing',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+      {
+        id: newChannelId,
+        sourceId: source.id,
+        providerName: 'Yle News HD',
+        providerGroup: 'Finland',
+        enabled: true,
+        tvgId: 'yle-news.fi',
+        sortOrder: 4,
+        matchLocked: false,
+        reconciliationStatus: 'new',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    repository.reviewCandidates = [
+      {
+        upstreamItemId,
+        providerName: 'Yle News HD',
+        providerGroup: 'Finland',
+        tvgId: 'yle-news.fi',
+        linkedChannelId: newChannelId,
+        linkedChannelStatus: 'new',
+      },
+    ];
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const reviewResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/channel-review`,
+    });
+    const resolveResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/channels/${missingChannelId}/resolve`,
+      payload: { upstreamItemId },
+    });
+    const unlockResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/channels/${missingChannelId}/unlock-match`,
+    });
+    const bulkResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels`,
+      payload: {
+        channelIds: [missingChannelId],
+        update: { enabled: false, customGroup: 'Reviewed channels' },
+      },
+    });
+
+    expect(reviewResponse.statusCode).toBe(200);
+    expect(reviewResponse.json()).toEqual(
+      expect.objectContaining({ missingCount: 1, newCount: 1 }),
+    );
+    expect(resolveResponse.statusCode).toBe(200);
+    expect(resolveResponse.json().channel).toEqual(
+      expect.objectContaining({
+        id: missingChannelId,
+        providerName: 'Yle News HD',
+        customName: 'Yle One',
+        matchLocked: true,
+        reconciliationStatus: 'matched',
+      }),
+    );
+    expect(unlockResponse.statusCode).toBe(200);
+    expect(unlockResponse.json().channel.matchLocked).toBe(false);
+    expect(bulkResponse.statusCode).toBe(200);
+    expect(bulkResponse.json()).toEqual({ updatedCount: 1 });
+    expect(repository.channels).toHaveLength(1);
+    expect(repository.channels[0]).toEqual(
+      expect.objectContaining({
+        id: missingChannelId,
+        enabled: false,
+        customGroup: 'Reviewed channels',
+      }),
+    );
+  });
+
+  it('reviews, locks, searches, and unlocks EPG mappings', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const channelId = '00000000-0000-4000-8000-000000000021';
+    repository.channels = [
+      {
+        id: channelId,
+        sourceId: source.id,
+        providerName: 'YLE Primary',
+        providerGroup: 'Finland',
+        tvgId: 'wrong-id',
+        enabled: true,
+        sortOrder: 1,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    repository.latestEpg = {
+      channels: [{ id: 'yle1.fi', displayName: 'Yle TV1' }],
+      programmes: [],
+    };
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const initialReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    const guideSearch = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-channels?search=yle`,
+    });
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}/epg-mapping`,
+      payload: { epgChannelId: 'yle1.fi' },
+    });
+    const lockedReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    const unlockResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}/epg-mapping`,
+    });
+
+    expect(initialReview.statusCode).toBe(200);
+    expect(initialReview.json()).toEqual(
+      expect.objectContaining({ missingCount: 1, matchedCount: 0 }),
+    );
+    expect(guideSearch.statusCode).toBe(200);
+    expect(guideSearch.json().channels).toEqual([
+      expect.objectContaining({ id: 'yle1.fi', displayName: 'Yle TV1' }),
+    ]);
+    expect(saveResponse.statusCode).toBe(200);
+    expect(lockedReview.json()).toEqual(
+      expect.objectContaining({ matchedCount: 1, manualCount: 1 }),
+    );
+    expect(lockedReview.json().mappings[0]).toEqual(
+      expect.objectContaining({
+        channelId,
+        epgChannelId: 'yle1.fi',
+        manuallyLocked: true,
+      }),
+    );
+    expect(unlockResponse.statusCode).toBe(204);
+  });
+
   it('publishes a token-protected M3U with event policies applied', async () => {
     const repository = new MemorySourceRepository();
     const source = await repository.createSource({
@@ -527,6 +1222,40 @@ describe('IPTVMaster API', () => {
       },
     });
     expect(policyResponse.statusCode).toBe(200);
+
+    const eventReviewResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/events?referenceDate=2026-08-04`,
+    });
+    expect(eventReviewResponse.statusCode).toBe(200);
+    const eventReview = eventReviewResponse.json();
+    expect(eventReview).toEqual(
+      expect.objectContaining({
+        summary: expect.objectContaining({
+          groupCount: 1,
+          totalEntries: 2,
+          hiddenEntries: 1,
+          localizedEntries: 1,
+        }),
+        groups: [
+          expect.objectContaining({
+            groupName: 'MTV Urheilu Events FI',
+            entries: expect.arrayContaining([
+              expect.objectContaining({
+                originalName: '17:00 Tennis 8/4',
+                localizedName: '18:00 Tennis 8/4',
+                status: 'localized',
+              }),
+              expect.objectContaining({
+                originalName: 'Reload your playlist',
+                hidden: true,
+              }),
+            ]),
+          }),
+        ],
+      }),
+    );
+    expect(JSON.stringify(eventReview)).not.toContain('provider.test');
 
     const profileResponse = await app.inject({
       method: 'POST',

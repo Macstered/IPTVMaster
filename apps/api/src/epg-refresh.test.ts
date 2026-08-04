@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { XmltvInspection } from '@iptvmaster/core';
+import { ProviderHttpError, type XmltvInspection } from '@iptvmaster/core';
 
 import { EpgRefreshCoordinator, EpgScheduler } from './epg-refresh.js';
 import type {
@@ -56,11 +56,48 @@ function repository(): SourceRepository {
       epgUrl: 'http://provider.test/guide',
     })),
     savePlaylistSnapshot: vi.fn(),
+    listSourceHistory: vi.fn(async () => ({ snapshots: [], activity: [] })),
+    activateSnapshot: vi.fn(async () => null),
     saveEpgSnapshot: vi.fn(async () => summary),
     getLatestEpg: vi.fn(async () => ({ channels: [], programmes: [] })),
     getLatestPlaylistEntries: vi.fn(async () => []),
     listGroups: vi.fn(async () => []),
     saveGroupPolicy: vi.fn(),
+    listChannels: vi.fn(async (_sourceId, filters) => ({
+      channels: [],
+      total: 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    })),
+    updateChannel: vi.fn(async () => null),
+    bulkUpdateChannels: vi.fn(async () => ({ updatedCount: 0 })),
+    getReconciliationReview: vi.fn(async () => ({
+      unresolvedChannels: [],
+      candidates: [],
+      ambiguousCount: 0,
+      missingCount: 0,
+      newCount: 0,
+      candidateTotal: 0,
+      truncated: false,
+    })),
+    resolveChannelMatch: vi.fn(async () => null),
+    unlockChannelMatch: vi.fn(async () => null),
+    getEpgMappingReview: vi.fn(async () => ({
+      mappings: [],
+      matchedCount: 0,
+      missingCount: 0,
+      ambiguousCount: 0,
+      manualCount: 0,
+      total: 0,
+      truncated: false,
+    })),
+    searchEpgChannels: vi.fn(async () => ({
+      channels: [],
+      total: 0,
+      truncated: false,
+    })),
+    saveManualEpgMapping: vi.fn(async () => false),
+    unlockEpgMapping: vi.fn(async () => false),
     listOutputGroupPolicies: vi.fn(async () => []),
     createOutputProfile: vi.fn(),
     resolveOutputProfile: vi.fn(async () => null),
@@ -97,5 +134,25 @@ describe('EPG refresh automation', () => {
     expect(data.saveEpgSnapshot).toHaveBeenCalledTimes(1);
     expect(scheduler.status().intervalMinutes).toBe(720);
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient XMLTV failure without replacing the guide early', async () => {
+    const data = repository();
+    const inspector = vi
+      .fn<() => Promise<XmltvInspection>>()
+      .mockRejectedValueOnce(new ProviderHttpError(429))
+      .mockResolvedValue(inspection());
+    const coordinator = new EpgRefreshCoordinator(data, inspector, {
+      maxAttempts: 3,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    const result = await coordinator.refresh(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    expect(result.attempts).toBe(2);
+    expect(inspector).toHaveBeenCalledTimes(2);
+    expect(data.saveEpgSnapshot).toHaveBeenCalledTimes(1);
   });
 });

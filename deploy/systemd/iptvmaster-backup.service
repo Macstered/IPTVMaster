@@ -1,0 +1,12 @@
+[Unit]
+Description=Create a PostgreSQL backup for IPTVMaster
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/iptvmaster
+Environment=IPTVMASTER_BACKUP_DIR=/var/backups/iptvmaster
+Environment=IPTVMASTER_BACKUP_RETENTION_DAYS=14
+ExecStart=/opt/iptvmaster/scripts/backup-postgres.sh
+UMask=0077
