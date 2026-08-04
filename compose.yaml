@@ -40,6 +40,8 @@ services:
       EPG_REFRESH_ENABLED: ${EPG_REFRESH_ENABLED:-true}
       EPG_REFRESH_INTERVAL_MINUTES: ${EPG_REFRESH_INTERVAL_MINUTES:-720}
       EPG_REFRESH_INITIAL_DELAY_SECONDS: ${EPG_REFRESH_INITIAL_DELAY_SECONDS:-60}
+      IPTVMASTER_SESSION_HOURS: ${IPTVMASTER_SESSION_HOURS:-168}
+      IPTVMASTER_SECURE_COOKIES: ${IPTVMASTER_SECURE_COOKIES:-false}
       DATABASE_URL: postgresql://${POSTGRES_USER:-iptvmaster}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-iptvmaster}
       IPTVMASTER_MASTER_KEY: ${IPTVMASTER_MASTER_KEY:?Set IPTVMASTER_MASTER_KEY in .env}
     ports:
@@ -50,7 +52,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/ready']
       interval: 30s
       timeout: 5s
       retries: 5

@@ -16,6 +16,10 @@ Database backups contain encrypted provider URLs and should be stored with restr
 
 IPTVMaster is intended for trusted-LAN access only. Do not expose the application, database, or generated playlist endpoints directly to the public internet.
 
+The editor API requires the single local administrator session after first-run setup. Passwords are hashed with scrypt and a random salt. Session and CSRF tokens are stored only as SHA-256 hashes; the browser session cookie is `HttpOnly` and both cookies use `SameSite=Strict`. Enable `IPTVMASTER_SECURE_COOKIES=true` only when the browser always reaches the app through HTTPS. State-changing editor requests also require a same-origin CSRF header, and repeated failed logins are throttled.
+
+Authentication is an additional layer, not permission to expose the service publicly. TiviMate playlist and EPG endpoints deliberately do not use the browser session; their long random output token remains the access control and can be revoked independently.
+
 The application must not be used to relay or redistribute streams. Playback should go directly from the authorized player to the configured provider.
 
 ## Reporting a vulnerability

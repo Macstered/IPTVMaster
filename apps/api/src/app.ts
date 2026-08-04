@@ -16,7 +16,11 @@ import {
   type PlaylistInspection,
   type XmltvInspection,
 } from '@iptvmaster/core';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from 'fastify';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
@@ -37,6 +41,18 @@ import {
   EpgRefreshCoordinator,
   EpgScheduler,
 } from './epg-refresh.js';
+import {
+  AdministratorAlreadyConfiguredError,
+  AuthService,
+  InvalidCredentialsError,
+  LoginRateLimiter,
+  PostgresAuthRepository,
+  type AuthRepository,
+  type CreatedAuthSession,
+} from './auth.js';
+
+const SESSION_COOKIE = 'iptvmaster_session';
+const CSRF_COOKIE = 'iptvmaster_csrf';
 
 const timePolicySchema = z.object({
   sourceTimeZone: z.string().min(1).default('Europe/Stockholm'),
@@ -167,8 +183,29 @@ const manualEpgMappingSchema = z.object({
   epgChannelId: z.string().trim().min(1).max(500),
 });
 
+const administratorUsernameSchema = z
+  .string()
+  .trim()
+  .min(3)
+  .max(64)
+  .regex(
+    /^[A-Za-z0-9._-]+$/,
+    'Use letters, numbers, dots, underscores, or hyphens',
+  );
+
+const administratorSetupSchema = z.object({
+  username: administratorUsernameSchema,
+  password: z.string().min(12).max(128),
+});
+
+const administratorLoginSchema = z.object({
+  username: administratorUsernameSchema,
+  password: z.string().min(1).max(128),
+});
+
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
+  authRepository?: AuthRepository;
   playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
   epgInspector?: (epgUrl: string) => Promise<XmltvInspection>;
   enablePlaylistScheduler?: boolean;
@@ -177,6 +214,9 @@ export interface BuildAppOptions {
   playlistRefreshInitialDelayMs?: number;
   epgRefreshIntervalMs?: number;
   epgRefreshInitialDelayMs?: number;
+  sessionTtlMs?: number;
+  secureCookies?: boolean;
+  developmentMode?: boolean;
 }
 
 function safeEntry(entry: M3uEntry) {
@@ -213,6 +253,89 @@ function positiveEnvironmentNumber(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function requestCookies(request: FastifyRequest): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  const header = request.headers.cookie;
+  if (!header) return cookies;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator <= 0) continue;
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      // Ignore malformed cookie values.
+    }
+  }
+  return cookies;
+}
+
+function cookieValue(
+  name: string,
+  value: string,
+  options: { httpOnly: boolean; maxAge: number; secure: boolean },
+): string {
+  return [
+    `${name}=${encodeURIComponent(value)}`,
+    'Path=/',
+    `Max-Age=${options.maxAge}`,
+    'SameSite=Strict',
+    ...(options.httpOnly ? ['HttpOnly'] : []),
+    ...(options.secure ? ['Secure'] : []),
+  ].join('; ');
+}
+
+function setSessionCookies(
+  reply: FastifyReply,
+  session: CreatedAuthSession,
+  sessionTtlMs: number,
+  secure: boolean,
+): void {
+  const maxAge = Math.max(1, Math.floor(sessionTtlMs / 1_000));
+  reply.header('set-cookie', [
+    cookieValue(SESSION_COOKIE, session.sessionToken, {
+      httpOnly: true,
+      maxAge,
+      secure,
+    }),
+    cookieValue(CSRF_COOKIE, session.csrfToken, {
+      httpOnly: false,
+      maxAge,
+      secure,
+    }),
+  ]);
+}
+
+function clearSessionCookies(reply: FastifyReply, secure: boolean): void {
+  reply.header('set-cookie', [
+    cookieValue(SESSION_COOKIE, '', { httpOnly: true, maxAge: 0, secure }),
+    cookieValue(CSRF_COOKIE, '', { httpOnly: false, maxAge: 0, secure }),
+  ]);
+}
+
+function isSameOrigin(
+  request: FastifyRequest,
+  allowDevelopmentLoopback: boolean,
+): boolean {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  try {
+    const originUrl = new URL(origin);
+    const host = request.headers.host;
+    if (host && originUrl.host === host) return true;
+    if (!allowDevelopmentLoopback) return false;
+    const loopback = new Set(['localhost', '127.0.0.1', '::1']);
+    return loopback.has(originUrl.hostname) && loopback.has(request.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function clientRateLimitKey(request: FastifyRequest): string {
+  return `login|${request.ip}`;
+}
+
 export async function buildApp(
   options: BuildAppOptions = {},
 ): Promise<FastifyInstance> {
@@ -226,6 +349,7 @@ export async function buildApp(
           'req.body.url',
           'req.body.playlistUrl',
           'req.body.epgUrl',
+          'req.body.password',
           'password',
           '*.password',
           '*.url',
@@ -246,6 +370,27 @@ export async function buildApp(
     sourceRepository = new PostgresSourceRepository(databaseUrl, masterKey);
     ownsSourceRepository = true;
   }
+  let authRepository = options.authRepository;
+  let ownsAuthRepository = false;
+  if (!authRepository && databaseUrl) {
+    authRepository = new PostgresAuthRepository(databaseUrl);
+    ownsAuthRepository = true;
+  }
+  const sessionTtlMs =
+    options.sessionTtlMs ??
+    positiveEnvironmentNumber('IPTVMASTER_SESSION_HOURS', 168) *
+      60 *
+      60 *
+      1_000;
+  const secureCookies =
+    options.secureCookies ??
+    process.env['IPTVMASTER_SECURE_COOKIES'] === 'true';
+  const developmentMode =
+    options.developmentMode ?? process.env['NODE_ENV'] !== 'production';
+  const authService = authRepository
+    ? new AuthService(authRepository, sessionTtlMs)
+    : undefined;
+  const loginRateLimiter = new LoginRateLimiter();
 
   const refreshCoordinator = sourceRepository
     ? new PlaylistRefreshCoordinator(sourceRepository, playlistInspector)
@@ -297,20 +442,243 @@ export async function buildApp(
   if (
     playlistScheduler ||
     epgScheduler ||
-    (ownsSourceRepository && sourceRepository?.close)
+    (ownsSourceRepository && sourceRepository?.close) ||
+    ownsAuthRepository
   ) {
     app.addHook('onClose', async () => {
       await playlistScheduler?.stop();
       await epgScheduler?.stop();
       if (ownsSourceRepository) await sourceRepository?.close?.();
+      if (ownsAuthRepository) await authService?.close();
     });
   }
 
   await app.register(cors, {
-    origin: /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
+    origin: developmentMode
+      ? /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/
+      : false,
+    credentials: developmentMode,
+  });
+
+  app.addHook('onSend', async (request, reply, payload) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('x-frame-options', 'DENY');
+    reply.header('referrer-policy', 'no-referrer');
+    reply.header(
+      'permissions-policy',
+      'camera=(), microphone=(), geolocation=()',
+    );
+    reply.header('cross-origin-opener-policy', 'same-origin');
+    reply.header('cross-origin-resource-policy', 'same-origin');
+    reply.header(
+      'content-security-policy',
+      "default-src 'self'; base-uri 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: http: https:; object-src 'none'; script-src 'self'; style-src 'self'",
+    );
+    if (secureCookies) {
+      reply.header(
+        'strict-transport-security',
+        'max-age=31536000; includeSubDomains',
+      );
+    }
+    if (request.url.startsWith('/api/')) {
+      reply.header('cache-control', 'no-store');
+    }
+    return payload;
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    if (!authService) return;
+    const path = request.url.split('?', 1)[0] ?? request.url;
+    if (!path.startsWith('/api/v1/') || path.startsWith('/api/v1/auth/')) {
+      return;
+    }
+    const cookies = requestCookies(request);
+    const session = await authService.authenticate(cookies[SESSION_COOKIE]);
+    if (!session) {
+      clearSessionCookies(reply, secureCookies);
+      return reply.code(401).send({ error: 'Authentication required' });
+    }
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+      const csrfHeader = request.headers['x-iptvmaster-csrf'];
+      const csrfCookie = cookies[CSRF_COOKIE];
+      if (
+        !isSameOrigin(request, developmentMode) ||
+        typeof csrfHeader !== 'string' ||
+        !csrfCookie ||
+        csrfHeader !== csrfCookie ||
+        !authService.verifyCsrf(session, csrfHeader)
+      ) {
+        return reply.code(403).send({ error: 'CSRF validation failed' });
+      }
+    }
   });
 
   app.get('/health', async () => ({ status: 'ok', service: 'iptvmaster-api' }));
+
+  app.get('/ready', async (_request, reply) => {
+    if (!sourceRepository) {
+      return reply.code(503).send({
+        status: 'not-ready',
+        database: false,
+        reason: 'Source persistence is not configured',
+      });
+    }
+    try {
+      await authService?.healthCheck();
+      return {
+        status: 'ready',
+        database: true,
+        administratorSetupRequired:
+          (await authService?.isSetupRequired()) ?? false,
+      };
+    } catch {
+      return reply.code(503).send({
+        status: 'not-ready',
+        database: false,
+        reason: 'Database is unavailable',
+      });
+    }
+  });
+
+  app.get('/api/v1/auth/status', async (request, reply) => {
+    if (!authService) {
+      return {
+        enabled: false,
+        setupRequired: false,
+        authenticated: true,
+      };
+    }
+    const setupRequired = await authService.isSetupRequired();
+    const cookies = requestCookies(request);
+    const session = await authService.authenticate(cookies[SESSION_COOKIE]);
+    const csrfToken = cookies[CSRF_COOKIE];
+    if (session && csrfToken && authService.verifyCsrf(session, csrfToken)) {
+      return {
+        enabled: true,
+        setupRequired,
+        authenticated: true,
+        username: session.username,
+      };
+    }
+    if (cookies[SESSION_COOKIE]) {
+      await authService.logout(cookies[SESSION_COOKIE]);
+      clearSessionCookies(reply, secureCookies);
+    }
+    return {
+      enabled: true,
+      setupRequired,
+      authenticated: false,
+    };
+  });
+
+  app.post('/api/v1/auth/setup', async (request, reply) => {
+    if (!authService) {
+      return reply.code(404).send({ error: 'Authentication is not enabled' });
+    }
+    if (!isSameOrigin(request, developmentMode)) {
+      return reply.code(403).send({ error: 'Origin validation failed' });
+    }
+    const parsed = administratorSetupSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: validationMessage(parsed.error) });
+    }
+    const rateLimitKey = `setup|${request.ip}`;
+    const retryAfter = loginRateLimiter.retryAfterSeconds(rateLimitKey);
+    if (retryAfter > 0) {
+      return reply
+        .header('retry-after', retryAfter)
+        .code(429)
+        .send({ error: 'Too many setup attempts; try again later' });
+    }
+    try {
+      const session = await authService.setup(
+        parsed.data.username,
+        parsed.data.password,
+      );
+      loginRateLimiter.reset(rateLimitKey);
+      setSessionCookies(reply, session, sessionTtlMs, secureCookies);
+      return reply.code(201).send({
+        enabled: true,
+        setupRequired: false,
+        authenticated: true,
+        username: session.username,
+      });
+    } catch (error) {
+      if (error instanceof AdministratorAlreadyConfiguredError) {
+        loginRateLimiter.recordFailure(rateLimitKey);
+        return reply.code(409).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/v1/auth/login', async (request, reply) => {
+    if (!authService) {
+      return reply.code(404).send({ error: 'Authentication is not enabled' });
+    }
+    if (!isSameOrigin(request, developmentMode)) {
+      return reply.code(403).send({ error: 'Origin validation failed' });
+    }
+    const parsed = administratorLoginSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: validationMessage(parsed.error) });
+    }
+    if (await authService.isSetupRequired()) {
+      return reply.code(409).send({ error: 'Administrator setup is required' });
+    }
+    const rateLimitKey = clientRateLimitKey(request);
+    const retryAfter = loginRateLimiter.retryAfterSeconds(rateLimitKey);
+    if (retryAfter > 0) {
+      return reply
+        .header('retry-after', retryAfter)
+        .code(429)
+        .send({ error: 'Too many login attempts; try again later' });
+    }
+    try {
+      const session = await authService.login(
+        parsed.data.username,
+        parsed.data.password,
+      );
+      loginRateLimiter.reset(rateLimitKey);
+      setSessionCookies(reply, session, sessionTtlMs, secureCookies);
+      return {
+        enabled: true,
+        setupRequired: false,
+        authenticated: true,
+        username: session.username,
+      };
+    } catch (error) {
+      if (error instanceof InvalidCredentialsError) {
+        const blockedFor = loginRateLimiter.recordFailure(rateLimitKey);
+        if (blockedFor > 0) reply.header('retry-after', blockedFor);
+        return reply
+          .code(blockedFor > 0 ? 429 : 401)
+          .send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/v1/auth/logout', async (request, reply) => {
+    if (!authService) return reply.code(204).send();
+    const cookies = requestCookies(request);
+    const session = await authService.authenticate(cookies[SESSION_COOKIE]);
+    const csrfHeader = request.headers['x-iptvmaster-csrf'];
+    const csrfCookie = cookies[CSRF_COOKIE];
+    if (
+      !session ||
+      !isSameOrigin(request, developmentMode) ||
+      typeof csrfHeader !== 'string' ||
+      !csrfCookie ||
+      csrfHeader !== csrfCookie ||
+      !authService.verifyCsrf(session, csrfHeader)
+    ) {
+      return reply.code(403).send({ error: 'CSRF validation failed' });
+    }
+    await authService.logout(cookies[SESSION_COOKIE]);
+    clearSessionCookies(reply, secureCookies);
+    return reply.code(204).send();
+  });
 
   app.get('/api/v1/system/capabilities', async () => ({
     sourcePersistence: sourceRepository !== undefined,

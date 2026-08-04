@@ -56,6 +56,12 @@ An output profile receives a cryptographically random token. PostgreSQL stores o
 
 Published M3U entries contain the upstream stream URL so the server is not in the playback data path. The endpoint uses private/no-store cache headers until conditional publication and versioning are added.
 
+## Administrator boundary
+
+The browser editor and every `/api/v1` route outside the authentication endpoints require a database-backed administrator session. First-run setup is guarded by a database singleton constraint so concurrent requests cannot create multiple administrators. Passwords use scrypt with per-account random salts. Random session and CSRF values are returned only as cookies while PostgreSQL stores their SHA-256 hashes; the session cookie is `HttpOnly`, both are `SameSite=Strict`, and the `Secure` attribute is enabled when HTTPS mode is configured.
+
+Unsafe editor requests require the session, a matching readable CSRF cookie/header pair, the stored CSRF hash, and a same-origin browser request. Login failures are throttled without revealing whether a username exists. Liveness remains public, readiness checks database access, and tokenized `/p/` endpoints remain outside browser authentication so TiviMate can refresh without a session cookie. Security headers deny framing, MIME sniffing, unnecessary browser capabilities, and off-origin scripts.
+
 ## Recovery boundary
 
 Application-level backups use PostgreSQL's custom archive format with owner and privilege metadata omitted, then validate the archive and write a SHA-256 sidecar before retention is applied. Restore validates both checksum and archive before stopping the application, terminates stale database sessions, and uses `pg_restore --single-transaction` so a failed restore does not leave a partially replaced schema. The app restarts only after the restore command returns, followed by an internal health check.

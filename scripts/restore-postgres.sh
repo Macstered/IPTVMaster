@@ -88,7 +88,7 @@ trap - EXIT HUP INT TERM
 
 attempt=0
 until docker compose -f "$compose_file" exec -T app \
-  wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1; do
+  wget -qO- http://127.0.0.1:8080/ready >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 30 ]; then
     echo "Database restored, but the application did not become healthy." >&2

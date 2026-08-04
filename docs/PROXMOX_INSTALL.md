@@ -41,12 +41,16 @@ docker compose ps
 
 The app is initially published on TCP port 8080. Restrict it to trusted LAN clients using the Proxmox firewall, guest firewall, or both. Do not forward the port on the internet router.
 
+On the first browser visit, create the single local administrator account. Store that password in the same private password manager used for the VM administration credentials. Sessions last seven days by default; adjust `IPTVMASTER_SESSION_HOURS` if needed. Leave `IPTVMASTER_SECURE_COOKIES=false` for direct LAN HTTP. Set it to `true` only after an HTTPS reverse proxy is in place and HTTP access is no longer used.
+
 Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be used directly in TiviMate if local DNS is unavailable.
 
 ## 4. Verify
 
 - `http://VM_ADDRESS:8080/health` reports healthy.
+- `http://VM_ADDRESS:8080/ready` reports ready and shows whether first-run administrator setup is still required.
 - The browser UI loads from a trusted LAN computer.
+- Unauthenticated editor API requests return `401`, while a signed-in administrator can complete the workflow.
 - The container and VM recover after separate reboots.
 - The provider secret does not appear in container logs.
 - A generated M3U URL loads from another trusted LAN device and stops loading after revocation.

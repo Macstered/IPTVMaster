@@ -18,6 +18,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
 - An event-rule editor and review that show provider/Finnish labels side by side, expose parse warnings and placeholders, and order each event group by calculated Finnish start time.
 - Persistent EPG reconciliation that pairs exact TVG IDs and unique normalized names automatically, reports missing/ambiguous coverage, and supports audited manual XMLTV locks that survive guide refreshes.
+- First-run single-administrator setup with scrypt password hashing, revocable database-backed sessions, CSRF checks, login throttling, and a dedicated sign-in screen.
 - Persistent permanent-channel reconciliation using provider IDs, TVG IDs, and normalized name/group fallbacks, with ambiguous matches left unresolved.
 - A searchable channel editor for hide/show, rename, regroup, logo, and ordering overrides, including bulk visibility and group actions.
 - A provider-change review queue for missing or ambiguous permanent channels, with conservative manual matching, match locks, and an audit trail.
@@ -29,7 +30,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - A small API and browser UI for encrypted setup, playlist imports, group rules, permanent-channel editing, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
 
-Administrator authentication remains a future milestone; the current slice is intended for LAN-only evaluation.
+The editor is protected by the local administrator account. Generated TiviMate URLs remain independently protected by their revocable output token. Keep the service LAN-only even with authentication enabled.
 
 See [EXECUTION_PLAN.md](./EXECUTION_PLAN.md) for the complete delivery plan.
 
@@ -68,7 +69,7 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 
 ## First-use workflow
 
-1. Open the web UI from a LAN address that the Nvidia Shield can reach.
+1. Open the web UI from a LAN address that the Nvidia Shield can reach and create the one local administrator account. The password must be at least 12 characters.
 2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again.
 3. Import the live playlist and XMLTV guide. VOD and series entries are skipped.
 4. Filter the provider groups and mark only daily live-event groups as events. Edit their output group, placeholder patterns, timezones, and numeric date order, then review provider and Finnish labels side by side. Ordinary live TV stays unchanged.

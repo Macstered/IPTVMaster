@@ -28,7 +28,12 @@ function displayInstant(value: string | undefined, timeZone: string): string {
   }).format(new Date(value));
 }
 
-export function App() {
+interface AppProps {
+  authUsername?: string;
+  onLogout?: () => void;
+}
+
+export function App({ authUsername, onLogout }: AppProps) {
   const [name, setName] = useState(initialEvent);
   const [referenceDate, setReferenceDate] = useState('2026-08-04');
   const [result, setResult] = useState<PreviewResult | null>(null);
@@ -98,9 +103,14 @@ export function App() {
         <div className="status-card">
           <span className="status-dot" />
           <div>
-            <strong>Foundation running</strong>
-            <small>Provider not configured</small>
+            <strong>{authUsername ?? 'Foundation running'}</strong>
+            <small>{authUsername ? 'Local administrator' : 'Local mode'}</small>
           </div>
+          {onLogout ? (
+            <button className="sign-out" type="button" onClick={onLogout}>
+              Sign out
+            </button>
+          ) : null}
         </div>
       </aside>
 
@@ -272,11 +282,18 @@ export function App() {
                   <small>Coverage review and persistent locks</small>
                 </div>
               </li>
-              <li className="active">
+              <li className="done">
                 <span>7</span>
                 <div>
                   <strong>Recovery tooling</strong>
                   <small>Verified database backup and restore</small>
+                </div>
+              </li>
+              <li className="active">
+                <span>8</span>
+                <div>
+                  <strong>Administrator access</strong>
+                  <small>Sessions, CSRF, and login protection</small>
                 </div>
               </li>
             </ol>
