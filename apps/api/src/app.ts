@@ -562,7 +562,12 @@ export async function buildApp(
     }
   });
 
-  app.get('/health', async () => ({ status: 'ok', service: 'iptvmaster-api' }));
+  app.get('/health', async () => ({
+    status: 'ok',
+    service: 'iptvmaster-api',
+    version: process.env['IPTVMASTER_VERSION'] ?? 'development',
+    revision: process.env['IPTVMASTER_REVISION'] ?? 'unknown',
+  }));
 
   app.get('/ready', async (_request, reply) => {
     if (!sourceRepository) {
@@ -730,6 +735,8 @@ export async function buildApp(
   });
 
   app.get('/api/v1/system/capabilities', async () => ({
+    version: process.env['IPTVMASTER_VERSION'] ?? 'development',
+    revision: process.env['IPTVMASTER_REVISION'] ?? 'unknown',
     sourcePersistence: sourceRepository !== undefined,
     databaseConfigured: databaseUrl !== undefined,
     encryptionConfigured: masterKey !== undefined,

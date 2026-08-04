@@ -1,6 +1,8 @@
 import { type FormEvent, useEffect, useState } from 'react';
 
 interface Capabilities {
+  version: string;
+  revision: string;
   sourcePersistence: boolean;
   databaseConfigured: boolean;
   encryptionConfigured: boolean;

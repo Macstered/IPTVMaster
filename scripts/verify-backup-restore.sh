@@ -37,6 +37,57 @@ else
   docker compose -f "$project_dir/compose.yaml" up -d --build
 fi
 
+attempt=0
+health_response=
+until health_response=$(docker compose -f "$project_dir/compose.yaml" exec -T app \
+  wget -qO- http://127.0.0.1:8080/health 2>/dev/null); do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    echo "Application did not become healthy after migration." >&2
+    docker compose -f "$project_dir/compose.yaml" ps --all >&2
+    docker compose -f "$project_dir/compose.yaml" logs --tail=50 migrate app >&2
+    exit 1
+  fi
+  sleep 2
+done
+if ! printf '%s' "$health_response" | grep -Eq '"version":"[^"]+"'; then
+  echo "Health response does not include release version metadata." >&2
+  exit 1
+fi
+if ! printf '%s' "$health_response" | grep -Eq '"revision":"[^"]+"'; then
+  echo "Health response does not include release revision metadata." >&2
+  exit 1
+fi
+
+expected_migration_count=$(find "$project_dir/deploy/postgres/init" \
+  -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
+applied_migration_count=$(docker compose -f "$project_dir/compose.yaml" exec -T postgres \
+  psql --username=iptvmaster --dbname=iptvmaster --tuples-only --no-align \
+  --command='SELECT COUNT(*) FROM schema_migration;')
+if [ "$applied_migration_count" != "$expected_migration_count" ]; then
+  echo "Expected $expected_migration_count applied migrations, received $applied_migration_count." >&2
+  exit 1
+fi
+
+docker compose -f "$project_dir/compose.yaml" run --rm migrate >/dev/null
+first_migration=$(find "$project_dir/deploy/postgres/init" \
+  -maxdepth 1 -type f -name '*.sql' | sort | head -n 1)
+first_migration_name=$(basename -- "$first_migration" .sql)
+first_migration_checksum=$(sha256sum "$first_migration" | awk '{ print $1 }')
+docker compose -f "$project_dir/compose.yaml" exec -T postgres \
+  psql --username=iptvmaster --dbname=iptvmaster --set ON_ERROR_STOP=1 \
+  --command="UPDATE schema_migration SET checksum = repeat('0', 64) WHERE version = '$first_migration_name';" \
+  >/dev/null
+if docker compose -f "$project_dir/compose.yaml" run --rm migrate >/dev/null 2>&1; then
+  echo "Migration verification accepted an altered applied checksum." >&2
+  exit 1
+fi
+docker compose -f "$project_dir/compose.yaml" exec -T postgres \
+  psql --username=iptvmaster --dbname=iptvmaster --set ON_ERROR_STOP=1 \
+  --command="UPDATE schema_migration SET checksum = '$first_migration_checksum' WHERE version = '$first_migration_name';" \
+  >/dev/null
+docker compose -f "$project_dir/compose.yaml" run --rm migrate >/dev/null
+
 docker compose -f "$project_dir/compose.yaml" exec -T postgres \
   psql --username=iptvmaster --dbname=iptvmaster --set ON_ERROR_STOP=1 \
   --command="CREATE TABLE backup_restore_probe (value TEXT NOT NULL); INSERT INTO backup_restore_probe (value) VALUES ('before-backup');"

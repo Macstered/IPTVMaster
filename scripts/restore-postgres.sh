@@ -64,8 +64,9 @@ if [ "$assume_yes" != true ]; then
 fi
 
 app_stopped=false
+database_replaced=false
 restart_app() {
-  if [ "$app_stopped" = true ]; then
+  if [ "$app_stopped" = true ] && [ "$database_replaced" = false ]; then
     docker compose -f "$compose_file" start app >/dev/null
   fi
 }
@@ -82,6 +83,8 @@ docker compose -f "$compose_file" exec -T postgres sh -c \
   'exec pg_restore --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --clean --if-exists --no-owner --no-privileges --single-transaction' \
   <"$backup_path"
 
+database_replaced=true
+docker compose -f "$compose_file" run --rm migrate
 docker compose -f "$compose_file" start app >/dev/null
 app_stopped=false
 trap - EXIT HUP INT TERM

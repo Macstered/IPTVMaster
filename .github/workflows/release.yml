@@ -1,0 +1,44 @@
+name: Release image
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Verify tag and release version
+        run: node scripts/verify-release-tag.mjs "$GITHUB_REF_NAME"
+      - run: npm run check
+      - name: Sign in to GitHub Container Registry
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish immutable image tags
+        run: |
+          image_name=$(printf '%s' "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          release_version=${GITHUB_REF_NAME#v}
+          revision_tag="sha-${GITHUB_SHA}"
+          docker build \
+            --build-arg "IPTVMASTER_VERSION=$release_version" \
+            --build-arg "IPTVMASTER_REVISION=$GITHUB_SHA" \
+            --tag "$image_name:$release_version" \
+            --tag "$image_name:$revision_tag" \
+            .
+          IPTVMASTER_IMAGE="$image_name:$release_version" \
+            VERIFY_SKIP_BUILD=true \
+            bash scripts/verify-backup-restore.sh
+          docker push "$image_name:$release_version"
+          docker push "$image_name:$revision_tag"

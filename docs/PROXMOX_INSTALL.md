@@ -28,16 +28,18 @@ Use the currently supported official Debian and Docker instructions during deplo
 
 ## 3. Deploy
 
-Create `/opt/iptvmaster`, check out a pinned release tag, and copy `.env.example` to `.env`. Replace the database password with a long random value, generate `IPTVMASTER_MASTER_KEY` using `openssl rand -base64 32`, and restrict the file to the administrator/root account. Back up the master key securely and separately; losing it makes stored provider credentials unrecoverable.
+Create `/opt/iptvmaster`, check out a pinned release tag, and copy `.env.example` to `.env`. Replace the database password with a long random value, generate `IPTVMASTER_MASTER_KEY` using `openssl rand -base64 32`, and restrict the file to the administrator/root account. Back up the master key securely and separately; losing it makes stored provider credentials unrecoverable. Set `IPTVMASTER_IMAGE` to the matching numbered GHCR image, or build that checked-out tag locally with the same numbered image tag. Never deploy `latest`.
 
 The default playlist refresh interval is 120 minutes and the XMLTV interval is 720 minutes. Keep those provider-friendly defaults initially; change them only after observing how often the provider's daily event groups and guide actually change. Transient downloads use at most three attempts with short bounded backoff; `401`, `403`, `404`, malformed responses, and unsafe snapshots are not retried. Daily maintenance removes expired browser sessions without deleting retained playlist rollback history.
 
 ```sh
 cd /opt/iptvmaster
-docker compose build
-docker compose up -d
-docker compose ps
+docker compose pull app postgres migrate
+docker compose up -d --no-build
+docker compose ps --all
 ```
+
+The one-shot `migrate` service must exit successfully before the app starts. It records applied SQL checksums and safely does nothing on repeat startup. See [RELEASES.md](./RELEASES.md) for GHCR authentication, local pinned builds, version creation, and exact rollback commands.
 
 The app is initially published on TCP port 8080. Restrict it to trusted LAN clients using the Proxmox firewall, guest firewall, or both. Do not forward the port on the internet router.
 
@@ -48,6 +50,7 @@ Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be
 ## 4. Verify
 
 - `http://VM_ADDRESS:8080/health` reports healthy.
+- The health response reports the expected pinned version and Git revision.
 - `http://VM_ADDRESS:8080/ready` reports ready and shows whether first-run administrator setup is still required.
 - The browser UI loads from a trusted LAN computer.
 - Unauthenticated editor API requests return `401`, while a signed-in administrator can complete the workflow.
@@ -105,4 +108,4 @@ Before upgrading:
 4. Deploy the new pinned tag.
 5. Verify health, source import, artifact generation, and one TiviMate playback.
 
-If verification fails, restore the prior image tag. Restore the database only if a migration cannot be rolled back safely.
+If verification fails, use the application-only rollback only when the prior release is explicitly compatible with the migrated schema. Otherwise check out the prior release and restore the pre-upgrade database backup. SQL migrations are forward-only. Follow [RELEASES.md](./RELEASES.md), and run its restore command from the prior checkout so newer migrations are not reapplied.

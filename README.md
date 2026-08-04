@@ -29,6 +29,8 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Bounded exponential retries for transient provider/network failures, without retrying bad credentials or malformed feeds.
 - Daily expired-session cleanup; accepted XMLTV guides replace their predecessors transactionally instead of accumulating stale rows.
 - Verified PostgreSQL backup and transactional restore scripts, with checksum validation, retention, and a daily Proxmox systemd timer.
+- Transactional, checksum-verified SQL migrations that gate application startup on both fresh and existing release-managed databases.
+- Immutable versioned container builds with embedded health metadata and a private GHCR tag workflow.
 - A small API and browser UI for encrypted setup, playlist imports, group rules, permanent-channel editing, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
 
@@ -105,6 +107,8 @@ Restore an archive with an explicit confirmation prompt:
 ```
 
 The restore verifies the checksum and archive, stops the app to prevent imports, restores in a single transaction, restarts the app, and waits for a healthy response. See [docs/PROXMOX_INSTALL.md](./docs/PROXMOX_INSTALL.md) for the daily timer and recovery rehearsal.
+
+Release tags, pinned image deployment, upgrades, and the two rollback paths are documented in [docs/RELEASES.md](./docs/RELEASES.md). Do not deploy a floating `latest` image or edit an applied SQL migration.
 
 ## Security
 

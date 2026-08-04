@@ -608,6 +608,8 @@ describe('IPTVMaster API', () => {
     expect(response.json()).toEqual({
       status: 'ok',
       service: 'iptvmaster-api',
+      version: 'development',
+      revision: 'unknown',
     });
   });
 

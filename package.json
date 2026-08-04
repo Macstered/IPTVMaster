@@ -16,9 +16,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
+    "verify:version": "node scripts/verify-release-tag.mjs --current",
     "test": "npm run build -w @iptvmaster/core && npm run test -w @iptvmaster/core && npm run test -w @iptvmaster/api",
     "typecheck": "npm run build -w @iptvmaster/core && npm run typecheck --workspaces --if-present",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build"
+    "check": "npm run format:check && npm run lint && npm run verify:version && npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",

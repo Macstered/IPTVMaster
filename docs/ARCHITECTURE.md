@@ -69,3 +69,9 @@ Expired session rows are removed when a session is issued and by an independent 
 Application-level backups use PostgreSQL's custom archive format with owner and privilege metadata omitted, then validate the archive and write a SHA-256 sidecar before retention is applied. Restore validates both checksum and archive before stopping the application, terminates stale database sessions, and uses `pg_restore --single-transaction` so a failed restore does not leave a partially replaced schema. The app restarts only after the restore command returns, followed by an internal health check.
 
 Database archives contain encrypted upstream URLs but intentionally exclude the environment-held master key. Production recovery therefore requires two separately protected assets: a recent database archive and the matching `IPTVMASTER_MASTER_KEY`. Proxmox VM backups remain a second recovery layer outside this application boundary.
+
+## Release and migration boundary
+
+The application image embeds a semantic version and source revision in both OCI labels and the public liveness response. Release automation publishes only numbered and commit-addressed GHCR tags; it intentionally does not publish `latest`.
+
+PostgreSQL schema changes run in a one-shot Compose service before application startup. Each numbered SQL file is applied in a transaction and recorded with a SHA-256 checksum in `schema_migration`. A failed migration prevents the app from starting, and changing an already recorded file is treated as corruption. Migrations are forward-only: image-only rollback is allowed only when the prior app is schema compatible, otherwise recovery uses the pre-upgrade database backup and prior release checkout together.
