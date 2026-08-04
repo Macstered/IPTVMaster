@@ -43,6 +43,65 @@ interface GroupSummary {
   enabled: boolean;
   outputGroupName?: string;
   hidePlaceholders: boolean;
+  placeholderPatterns?: string[];
+  sourceTimeZone: string;
+  displayTimeZone: string;
+  numericDateOrder: 'month-day' | 'day-month';
+}
+
+interface EventReviewEntry {
+  id: string;
+  originalName: string;
+  localizedName: string;
+  status: 'localized' | 'no-time' | 'invalid-time' | 'invalid-timezone';
+  hidden: boolean;
+  hideReason?: string;
+  sourceDateTime?: string;
+  displayDateTime?: string;
+  crossedDateBoundary: boolean;
+  warning?: string;
+}
+
+interface EventReviewGroup {
+  groupName: string;
+  outputGroupName?: string;
+  enabled: boolean;
+  hidePlaceholders: boolean;
+  placeholderPatterns: string[];
+  timePolicy?: {
+    sourceTimeZone: string;
+    displayTimeZone: string;
+    numericDateOrder: 'month-day' | 'day-month';
+    referenceDate: string;
+  };
+  totalEntries: number;
+  hiddenEntries: number;
+  localizedEntries: number;
+  warningEntries: number;
+  entries: EventReviewEntry[];
+}
+
+interface EventReview {
+  referenceDate: string;
+  groups: EventReviewGroup[];
+  summary: {
+    groupCount: number;
+    totalEntries: number;
+    hiddenEntries: number;
+    localizedEntries: number;
+    warningEntries: number;
+  };
+  truncated: boolean;
+}
+
+interface EventRuleDraft {
+  enabled: boolean;
+  outputGroupName: string;
+  hidePlaceholders: boolean;
+  placeholderPatterns: string;
+  sourceTimeZone: string;
+  displayTimeZone: string;
+  numericDateOrder: 'month-day' | 'day-month';
 }
 
 type ChannelStatus = 'matched' | 'new' | 'missing' | 'ambiguous';
@@ -158,6 +217,15 @@ function formatHistoryTime(value: string): string {
   }).format(new Date(value));
 }
 
+function formatEventTime(value: string | undefined, timeZone: string): string {
+  if (!value) return 'Time not parsed';
+  return new Intl.DateTimeFormat('en-FI', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone,
+  }).format(new Date(value));
+}
+
 export function SourceSetup() {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [sources, setSources] = useState<SafeSource[]>([]);
@@ -176,6 +244,14 @@ export function SourceSetup() {
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [groupFilter, setGroupFilter] = useState('Events FI');
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
+  const [eventReview, setEventReview] = useState<EventReview | null>(null);
+  const [selectedEventGroup, setSelectedEventGroup] = useState('');
+  const [editingEventGroup, setEditingEventGroup] = useState<string | null>(
+    null,
+  );
+  const [eventRuleDraft, setEventRuleDraft] = useState<EventRuleDraft | null>(
+    null,
+  );
   const [channels, setChannels] = useState<ChannelSummary[]>([]);
   const [channelTotal, setChannelTotal] = useState(0);
   const [channelSearch, setChannelSearch] = useState('');
@@ -258,6 +334,19 @@ export function SourceSetup() {
     setSourceHistory(await readJson<SourceHistory>(response));
   }
 
+  async function loadEventReview(sourceId: string) {
+    const response = await fetch(
+      `/api/v1/sources/${sourceId}/events?limit=200`,
+    );
+    const payload = await readJson<EventReview>(response);
+    setEventReview(payload);
+    setSelectedEventGroup((current) =>
+      payload.groups.some((group) => group.groupName === current)
+        ? current
+        : (payload.groups[0]?.groupName ?? ''),
+    );
+  }
+
   useEffect(() => {
     let active = true;
     async function load() {
@@ -281,6 +370,7 @@ export function SourceSetup() {
                 loadChannels(firstSource.id),
                 loadReconciliationReview(firstSource.id),
                 loadSourceHistory(firstSource.id),
+                loadEventReview(firstSource.id),
               ]);
             }
           }
@@ -343,6 +433,7 @@ export function SourceSetup() {
         loadChannels(source.id, channelSearch),
         loadReconciliationReview(source.id, channelSearch),
         loadSourceHistory(source.id),
+        loadEventReview(source.id),
       ]);
     } catch (caught) {
       setError(
@@ -410,12 +501,81 @@ export function SourceSetup() {
       await Promise.all([
         loadChannels(source.id, channelSearch),
         loadReconciliationReview(source.id, channelSearch),
+        loadEventReview(source.id),
       ]);
     } catch (caught) {
       setError(
         caught instanceof Error
           ? caught.message
           : 'Could not save group policy',
+      );
+    } finally {
+      setSavingGroup(null);
+    }
+  }
+
+  function beginEventRuleEdit(group: GroupSummary) {
+    setEditingEventGroup(group.providerGroup);
+    setSelectedEventGroup(group.providerGroup);
+    setEventRuleDraft({
+      enabled: group.enabled,
+      outputGroupName: group.outputGroupName ?? '',
+      hidePlaceholders: group.hidePlaceholders,
+      placeholderPatterns: (group.placeholderPatterns ?? []).join('\n'),
+      sourceTimeZone: group.sourceTimeZone,
+      displayTimeZone: group.displayTimeZone,
+      numericDateOrder: group.numericDateOrder,
+    });
+  }
+
+  async function saveEventRule(
+    event: FormEvent,
+    source: SafeSource,
+    group: GroupSummary,
+  ) {
+    event.preventDefault();
+    if (!eventRuleDraft) return;
+    setSavingGroup(group.providerGroup);
+    setError(null);
+    try {
+      const placeholderPatterns = eventRuleDraft.placeholderPatterns
+        .split(/\r?\n/)
+        .map((pattern) => pattern.trim())
+        .filter(Boolean);
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/group-policies`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            groupName: group.providerGroup,
+            behavior: 'event',
+            enabled: eventRuleDraft.enabled,
+            ...(eventRuleDraft.outputGroupName.trim()
+              ? { outputGroupName: eventRuleDraft.outputGroupName.trim() }
+              : {}),
+            hidePlaceholders: eventRuleDraft.hidePlaceholders,
+            placeholderPatterns,
+            sourceTimeZone: eventRuleDraft.sourceTimeZone.trim(),
+            displayTimeZone: eventRuleDraft.displayTimeZone.trim(),
+            numericDateOrder: eventRuleDraft.numericDateOrder,
+          }),
+        },
+      );
+      const payload = await readJson<{ group: GroupSummary }>(response);
+      setGroups((current) =>
+        current.map((candidate) =>
+          candidate.providerGroup === payload.group.providerGroup
+            ? payload.group
+            : candidate,
+        ),
+      );
+      await loadEventReview(source.id);
+      setEditingEventGroup(null);
+      setEventRuleDraft(null);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not save event rule',
       );
     } finally {
       setSavingGroup(null);
@@ -690,6 +850,12 @@ export function SourceSetup() {
     )
     .slice(0, 50);
   const primarySource = sources[0];
+  const activeEventReview = eventReview?.groups.find(
+    (group) => group.groupName === selectedEventGroup,
+  );
+  const editedEventGroup = groups.find(
+    (group) => group.providerGroup === editingEventGroup,
+  );
 
   return (
     <section className="panel source-panel" id="source-setup">
@@ -992,6 +1158,18 @@ export function SourceSetup() {
                 <span className={`behavior-badge ${group.behavior}`}>
                   {group.behavior === 'event' ? 'LIVE EVENT' : 'LIVE TV'}
                 </span>
+                {group.behavior === 'event' ? (
+                  <button
+                    className="secondary-button compact"
+                    type="button"
+                    disabled={savingGroup !== null}
+                    onClick={() => beginEventRuleEdit(group)}
+                  >
+                    Edit rule
+                  </button>
+                ) : (
+                  <span className="group-action-spacer" />
+                )}
                 <button
                   className="secondary-button compact"
                   type="button"
@@ -1016,6 +1194,236 @@ export function SourceSetup() {
               <p className="empty-groups">No groups match this filter.</p>
             ) : null}
           </div>
+
+          {editedEventGroup && eventRuleDraft ? (
+            <form
+              className="event-rule-form"
+              onSubmit={(event) =>
+                void saveEventRule(event, primarySource, editedEventGroup)
+              }
+            >
+              <div className="event-rule-heading">
+                <div>
+                  <small>EVENT GROUP RULE</small>
+                  <strong>{editedEventGroup.providerGroup}</strong>
+                </div>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={savingGroup !== null}
+                  onClick={() => {
+                    setEditingEventGroup(null);
+                    setEventRuleDraft(null);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              <label className="event-check">
+                <input
+                  type="checkbox"
+                  checked={eventRuleDraft.enabled}
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? { ...current, enabled: event.target.checked }
+                        : current,
+                    )
+                  }
+                />
+                Publish this event group
+              </label>
+              <label className="event-check">
+                <input
+                  type="checkbox"
+                  checked={eventRuleDraft.hidePlaceholders}
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            hidePlaceholders: event.target.checked,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                Hide matching placeholders
+              </label>
+              <label>
+                Output group
+                <input
+                  value={eventRuleDraft.outputGroupName}
+                  placeholder="Keep provider group"
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? { ...current, outputGroupName: event.target.value }
+                        : current,
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Provider timezone
+                <input
+                  value={eventRuleDraft.sourceTimeZone}
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? { ...current, sourceTimeZone: event.target.value }
+                        : current,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label>
+                Display timezone
+                <input
+                  value={eventRuleDraft.displayTimeZone}
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? { ...current, displayTimeZone: event.target.value }
+                        : current,
+                    )
+                  }
+                  required
+                />
+              </label>
+              <label>
+                Numeric date order
+                <select
+                  value={eventRuleDraft.numericDateOrder}
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            numericDateOrder: event.target.value as
+                              'month-day' | 'day-month',
+                          }
+                        : current,
+                    )
+                  }
+                >
+                  <option value="month-day">Month / day</option>
+                  <option value="day-month">Day / month</option>
+                </select>
+              </label>
+              <label className="placeholder-patterns">
+                Placeholder patterns, one per line
+                <textarea
+                  rows={5}
+                  value={eventRuleDraft.placeholderPatterns}
+                  placeholder={'reload your playlist\nlive during events only'}
+                  onChange={(event) =>
+                    setEventRuleDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            placeholderPatterns: event.target.value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+              </label>
+              <button type="submit" disabled={savingGroup !== null}>
+                {savingGroup === editedEventGroup.providerGroup
+                  ? 'Saving rule...'
+                  : 'Save event rule'}
+              </button>
+            </form>
+          ) : null}
+
+          {eventReview && eventReview.groups.length > 0 ? (
+            <section className="event-review" id="events">
+              <div className="subsection-heading event-review-heading">
+                <div>
+                  <small>LIVE EVENT REVIEW</small>
+                  <strong>Provider and Finnish labels</strong>
+                </div>
+                <select
+                  aria-label="Review event group"
+                  value={selectedEventGroup}
+                  onChange={(event) =>
+                    setSelectedEventGroup(event.target.value)
+                  }
+                >
+                  {eventReview.groups.map((group) => (
+                    <option value={group.groupName} key={group.groupName}>
+                      {group.groupName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="secret-note">
+                Events are ordered by their calculated Finnish start time.
+                Unparseable labels remain usable and are flagged instead of
+                being renamed. Reference date: {eventReview.referenceDate}.
+              </p>
+              {activeEventReview ? (
+                <>
+                  <div className="event-review-summary">
+                    <span>{activeEventReview.totalEntries} entries</span>
+                    <span>{activeEventReview.localizedEntries} parsed</span>
+                    <span>{activeEventReview.hiddenEntries} hidden</span>
+                    <span>{activeEventReview.warningEntries} warnings</span>
+                  </div>
+                  <div className="event-entry-list">
+                    {activeEventReview.entries.map((entry) => (
+                      <article
+                        className={`event-entry ${entry.hidden ? 'hidden' : ''}`}
+                        key={entry.id}
+                      >
+                        <div className="event-name-pair">
+                          <div>
+                            <small>PROVIDER</small>
+                            <strong>{entry.originalName}</strong>
+                          </div>
+                          <span>→</span>
+                          <div>
+                            <small>TIVIMATE</small>
+                            <strong>{entry.localizedName}</strong>
+                          </div>
+                        </div>
+                        <div className="event-entry-meta">
+                          <span className={`event-status ${entry.status}`}>
+                            {entry.hidden ? 'hidden' : entry.status}
+                          </span>
+                          <small>
+                            {formatEventTime(
+                              entry.sourceDateTime,
+                              activeEventReview.timePolicy?.sourceTimeZone ??
+                                'Europe/Stockholm',
+                            )}{' '}
+                            →{' '}
+                            {formatEventTime(
+                              entry.displayDateTime,
+                              activeEventReview.timePolicy?.displayTimeZone ??
+                                'Europe/Helsinki',
+                            )}
+                          </small>
+                        </div>
+                        {entry.hideReason || entry.warning ? (
+                          <p className="event-warning">
+                            {entry.hideReason ?? entry.warning}
+                          </p>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                  {eventReview.truncated ? (
+                    <small className="channel-limit-note">
+                      Review is limited to 200 entries per event group.
+                    </small>
+                  ) : null}
+                </>
+              ) : null}
+            </section>
+          ) : null}
 
           <div className="channel-editor" id="channels">
             <div className="subsection-heading channel-heading">

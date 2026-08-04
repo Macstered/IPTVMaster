@@ -256,6 +256,9 @@ class MemorySourceRepository implements SourceRepository {
         ? { outputGroupName: input.outputGroupName }
         : {}),
       hidePlaceholders: input.hidePlaceholders,
+      ...(input.placeholderPatterns
+        ? { placeholderPatterns: input.placeholderPatterns }
+        : {}),
       sourceTimeZone: input.sourceTimeZone ?? 'Europe/Stockholm',
       displayTimeZone: input.displayTimeZone ?? 'Europe/Helsinki',
       numericDateOrder: input.numericDateOrder ?? 'month-day',
@@ -1023,6 +1026,40 @@ describe('IPTVMaster API', () => {
       },
     });
     expect(policyResponse.statusCode).toBe(200);
+
+    const eventReviewResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/events?referenceDate=2026-08-04`,
+    });
+    expect(eventReviewResponse.statusCode).toBe(200);
+    const eventReview = eventReviewResponse.json();
+    expect(eventReview).toEqual(
+      expect.objectContaining({
+        summary: expect.objectContaining({
+          groupCount: 1,
+          totalEntries: 2,
+          hiddenEntries: 1,
+          localizedEntries: 1,
+        }),
+        groups: [
+          expect.objectContaining({
+            groupName: 'MTV Urheilu Events FI',
+            entries: expect.arrayContaining([
+              expect.objectContaining({
+                originalName: '17:00 Tennis 8/4',
+                localizedName: '18:00 Tennis 8/4',
+                status: 'localized',
+              }),
+              expect.objectContaining({
+                originalName: 'Reload your playlist',
+                hidden: true,
+              }),
+            ]),
+          }),
+        ],
+      }),
+    );
+    expect(JSON.stringify(eventReview)).not.toContain('provider.test');
 
     const profileResponse = await app.inject({
       method: 'POST',

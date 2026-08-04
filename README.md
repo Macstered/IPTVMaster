@@ -16,6 +16,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Transactional last-known-good snapshots with encrypted stream URLs and unchanged-feed detection.
 - Retained playlist history with two-step restoration, automatic reactivation on a later provider refresh, and a user-visible activity trail.
 - Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
+- An event-rule editor and review that show provider/Finnish labels side by side, expose parse warnings and placeholders, and order each event group by calculated Finnish start time.
 - Persistent permanent-channel reconciliation using provider IDs, TVG IDs, and normalized name/group fallbacks, with ambiguous matches left unresolved.
 - A searchable channel editor for hide/show, rename, regroup, logo, and ordering overrides, including bulk visibility and group actions.
 - A provider-change review queue for missing or ambiguous permanent channels, with conservative manual matching, match locks, and an audit trail.
@@ -68,7 +69,7 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 1. Open the web UI from a LAN address that the Nvidia Shield can reach.
 2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again.
 3. Import the live playlist and XMLTV guide. VOD and series entries are skipped.
-4. Filter the provider groups and mark only daily live-event groups as events. Those groups use `Europe/Stockholm` to `Europe/Helsinki` title conversion; ordinary live TV stays unchanged.
+4. Filter the provider groups and mark only daily live-event groups as events. Edit their output group, placeholder patterns, timezones, and numeric date order, then review provider and Finnish labels side by side. Ordinary live TV stays unchanged.
 5. Search the permanent-channel list and apply individual or bulk visibility/group overrides. Name, group, logo, and order edits are retained when a later provider snapshot can be matched safely.
 6. If a refresh reports missing or ambiguous channels, use the provider-change review to choose a current provider entry. The original channel identity and edits are preserved and the manual match is locked until explicitly unlocked.
 7. Review update history after imports. If an accepted provider playlist is bad, restore a retained snapshot; current channel overrides are reconciled against it and the action is audited.

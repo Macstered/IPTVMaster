@@ -12,15 +12,20 @@ export function applyOutputGroupPolicies(
   const policiesByGroup = new Map(
     policies.map((policy) => [policy.groupName, policy]),
   );
-  const output: M3uEntry[] = [];
+  const output: Array<{
+    entry: M3uEntry;
+    eventGroup?: string;
+    startsAt?: number;
+    originalIndex: number;
+  }> = [];
   let hiddenEntries = 0;
   let localizedEvents = 0;
 
-  for (const entry of entries) {
+  for (const [originalIndex, entry] of entries.entries()) {
     const groupName = entry.attributes['group-title'] ?? '';
     const policy = policiesByGroup.get(groupName);
     if (!policy) {
-      output.push(entry);
+      output.push({ entry, originalIndex });
       continue;
     }
     if (!policy.enabled) {
@@ -34,21 +39,59 @@ export function applyOutputGroupPolicies(
         hiddenEntries += 1;
       } else {
         if (applied.time.changed) localizedEvents += 1;
-        output.push(applied.entry);
+        const parsedStart = applied.time.displayDateTime
+          ? Date.parse(applied.time.displayDateTime)
+          : Number.NaN;
+        output.push({
+          entry: applied.entry,
+          eventGroup: groupName,
+          ...(Number.isNaN(parsedStart) ? {} : { startsAt: parsedStart }),
+          originalIndex,
+        });
       }
       continue;
     }
 
     output.push({
-      ...entry,
-      attributes: {
-        ...entry.attributes,
-        ...(policy.outputGroupName
-          ? { 'group-title': policy.outputGroupName }
-          : {}),
+      originalIndex,
+      entry: {
+        ...entry,
+        attributes: {
+          ...entry.attributes,
+          ...(policy.outputGroupName
+            ? { 'group-title': policy.outputGroupName }
+            : {}),
+        },
       },
     });
   }
 
-  return { entries: output, hiddenEntries, localizedEvents };
+  const positionsByEventGroup = new Map<string, number[]>();
+  for (const [index, item] of output.entries()) {
+    if (!item.eventGroup) continue;
+    const positions = positionsByEventGroup.get(item.eventGroup) ?? [];
+    positions.push(index);
+    positionsByEventGroup.set(item.eventGroup, positions);
+  }
+  for (const positions of positionsByEventGroup.values()) {
+    const sorted = positions
+      .map((position) => output[position])
+      .filter((item): item is NonNullable<typeof item> => item !== undefined)
+      .sort(
+        (left, right) =>
+          (left.startsAt ?? Number.POSITIVE_INFINITY) -
+            (right.startsAt ?? Number.POSITIVE_INFINITY) ||
+          left.originalIndex - right.originalIndex,
+      );
+    positions.forEach((position, index) => {
+      const item = sorted[index];
+      if (item) output[position] = item;
+    });
+  }
+
+  return {
+    entries: output.map((item) => item.entry),
+    hiddenEntries,
+    localizedEvents,
+  };
 }

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_PLACEHOLDER_PATTERNS,
   decryptSecret,
   encryptSecret,
   SnapshotRejectedError,
@@ -112,6 +113,7 @@ export interface GroupSummary {
   enabled: boolean;
   outputGroupName?: string;
   hidePlaceholders: boolean;
+  placeholderPatterns?: string[];
   sourceTimeZone: string;
   displayTimeZone: string;
   numericDateOrder: NumericDateOrder;
@@ -481,6 +483,11 @@ function toSnapshotHistoryItem(row: SnapshotHistoryRow): SnapshotHistoryItem {
 }
 
 function toGroupSummary(row: GroupRow): GroupSummary {
+  const patterns = Array.isArray(row.placeholder_patterns)
+    ? row.placeholder_patterns.filter(
+        (value): value is string => typeof value === 'string',
+      )
+    : [];
   return {
     providerGroup: row.provider_group,
     channelCount: Number(row.channel_count),
@@ -489,6 +496,12 @@ function toGroupSummary(row: GroupRow): GroupSummary {
     enabled: row.enabled,
     ...(row.output_group ? { outputGroupName: row.output_group } : {}),
     hidePlaceholders: row.hide_placeholders,
+    ...(row.behavior === 'event'
+      ? {
+          placeholderPatterns:
+            patterns.length > 0 ? patterns : [...DEFAULT_PLACEHOLDER_PATTERNS],
+        }
+      : {}),
     sourceTimeZone: row.source_timezone,
     displayTimeZone: row.display_timezone,
     numericDateOrder: row.numeric_date_order,

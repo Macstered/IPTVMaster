@@ -47,13 +47,24 @@ try {
       {
         duration: -1,
         attributes: {
+          'tvg-name': '20:00 Late final 8/4',
+          'group-title': 'Synthetic Events FI',
+        },
+        name: '20:00 Late final 8/4',
+        url: 'http://provider.test/synthetic-stream/45',
+        mediaType: 'live',
+        lineNumber: 4,
+      },
+      {
+        duration: -1,
+        attributes: {
           'tvg-name': '17:00 Tennis 8/4',
           'group-title': 'Synthetic Events FI',
         },
         name: '17:00 Tennis 8/4',
         url: 'http://provider.test/synthetic-stream/43',
         mediaType: 'live',
-        lineNumber: 4,
+        lineNumber: 6,
       },
       {
         duration: -1,
@@ -64,11 +75,11 @@ try {
         name: 'Reload your playlist',
         url: 'http://provider.test/synthetic-stream/44',
         mediaType: 'live',
-        lineNumber: 6,
+        lineNumber: 8,
       },
     ],
     issues: [],
-    mediaCounts: { live: 3, vod: 0, series: 0, unknown: 0 },
+    mediaCounts: { live: 4, vod: 0, series: 0, unknown: 0 },
     skippedEntries: 0,
   };
 
@@ -308,6 +319,9 @@ try {
       entries[0]?.attributes['tvg-logo'] === 'https://images.test/yle-one.png',
     groupCount: groups.length,
     outputLocalized: output.includes('18:00 Tennis 8/4'),
+    outputEventsChronological:
+      output.indexOf('18:00 Tennis 8/4') <
+      output.indexOf('21:00 Late final 8/4'),
     outputPlaceholderHidden: !output.includes('Reload your playlist'),
     outputGroupRenamed: output.includes('group-title="Localized events"'),
     outputTokenResolves: resolvedProfile?.sourceId === source.id,
@@ -328,7 +342,7 @@ try {
   if (
     !report.secondUnchanged ||
     !report.changedSnapshotImported ||
-    report.entryCount !== 3 ||
+    report.entryCount !== 4 ||
     report.groupCount !== 2 ||
     !report.streamUrlRoundTrip ||
     !report.channelReconciled ||
@@ -348,6 +362,7 @@ try {
     !report.channelGroupOverridden ||
     !report.channelLogoOverridden ||
     !report.outputLocalized ||
+    !report.outputEventsChronological ||
     !report.outputPlaceholderHidden ||
     !report.outputGroupRenamed ||
     !report.outputTokenResolves ||

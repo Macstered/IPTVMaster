@@ -3,6 +3,7 @@ import fastifyStatic from '@fastify/static';
 import {
   applyEventGroupPolicy,
   applyOutputGroupPolicies,
+  DEFAULT_PLACEHOLDER_PATTERNS,
   inspectRemotePlaylist,
   localizeEventName,
   parseM3uText,
@@ -140,6 +141,12 @@ const reconciliationReviewSchema = z.object({
 
 const sourceHistorySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+const eventReviewSchema = z.object({
+  referenceDate: z.iso.date().optional(),
+  group: z.string().trim().min(1).max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
 });
 
 const manualMatchSchema = z.object({
@@ -532,6 +539,122 @@ export async function buildApp(
       return { group: saved };
     },
   );
+
+  app.get<{
+    Params: { sourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/sources/:sourceId/events', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const sourceId = z.uuid().safeParse(request.params.sourceId);
+    const query = eventReviewSchema.safeParse(request.query);
+    if (!sourceId.success) {
+      return reply.code(400).send({ error: 'sourceId must be a UUID' });
+    }
+    if (!query.success) {
+      return reply.code(400).send({ error: validationMessage(query.error) });
+    }
+    const referenceDate =
+      query.data.referenceDate ?? currentDateInZone('Europe/Stockholm');
+    const [entries, policies] = await Promise.all([
+      sourceRepository.getLatestPlaylistEntries(sourceId.data),
+      sourceRepository.listOutputGroupPolicies(sourceId.data, referenceDate),
+    ]);
+    const eventPolicies = policies.filter(
+      (policy) =>
+        policy.behavior === 'event' &&
+        (!query.data.group || policy.groupName === query.data.group),
+    );
+    let totalEntries = 0;
+    let hiddenEntries = 0;
+    let localizedEntries = 0;
+    let warningEntries = 0;
+    let truncated = false;
+    const groups = eventPolicies.map((policy) => {
+      const reviewed = entries
+        .filter(
+          (entry) =>
+            (entry.attributes['group-title'] ?? '') === policy.groupName,
+        )
+        .map((entry, index) => {
+          const applied = applyEventGroupPolicy(entry, policy);
+          return {
+            id: `${entry.lineNumber}-${index}`,
+            originalName: entry.name,
+            localizedName: applied.time.localizedName,
+            status: applied.time.status,
+            hidden: applied.hidden,
+            ...(applied.hideReason ? { hideReason: applied.hideReason } : {}),
+            ...(applied.time.sourceDateTime
+              ? { sourceDateTime: applied.time.sourceDateTime }
+              : {}),
+            ...(applied.time.displayDateTime
+              ? { displayDateTime: applied.time.displayDateTime }
+              : {}),
+            crossedDateBoundary: applied.time.crossedDateBoundary,
+            ...(applied.time.warning ? { warning: applied.time.warning } : {}),
+            sourceOrder: entry.lineNumber,
+          };
+        })
+        .sort(
+          (left, right) =>
+            (left.displayDateTime
+              ? Date.parse(left.displayDateTime)
+              : Number.POSITIVE_INFINITY) -
+              (right.displayDateTime
+                ? Date.parse(right.displayDateTime)
+                : Number.POSITIVE_INFINITY) ||
+            left.sourceOrder - right.sourceOrder,
+        );
+      const visible = reviewed.slice(0, query.data.limit);
+      totalEntries += reviewed.length;
+      hiddenEntries += reviewed.filter((entry) => entry.hidden).length;
+      localizedEntries += reviewed.filter(
+        (entry) => entry.status === 'localized',
+      ).length;
+      warningEntries += reviewed.filter(
+        (entry) => !entry.hidden && entry.status !== 'localized',
+      ).length;
+      truncated ||= reviewed.length > visible.length;
+      return {
+        groupName: policy.groupName,
+        outputGroupName: policy.outputGroupName,
+        enabled: policy.enabled,
+        hidePlaceholders: policy.hidePlaceholders,
+        placeholderPatterns: policy.placeholderPatterns ?? [
+          ...DEFAULT_PLACEHOLDER_PATTERNS,
+        ],
+        timePolicy: policy.timePolicy,
+        totalEntries: reviewed.length,
+        hiddenEntries: reviewed.filter((entry) => entry.hidden).length,
+        localizedEntries: reviewed.filter(
+          (entry) => entry.status === 'localized',
+        ).length,
+        warningEntries: reviewed.filter(
+          (entry) => !entry.hidden && entry.status !== 'localized',
+        ).length,
+        entries: visible.map(({ sourceOrder, ...entry }) => {
+          void sourceOrder;
+          return entry;
+        }),
+      };
+    });
+    return {
+      referenceDate,
+      groups,
+      summary: {
+        groupCount: groups.length,
+        totalEntries,
+        hiddenEntries,
+        localizedEntries,
+        warningEntries,
+      },
+      truncated,
+    };
+  });
 
   app.get<{
     Params: { sourceId: string };
