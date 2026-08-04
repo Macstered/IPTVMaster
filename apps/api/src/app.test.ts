@@ -9,6 +9,7 @@ import {
 } from '@iptvmaster/core';
 
 import { buildApp } from './app.js';
+import { SnapshotActivationConflictError } from './source-repository.js';
 import type {
   BulkUpdateChannelInput,
   BulkUpdateChannelResult,
@@ -23,6 +24,9 @@ import type {
   ReconciliationReview,
   SafeSource,
   SaveGroupPolicyInput,
+  SnapshotHistoryItem,
+  SourceActivityEvent,
+  SourceHistory,
   SourceCredentials,
   SourceRepository,
   StoredEpgGuide,
@@ -49,6 +53,9 @@ class MemorySourceRepository implements SourceRepository {
   latestEpg: StoredEpgGuide = { channels: [], programmes: [] };
   channels: ChannelSummary[] = [];
   reviewCandidates: ReconciliationCandidate[] = [];
+  snapshots: SnapshotHistoryItem[] = [];
+  activity: SourceActivityEvent[] = [];
+  snapshotEntries = new Map<string, M3uEntry[]>();
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -79,17 +86,87 @@ class MemorySourceRepository implements SourceRepository {
     sourceId: string,
     inspection: PlaylistInspection,
   ): Promise<StoredSnapshotSummary> {
+    const existing = this.snapshots.find(
+      (snapshot) => snapshot.fingerprint === inspection.fingerprint,
+    );
+    if (existing) {
+      const wasCurrent = existing.isCurrent;
+      if (!wasCurrent) await this.activateSnapshot(sourceId, existing.id);
+      return { ...existing, unchanged: wasCurrent };
+    }
     this.latestEntries = inspection.entries;
-    return {
-      id: '00000000-0000-4000-8000-000000000002',
+    this.snapshots = this.snapshots.map((snapshot) => ({
+      ...snapshot,
+      isCurrent: false,
+    }));
+    const suffix = String(this.snapshots.length + 2).padStart(12, '0');
+    const snapshot: SnapshotHistoryItem = {
+      id: `00000000-0000-4000-8000-${suffix}`,
       sourceId,
       fingerprint: inspection.fingerprint,
       importedAt: '2026-08-04T00:00:00.000Z',
       liveCount: inspection.entries.length,
       skippedEntries: inspection.skippedEntries,
       issueCount: inspection.issues.length,
-      unchanged: false,
+      isCurrent: true,
     };
+    this.snapshots.unshift(snapshot);
+    this.snapshotEntries.set(snapshot.id, inspection.entries);
+    this.activity.unshift({
+      id: `10000000-0000-4000-8000-${suffix}`,
+      kind: 'playlist-sync',
+      occurredAt: snapshot.importedAt,
+      title: 'Playlist refresh succeeded',
+      detail: `${snapshot.liveCount} live entries accepted.`,
+      status: 'succeeded',
+    });
+    return { ...snapshot, unchanged: false };
+  }
+
+  async listSourceHistory(
+    sourceId: string,
+    limit: number,
+  ): Promise<SourceHistory> {
+    return {
+      snapshots: this.snapshots
+        .filter((snapshot) => snapshot.sourceId === sourceId)
+        .slice(0, limit),
+      activity: this.activity.slice(0, limit),
+    };
+  }
+
+  async activateSnapshot(
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<SnapshotHistoryItem | null> {
+    const target = this.snapshots.find(
+      (snapshot) =>
+        snapshot.sourceId === sourceId && snapshot.id === snapshotId,
+    );
+    if (!target) return null;
+    if (target.isCurrent) {
+      throw new SnapshotActivationConflictError(
+        'The selected snapshot is already current',
+      );
+    }
+    this.snapshots = this.snapshots.map((snapshot) => ({
+      ...snapshot,
+      isCurrent: snapshot.id === snapshotId,
+    }));
+    this.latestEntries = this.snapshotEntries.get(snapshotId) ?? [];
+    const activated = this.snapshots.find(
+      (snapshot) => snapshot.id === snapshotId,
+    );
+    if (!activated) return null;
+    this.activity.unshift({
+      id: `20000000-0000-4000-8000-${String(this.activity.length + 1).padStart(12, '0')}`,
+      kind: 'snapshot-activate',
+      occurredAt: '2026-08-04T02:00:00.000Z',
+      title: 'Snapshot restored',
+      detail: `${activated.liveCount} live entries restored.`,
+      status: 'succeeded',
+    });
+    return activated;
   }
 
   async getLatestPlaylistEntries(): Promise<M3uEntry[]> {
@@ -291,15 +368,7 @@ class MemorySourceRepository implements SourceRepository {
             value.toLocaleLowerCase().includes(normalizedSearch),
           )),
     );
-    const candidates = this.reviewCandidates.filter(
-      (candidate) =>
-        !normalizedSearch ||
-        [
-          candidate.providerName,
-          candidate.providerGroup,
-          candidate.tvgId ?? '',
-        ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)),
-    );
+    const candidates = this.reviewCandidates;
     return {
       unresolvedChannels: unresolved.slice(0, limit),
       candidates: candidates.slice(0, limit),
@@ -624,6 +693,82 @@ describe('IPTVMaster API', () => {
     expect(response.statusCode).toBe(422);
     expect(response.json().error).toContain('suspicious count drop');
     expect(repository.latestEntries).toHaveLength(0);
+  });
+
+  it('lists retained snapshots and safely restores an older version', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const inspection = (
+      fingerprint: string,
+      name: string,
+    ): PlaylistInspection => ({
+      fingerprint: fingerprint.repeat(64),
+      totalBytes: 80,
+      entries: [
+        {
+          duration: -1,
+          attributes: { 'group-title': 'Finland' },
+          name,
+          url: `http://provider.test/synthetic/${fingerprint}`,
+          mediaType: 'live',
+          lineNumber: 2,
+        },
+      ],
+      issues: [],
+      mediaCounts: { live: 1, vod: 0, series: 0, unknown: 0 },
+      skippedEntries: 0,
+    });
+    const older = await repository.savePlaylistSnapshot(
+      source.id,
+      inspection('a', 'Yle TV1'),
+    );
+    const newer = await repository.savePlaylistSnapshot(
+      source.id,
+      inspection('b', 'Yle TV1 HD'),
+    );
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/history?limit=10`,
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    expect(historyResponse.json().snapshots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: older.id, isCurrent: false }),
+        expect.objectContaining({ id: newer.id, isCurrent: true }),
+      ]),
+    );
+
+    const activateResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/snapshots/${older.id}/activate`,
+    });
+    expect(activateResponse.statusCode).toBe(200);
+    expect(activateResponse.json().snapshot).toEqual(
+      expect.objectContaining({ id: older.id, isCurrent: true }),
+    );
+    expect(repository.latestEntries[0]?.name).toBe('Yle TV1');
+
+    const updatedHistory = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/history?limit=10`,
+    });
+    expect(updatedHistory.json().activity[0]).toEqual(
+      expect.objectContaining({ kind: 'snapshot-activate' }),
+    );
+    const conflictResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${source.id}/snapshots/${older.id}/activate`,
+    });
+    expect(conflictResponse.statusCode).toBe(409);
   });
 
   it('lists and updates permanent channel overrides without exposing streams', async () => {

@@ -176,7 +176,25 @@ try {
     limit: 20,
     offset: 0,
   });
+  const historyBeforeRestore = await repository.listSourceHistory(
+    source.id,
+    20,
+  );
+  const restoredSnapshot = await repository.activateSnapshot(
+    source.id,
+    first.id,
+  );
+  const restoredEntries = await repository.getLatestPlaylistEntries(source.id);
+  const historyAfterRestore = await repository.listSourceHistory(source.id, 20);
+  const reactivatedSnapshot = await repository.savePlaylistSnapshot(
+    source.id,
+    reviewInspection,
+  );
   const entries = await repository.getLatestPlaylistEntries(source.id);
+  const historyAfterReactivate = await repository.listSourceHistory(
+    source.id,
+    20,
+  );
   const groups = await repository.listGroups(source.id);
   await repository.saveGroupPolicy(source.id, {
     groupName: 'Synthetic Events FI',
@@ -261,6 +279,28 @@ try {
     manualMatchUnlocked: unlocked?.matchLocked === false,
     reviewResolved:
       reviewAfter.missingCount === 0 && reviewAfter.newCount === 0,
+    snapshotHistoryVisible:
+      historyBeforeRestore.snapshots.length === 3 &&
+      historyBeforeRestore.snapshots.some(
+        (snapshot) => snapshot.id === reviewSnapshot.id && snapshot.isCurrent,
+      ),
+    snapshotRestored:
+      restoredSnapshot?.id === first.id &&
+      restoredSnapshot.isCurrent &&
+      restoredEntries.some((entry) => entry.url === streamUrl) &&
+      historyAfterRestore.activity.some(
+        (activity) => activity.kind === 'snapshot-activate',
+      ),
+    retainedSnapshotReactivated:
+      reactivatedSnapshot.id === reviewSnapshot.id &&
+      !reactivatedSnapshot.unchanged &&
+      entries.some((entry) => entry.url === reviewStreamUrl) &&
+      historyAfterReactivate.snapshots.some(
+        (snapshot) => snapshot.id === reviewSnapshot.id && snapshot.isCurrent,
+      ) &&
+      historyAfterReactivate.activity.some(
+        (activity) => activity.kind === 'snapshot-reactivate',
+      ),
     channelNameOverridden: entries[0]?.name === 'Yle One',
     channelGroupOverridden:
       entries[0]?.attributes['group-title'] === 'Finnish favourites',
@@ -301,6 +341,9 @@ try {
     !report.bulkRestoreApplied ||
     !report.manualMatchUnlocked ||
     !report.reviewResolved ||
+    !report.snapshotHistoryVisible ||
+    !report.snapshotRestored ||
+    !report.retainedSnapshotReactivated ||
     !report.channelNameOverridden ||
     !report.channelGroupOverridden ||
     !report.channelLogoOverridden ||

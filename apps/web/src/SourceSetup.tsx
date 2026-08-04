@@ -97,6 +97,36 @@ interface ReconciliationReview {
   truncated: boolean;
 }
 
+interface SnapshotHistoryItem {
+  id: string;
+  fingerprint: string;
+  importedAt: string;
+  liveCount: number;
+  skippedEntries: number;
+  issueCount: number;
+  isCurrent: boolean;
+}
+
+interface SourceActivityEvent {
+  id: string;
+  kind:
+    | 'playlist-sync'
+    | 'epg-sync'
+    | 'manual-match'
+    | 'manual-unlock'
+    | 'snapshot-activate'
+    | 'snapshot-reactivate';
+  occurredAt: string;
+  title: string;
+  detail: string;
+  status?: 'succeeded' | 'failed' | 'rejected';
+}
+
+interface SourceHistory {
+  snapshots: SnapshotHistoryItem[];
+  activity: SourceActivityEvent[];
+}
+
 interface CreatedOutputProfile {
   id: string;
   name: string;
@@ -118,6 +148,14 @@ async function readJson<T>(response: Response): Promise<T> {
     throw new Error(message);
   }
   return value as T;
+}
+
+function formatHistoryTime(value: string): string {
+  return new Intl.DateTimeFormat('en-FI', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Europe/Helsinki',
+  }).format(new Date(value));
 }
 
 export function SourceSetup() {
@@ -158,6 +196,15 @@ export function SourceSetup() {
     {},
   );
   const [resolvingChannel, setResolvingChannel] = useState<string | null>(null);
+  const [sourceHistory, setSourceHistory] = useState<SourceHistory | null>(
+    null,
+  );
+  const [confirmingSnapshot, setConfirmingSnapshot] = useState<string | null>(
+    null,
+  );
+  const [restoringSnapshot, setRestoringSnapshot] = useState<string | null>(
+    null,
+  );
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputProfile, setOutputProfile] =
     useState<CreatedOutputProfile | null>(null);
@@ -204,6 +251,13 @@ export function SourceSetup() {
     });
   }
 
+  async function loadSourceHistory(sourceId: string) {
+    const response = await fetch(
+      `/api/v1/sources/${sourceId}/history?limit=20`,
+    );
+    setSourceHistory(await readJson<SourceHistory>(response));
+  }
+
   useEffect(() => {
     let active = true;
     async function load() {
@@ -226,6 +280,7 @@ export function SourceSetup() {
                 loadGroups(firstSource.id),
                 loadChannels(firstSource.id),
                 loadReconciliationReview(firstSource.id),
+                loadSourceHistory(firstSource.id),
               ]);
             }
           }
@@ -287,6 +342,7 @@ export function SourceSetup() {
         loadGroups(source.id),
         loadChannels(source.id, channelSearch),
         loadReconciliationReview(source.id, channelSearch),
+        loadSourceHistory(source.id),
       ]);
     } catch (caught) {
       setError(
@@ -309,6 +365,7 @@ export function SourceSetup() {
         response,
       );
       setEpgImportSummary(payload.inspection);
+      await loadSourceHistory(source.id);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not import XMLTV',
@@ -507,6 +564,7 @@ export function SourceSetup() {
       await Promise.all([
         loadChannels(source.id, channelSearch),
         loadReconciliationReview(source.id, channelSearch),
+        loadSourceHistory(source.id),
       ]);
     } catch (caught) {
       setError(
@@ -534,12 +592,38 @@ export function SourceSetup() {
           candidate.id === channel.id ? payload.channel : candidate,
         ),
       );
+      await loadSourceHistory(source.id);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not unlock match',
       );
     } finally {
       setSavingChannel(null);
+    }
+  }
+
+  async function restoreSnapshot(source: SafeSource, snapshotId: string) {
+    setRestoringSnapshot(snapshotId);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/snapshots/${snapshotId}/activate`,
+        { method: 'POST' },
+      );
+      await readJson<{ snapshot: SnapshotHistoryItem }>(response);
+      await Promise.all([
+        loadGroups(source.id),
+        loadChannels(source.id, channelSearch),
+        loadReconciliationReview(source.id, channelSearch),
+        loadSourceHistory(source.id),
+      ]);
+      setConfirmingSnapshot(null);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not restore snapshot',
+      );
+    } finally {
+      setRestoringSnapshot(null);
     }
   }
 
@@ -777,6 +861,105 @@ export function SourceSetup() {
             </strong>
           </div>
         </div>
+      ) : null}
+
+      {sourceHistory && primarySource && sourceHistory.snapshots.length > 0 ? (
+        <section className="history-panel" id="updates">
+          <div className="subsection-heading history-heading">
+            <div>
+              <small>UPDATE HISTORY</small>
+              <strong>Retained snapshots and activity</strong>
+            </div>
+            <span className="channel-count">
+              {sourceHistory.snapshots.length} shown
+            </span>
+          </div>
+          <p className="secret-note">
+            Restore a previously accepted playlist if a provider update is
+            wrong. Channel overrides remain yours; uncertain matches return to
+            the review queue. A later provider refresh can reactivate newer
+            retained data.
+          </p>
+          <div className="history-grid">
+            <div className="snapshot-list" aria-label="Retained snapshots">
+              {sourceHistory.snapshots.slice(0, 6).map((snapshot) => (
+                <article
+                  className={`snapshot-row ${snapshot.isCurrent ? 'current' : ''}`}
+                  key={snapshot.id}
+                >
+                  <div className="snapshot-main">
+                    <strong>{formatHistoryTime(snapshot.importedAt)}</strong>
+                    <small>
+                      {snapshot.liveCount.toLocaleString()} live ·{' '}
+                      {snapshot.issueCount.toLocaleString()} issues ·{' '}
+                      {snapshot.fingerprint.slice(0, 8)}
+                    </small>
+                  </div>
+                  {snapshot.isCurrent ? (
+                    <span className="snapshot-current">CURRENT</span>
+                  ) : (
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      disabled={restoringSnapshot !== null}
+                      onClick={() => setConfirmingSnapshot(snapshot.id)}
+                    >
+                      Restore
+                    </button>
+                  )}
+                  {confirmingSnapshot === snapshot.id ? (
+                    <div className="snapshot-confirm">
+                      <p>
+                        Publish this retained playlist now and reconcile the
+                        permanent channels against it?
+                      </p>
+                      <div>
+                        <button
+                          className="danger-button compact"
+                          type="button"
+                          disabled={restoringSnapshot !== null}
+                          onClick={() =>
+                            void restoreSnapshot(primarySource, snapshot.id)
+                          }
+                        >
+                          {restoringSnapshot === snapshot.id
+                            ? 'Restoring…'
+                            : 'Confirm restore'}
+                        </button>
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          disabled={restoringSnapshot !== null}
+                          onClick={() => setConfirmingSnapshot(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+            <div className="activity-list" aria-label="Recent source activity">
+              {sourceHistory.activity.length > 0 ? (
+                sourceHistory.activity.slice(0, 10).map((activity) => (
+                  <article className="activity-row" key={activity.id}>
+                    <span
+                      className={`activity-status ${activity.status ?? 'succeeded'}`}
+                    />
+                    <div>
+                      <strong>{activity.title}</strong>
+                      <p>{activity.detail}</p>
+                      <small>{formatHistoryTime(activity.occurredAt)}</small>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <p className="review-clear">No activity has been recorded.</p>
+              )}
+            </div>
+          </div>
+        </section>
       ) : null}
 
       {groups.length > 0 && primarySource ? (

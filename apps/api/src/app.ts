@@ -23,6 +23,7 @@ import { z } from 'zod';
 import {
   ManualMatchConflictError,
   PostgresSourceRepository,
+  SnapshotActivationConflictError,
   type SourceRepository,
 } from './source-repository.js';
 import {
@@ -135,6 +136,10 @@ const bulkChannelUpdateSchema = z.object({
 const reconciliationReviewSchema = z.object({
   search: z.string().trim().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+const sourceHistorySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
 const manualMatchSchema = z.object({
@@ -525,6 +530,59 @@ export async function buildApp(
         policy.data,
       );
       return { group: saved };
+    },
+  );
+
+  app.get<{
+    Params: { sourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/sources/:sourceId/history', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const sourceId = z.uuid().safeParse(request.params.sourceId);
+    const query = sourceHistorySchema.safeParse(request.query);
+    if (!sourceId.success) {
+      return reply.code(400).send({ error: 'sourceId must be a UUID' });
+    }
+    if (!query.success) {
+      return reply.code(400).send({ error: validationMessage(query.error) });
+    }
+    return sourceRepository.listSourceHistory(sourceId.data, query.data.limit);
+  });
+
+  app.post<{ Params: { sourceId: string; snapshotId: string } }>(
+    '/api/v1/sources/:sourceId/snapshots/:snapshotId/activate',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const snapshotId = z.uuid().safeParse(request.params.snapshotId);
+      if (!sourceId.success || !snapshotId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and snapshotId must be UUIDs' });
+      }
+      try {
+        const snapshot = await sourceRepository.activateSnapshot(
+          sourceId.data,
+          snapshotId.data,
+        );
+        if (!snapshot) {
+          return reply.code(404).send({ error: 'Snapshot not found' });
+        }
+        return { snapshot };
+      } catch (error) {
+        if (error instanceof SnapshotActivationConflictError) {
+          return reply.code(409).send({ error: error.message });
+        }
+        throw error;
+      }
     },
   );
 

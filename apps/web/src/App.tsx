@@ -84,6 +84,9 @@ export function App() {
           <a className="nav-link" href="#channels">
             <span>▤</span> Channels <em>ready</em>
           </a>
+          <a className="nav-link" href="#updates">
+            <span>↻</span> Updates <em>ready</em>
+          </a>
           <a className="nav-link muted" href="#events">
             <span>◷</span> Live events <em>soon</em>
           </a>

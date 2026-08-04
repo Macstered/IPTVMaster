@@ -56,6 +56,8 @@ function repository(): SourceRepository {
       epgUrl: 'http://provider.test/guide',
     })),
     savePlaylistSnapshot: vi.fn(),
+    listSourceHistory: vi.fn(async () => ({ snapshots: [], activity: [] })),
+    activateSnapshot: vi.fn(async () => null),
     saveEpgSnapshot: vi.fn(async () => summary),
     getLatestEpg: vi.fn(async () => ({ channels: [], programmes: [] })),
     getLatestPlaylistEntries: vi.fn(async () => []),

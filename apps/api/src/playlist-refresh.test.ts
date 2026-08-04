@@ -58,6 +58,8 @@ function repository(
       issueCount: 0,
       unchanged: false,
     })),
+    listSourceHistory: vi.fn(async () => ({ snapshots: [], activity: [] })),
+    activateSnapshot: vi.fn(async () => null),
     saveEpgSnapshot: vi.fn(),
     getLatestEpg: vi.fn(async () => ({ channels: [], programmes: [] })),
     getLatestPlaylistEntries: vi.fn(async () => []),

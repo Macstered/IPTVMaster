@@ -397,6 +397,129 @@ h2 {
   color: #e9f6ff;
   font-size: 16px;
 }
+.history-panel {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #193247;
+}
+.history-heading {
+  align-items: center;
+}
+.history-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.85fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+.snapshot-list,
+.activity-list {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+}
+.activity-list {
+  max-height: 350px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+.snapshot-row,
+.activity-row {
+  border: 1px solid #18364b;
+  border-radius: 9px;
+  background: #081722;
+}
+.snapshot-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 11px;
+}
+.snapshot-row.current {
+  border-color: #246549;
+  background: #0a1d1b;
+}
+.snapshot-main strong,
+.snapshot-main small,
+.activity-row strong,
+.activity-row small {
+  display: block;
+}
+.snapshot-main strong,
+.activity-row strong {
+  color: #dceaf5;
+  font-size: 11px;
+}
+.snapshot-main small,
+.activity-row small {
+  margin-top: 4px;
+  color: #627b92;
+  font-size: 9px;
+}
+.snapshot-current {
+  padding: 5px 7px;
+  color: #70ddb0;
+  border: 1px solid #28664d;
+  border-radius: 999px;
+  background: #0e2e25;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+}
+.snapshot-confirm {
+  grid-column: 1 / -1;
+  padding: 10px;
+  border: 1px solid #674352;
+  border-radius: 8px;
+  background: #21131a;
+}
+.snapshot-confirm p {
+  margin: 0 0 9px;
+  color: #d9aeb9;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.snapshot-confirm > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.danger-button {
+  color: #f0a8b8;
+  border: 1px solid #71394a;
+  background: #2b151d;
+  box-shadow: none;
+}
+.danger-button.compact {
+  height: 34px;
+  padding: 0 11px;
+  font-size: 10px;
+}
+.activity-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px;
+}
+.activity-row p {
+  margin: 4px 0 0;
+  color: #8aa0b5;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.activity-status {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #59dba5;
+  box-shadow: 0 0 9px #45d99a66;
+}
+.activity-status.failed,
+.activity-status.rejected {
+  background: #e7879d;
+  box-shadow: 0 0 9px #d1547066;
+}
 .group-policy-editor {
   margin-top: 20px;
   padding-top: 20px;
@@ -981,6 +1104,9 @@ button:disabled {
   .import-summary {
     grid-template-columns: 1fr 1fr;
   }
+  .history-grid {
+    grid-template-columns: 1fr;
+  }
   .channel-edit-form {
     grid-template-columns: 1fr 1fr;
   }
@@ -1035,6 +1161,9 @@ button:disabled {
   .saved-source .source-actions {
     grid-column: 1 / -1;
     width: 100%;
+  }
+  .snapshot-row {
+    grid-template-columns: 1fr auto;
   }
   .channel-row {
     grid-template-columns: auto 1fr auto;

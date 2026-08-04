@@ -14,6 +14,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - AES-256-GCM encrypted provider source storage in PostgreSQL.
 - A live-only remote playlist inspection flow with bounded streaming downloads.
 - Transactional last-known-good snapshots with encrypted stream URLs and unchanged-feed detection.
+- Retained playlist history with two-step restoration, automatic reactivation on a later provider refresh, and a user-visible activity trail.
 - Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
 - Persistent permanent-channel reconciliation using provider IDs, TVG IDs, and normalized name/group fallbacks, with ambiguous matches left unresolved.
 - A searchable channel editor for hide/show, rename, regroup, logo, and ordering overrides, including bulk visibility and group actions.
@@ -70,8 +71,9 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 4. Filter the provider groups and mark only daily live-event groups as events. Those groups use `Europe/Stockholm` to `Europe/Helsinki` title conversion; ordinary live TV stays unchanged.
 5. Search the permanent-channel list and apply individual or bulk visibility/group overrides. Name, group, logo, and order edits are retained when a later provider snapshot can be matched safely.
 6. If a refresh reports missing or ambiguous channels, use the provider-change review to choose a current provider entry. The original channel identity and edits are preserved and the manual match is locked until explicitly unlocked.
-7. Create the TiviMate URLs and copy both the M3U playlist and XMLTV EPG addresses immediately. Only the shared token's SHA-256 hash is stored, so the complete URLs cannot be shown again later.
-8. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
+7. Review update history after imports. If an accepted provider playlist is bad, restore a retained snapshot; current channel overrides are reconciled against it and the action is audited.
+8. Create the TiviMate URLs and copy both the M3U playlist and XMLTV EPG addresses immediately. Only the shared token's SHA-256 hash is stored, so the complete URLs cannot be shown again later.
+9. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
 
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 

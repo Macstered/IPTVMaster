@@ -56,6 +56,39 @@ export interface StoredSnapshotSummary {
   unchanged: boolean;
 }
 
+export interface SnapshotHistoryItem {
+  id: string;
+  sourceId: string;
+  fingerprint: string;
+  importedAt: string;
+  liveCount: number;
+  skippedEntries: number;
+  issueCount: number;
+  isCurrent: boolean;
+}
+
+export type SourceActivityKind =
+  | 'playlist-sync'
+  | 'epg-sync'
+  | 'manual-match'
+  | 'manual-unlock'
+  | 'snapshot-activate'
+  | 'snapshot-reactivate';
+
+export interface SourceActivityEvent {
+  id: string;
+  kind: SourceActivityKind;
+  occurredAt: string;
+  title: string;
+  detail: string;
+  status?: 'succeeded' | 'failed' | 'rejected';
+}
+
+export interface SourceHistory {
+  snapshots: SnapshotHistoryItem[];
+  activity: SourceActivityEvent[];
+}
+
 export interface StoredEpgSummary {
   sourceId: string;
   fingerprint: string;
@@ -178,6 +211,13 @@ export class ManualMatchConflictError extends Error {
   }
 }
 
+export class SnapshotActivationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SnapshotActivationConflictError';
+  }
+}
+
 export interface CreatedOutputProfile {
   id: string;
   name: string;
@@ -200,6 +240,11 @@ export interface SourceRepository {
     sourceId: string,
     inspection: PlaylistInspection,
   ): Promise<StoredSnapshotSummary>;
+  listSourceHistory(sourceId: string, limit: number): Promise<SourceHistory>;
+  activateSnapshot(
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<SnapshotHistoryItem | null>;
   saveEpgSnapshot(
     sourceId: string,
     inspection: XmltvInspection,
@@ -276,6 +321,35 @@ interface SnapshotRow {
   issue_count: number;
 }
 
+interface SnapshotHistoryRow extends SnapshotRow {
+  is_last_known_good: boolean;
+}
+
+interface SyncRunHistoryRow {
+  id: string;
+  sync_type: 'playlist' | 'epg';
+  status: 'succeeded' | 'failed' | 'rejected';
+  started_at: Date;
+  finished_at: Date | null;
+  summary: unknown;
+  safe_error: string | null;
+}
+
+interface ChannelAuditHistoryRow {
+  id: string;
+  action: 'manual-match' | 'manual-unlock';
+  details: unknown;
+  created_at: Date;
+  display_name: string;
+}
+
+interface SourceAuditHistoryRow {
+  id: string;
+  action: 'snapshot-activate' | 'snapshot-reactivate';
+  created_at: Date;
+  target_live_count: number | null;
+}
+
 interface EpgStateRow {
   source_id: string;
   fingerprint: string;
@@ -340,6 +414,15 @@ interface OutputProfileRow {
   source_id: string;
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((item) => typeof item === 'string')
+  );
+}
+
 function toSafeSource(row: SourceRow, hasEpgUrl: boolean): SafeSource {
   return {
     id: row.id,
@@ -381,6 +464,19 @@ function toSnapshotSummary(
     skippedEntries: row.skipped_vod_count,
     issueCount: row.issue_count,
     unchanged,
+  };
+}
+
+function toSnapshotHistoryItem(row: SnapshotHistoryRow): SnapshotHistoryItem {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    fingerprint: row.fingerprint,
+    importedAt: row.imported_at.toISOString(),
+    liveCount: row.live_count,
+    skippedEntries: row.skipped_vod_count,
+    issueCount: row.issue_count,
+    isCurrent: row.is_last_known_good,
   };
 }
 
@@ -539,21 +635,41 @@ export class PostgresSourceRepository implements SourceRepository {
       if (!syncRunId)
         throw new Error('Sync run insert did not return an identifier');
 
-      const existing = await client.query<SnapshotRow>(
+      await client.query('BEGIN');
+      const sourceLock = await client.query<{ id: string }>(
+        'SELECT id FROM source WHERE id = $1 FOR UPDATE',
+        [sourceId],
+      );
+      if (!sourceLock.rows[0]) throw new Error('Source not found');
+
+      const existing = await client.query<SnapshotHistoryRow>(
         `SELECT id, source_id, fingerprint, imported_at, live_count,
-                skipped_vod_count, issue_count
+                skipped_vod_count, issue_count, is_last_known_good
          FROM source_snapshot
          WHERE source_id = $1 AND fingerprint = $2`,
         [sourceId, inspection.fingerprint],
       );
-      if (existing.rows[0]) {
-        const summary = toSnapshotSummary(existing.rows[0], true);
+      const existingSnapshot = existing.rows[0];
+      if (existingSnapshot) {
+        if (!existingSnapshot.is_last_known_good) {
+          await this.#activateStoredSnapshot(
+            client,
+            sourceId,
+            existingSnapshot.id,
+            'snapshot-reactivate',
+          );
+        }
+        const summary = toSnapshotSummary(
+          existingSnapshot,
+          existingSnapshot.is_last_known_good,
+        );
         await client.query(
           `UPDATE sync_run
            SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
            WHERE id = $1`,
           [syncRunId, JSON.stringify(summary)],
         );
+        await client.query('COMMIT');
         return summary;
       }
 
@@ -567,6 +683,7 @@ export class PostgresSourceRepository implements SourceRepository {
         validateSnapshotCandidate(inspection, baseline.rows[0]?.live_count);
       } catch (error) {
         if (error instanceof SnapshotRejectedError) {
+          await client.query('ROLLBACK');
           await client.query(
             `UPDATE sync_run
              SET status = 'rejected', finished_at = NOW(), safe_error = $2
@@ -578,7 +695,6 @@ export class PostgresSourceRepository implements SourceRepository {
         throw error;
       }
 
-      await client.query('BEGIN');
       await client.query(
         'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
         [sourceId],
@@ -673,6 +789,145 @@ export class PostgresSourceRepository implements SourceRepository {
           // The original error remains more useful to the caller.
         }
       }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listSourceHistory(
+    sourceId: string,
+    limit: number,
+  ): Promise<SourceHistory> {
+    const [snapshotsResult, syncResult, channelAuditResult, sourceAuditResult] =
+      await Promise.all([
+        this.#pool.query<SnapshotHistoryRow>(
+          `SELECT id, source_id, fingerprint, imported_at, live_count,
+                  skipped_vod_count, issue_count, is_last_known_good
+           FROM source_snapshot
+           WHERE source_id = $1
+           ORDER BY imported_at DESC, id DESC
+           LIMIT $2`,
+          [sourceId, limit],
+        ),
+        this.#pool.query<SyncRunHistoryRow>(
+          `SELECT id, sync_type, status, started_at, finished_at, summary,
+                  safe_error
+           FROM sync_run
+           WHERE source_id = $1 AND status <> 'running'
+           ORDER BY started_at DESC, id DESC
+           LIMIT $2`,
+          [sourceId, limit],
+        ),
+        this.#pool.query<ChannelAuditHistoryRow>(
+          `SELECT a.id, a.action, a.details, a.created_at,
+                  COALESCE(c.custom_name, c.provider_name) AS display_name
+           FROM channel_match_audit a
+           JOIN channel c ON c.id = a.channel_id
+           WHERE a.source_id = $1
+           ORDER BY a.created_at DESC, a.id DESC
+           LIMIT $2`,
+          [sourceId, limit],
+        ),
+        this.#pool.query<SourceAuditHistoryRow>(
+          `SELECT a.id, a.action, a.created_at,
+                  target.live_count AS target_live_count
+           FROM source_audit_event a
+           LEFT JOIN source_snapshot target ON target.id = a.to_snapshot_id
+           WHERE a.source_id = $1
+           ORDER BY a.created_at DESC, a.id DESC
+           LIMIT $2`,
+          [sourceId, limit],
+        ),
+      ]);
+
+    const activity: SourceActivityEvent[] = [
+      ...syncResult.rows.map((row) => this.#toSyncActivity(row)),
+      ...channelAuditResult.rows.map((row) => {
+        const details = isStringRecord(row.details) ? row.details : {};
+        const providerName = details.providerName;
+        return {
+          id: row.id,
+          kind: row.action,
+          occurredAt: row.created_at.toISOString(),
+          title:
+            row.action === 'manual-match'
+              ? `Matched ${row.display_name}`
+              : `Unlocked ${row.display_name}`,
+          detail:
+            row.action === 'manual-match' && providerName
+              ? `Linked to provider entry ${providerName}`
+              : 'Automatic reconciliation may update this channel again.',
+          status: 'succeeded' as const,
+        };
+      }),
+      ...sourceAuditResult.rows.map((row) => ({
+        id: row.id,
+        kind: row.action,
+        occurredAt: row.created_at.toISOString(),
+        title:
+          row.action === 'snapshot-activate'
+            ? 'Snapshot restored'
+            : 'Provider snapshot reactivated',
+        detail:
+          row.target_live_count !== null
+            ? `${row.target_live_count.toLocaleString()} retained live entries became current.`
+            : 'The selected retained snapshot became current.',
+        status: 'succeeded' as const,
+      })),
+    ]
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .slice(0, limit);
+
+    return {
+      snapshots: snapshotsResult.rows.map(toSnapshotHistoryItem),
+      activity,
+    };
+  }
+
+  async activateSnapshot(
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<SnapshotHistoryItem | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sourceLock = await client.query<{ id: string }>(
+        'SELECT id FROM source WHERE id = $1 FOR UPDATE',
+        [sourceId],
+      );
+      if (!sourceLock.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const targetResult = await client.query<SnapshotHistoryRow>(
+        `SELECT id, source_id, fingerprint, imported_at, live_count,
+                skipped_vod_count, issue_count, is_last_known_good
+         FROM source_snapshot
+         WHERE source_id = $1 AND id = $2
+         FOR UPDATE`,
+        [sourceId, snapshotId],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (target.is_last_known_good) {
+        throw new SnapshotActivationConflictError(
+          'The selected snapshot is already current',
+        );
+      }
+      await this.#activateStoredSnapshot(
+        client,
+        sourceId,
+        snapshotId,
+        'snapshot-activate',
+      );
+      await client.query('COMMIT');
+      return { ...toSnapshotHistoryItem(target), isCurrent: true };
+    } catch (error) {
+      await this.#safeRollback(client);
       throw error;
     } finally {
       client.release();
@@ -1545,6 +1800,86 @@ export class PostgresSourceRepository implements SourceRepository {
       [profileId],
     );
     return result.rowCount === 1;
+  }
+
+  #toSyncActivity(row: SyncRunHistoryRow): SourceActivityEvent {
+    const summary =
+      typeof row.summary === 'object' && row.summary !== null
+        ? (row.summary as Record<string, unknown>)
+        : {};
+    const kind = row.sync_type === 'playlist' ? 'playlist-sync' : 'epg-sync';
+    const label = row.sync_type === 'playlist' ? 'Playlist' : 'EPG';
+    let detail = row.safe_error ?? `${label} refresh completed.`;
+    if (row.status === 'succeeded') {
+      if (summary.unchanged === true) {
+        detail = `${label} data was unchanged.`;
+      } else if (
+        row.sync_type === 'playlist' &&
+        typeof summary.liveCount === 'number'
+      ) {
+        detail = `${summary.liveCount.toLocaleString()} live entries accepted.`;
+      } else if (
+        row.sync_type === 'epg' &&
+        typeof summary.programmeCount === 'number'
+      ) {
+        detail = `${summary.programmeCount.toLocaleString()} programmes accepted.`;
+      }
+    }
+    return {
+      id: row.id,
+      kind,
+      occurredAt: (row.finished_at ?? row.started_at).toISOString(),
+      title: `${label} refresh ${row.status}`,
+      detail,
+      status: row.status,
+    };
+  }
+
+  async #activateStoredSnapshot(
+    client: PoolClient,
+    sourceId: string,
+    snapshotId: string,
+    action: 'snapshot-activate' | 'snapshot-reactivate',
+  ): Promise<void> {
+    const currentResult = await client.query<{ id: string }>(
+      `SELECT id
+       FROM source_snapshot
+       WHERE source_id = $1 AND is_last_known_good = TRUE
+       FOR UPDATE`,
+      [sourceId],
+    );
+    const fromSnapshotId = currentResult.rows[0]?.id ?? null;
+    await client.query(
+      'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
+      [sourceId],
+    );
+    const activated = await client.query(
+      `UPDATE source_snapshot
+       SET is_last_known_good = TRUE
+       WHERE source_id = $1 AND id = $2`,
+      [sourceId, snapshotId],
+    );
+    if (activated.rowCount !== 1) {
+      throw new Error('Snapshot activation target disappeared');
+    }
+    await this.#reconcileChannels(client, sourceId, snapshotId);
+    await client.query(
+      `INSERT INTO source_audit_event
+        (source_id, action, from_snapshot_id, to_snapshot_id, details)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [
+        sourceId,
+        action,
+        fromSnapshotId,
+        snapshotId,
+        JSON.stringify({
+          trigger: action === 'snapshot-activate' ? 'manual' : 'refresh',
+        }),
+      ],
+    );
+    await client.query('UPDATE source SET updated_at = NOW() WHERE id = $1', [
+      sourceId,
+    ]);
   }
 
   async #reconcileChannels(
