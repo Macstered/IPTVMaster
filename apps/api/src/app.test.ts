@@ -3,13 +3,18 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   SnapshotRejectedError,
   type M3uEntry,
+  type OutputGroupPolicy,
   type PlaylistInspection,
 } from '@iptvmaster/core';
 
 import { buildApp } from './app.js';
 import type {
   CreateSourceInput,
+  CreatedOutputProfile,
+  GroupSummary,
+  ResolvedOutputProfile,
   SafeSource,
+  SaveGroupPolicyInput,
   SourceCredentials,
   SourceRepository,
   StoredSnapshotSummary,
@@ -28,6 +33,8 @@ class MemorySourceRepository implements SourceRepository {
   readonly inputs: CreateSourceInput[] = [];
   readonly sources: SafeSource[] = [];
   latestEntries: M3uEntry[] = [];
+  policies: OutputGroupPolicy[] = [];
+  outputProfile: ResolvedOutputProfile | null = null;
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -73,6 +80,108 @@ class MemorySourceRepository implements SourceRepository {
 
   async getLatestPlaylistEntries(): Promise<M3uEntry[]> {
     return this.latestEntries;
+  }
+
+  async listGroups(): Promise<GroupSummary[]> {
+    const counts = new Map<string, number>();
+    for (const entry of this.latestEntries) {
+      const group = entry.attributes['group-title'] ?? '';
+      counts.set(group, (counts.get(group) ?? 0) + 1);
+    }
+    return [...counts].map(([providerGroup, channelCount]) => ({
+      providerGroup,
+      channelCount,
+      configured: false,
+      behavior: 'permanent',
+      enabled: true,
+      hidePlaceholders: true,
+      sourceTimeZone: 'Europe/Stockholm',
+      displayTimeZone: 'Europe/Helsinki',
+      numericDateOrder: 'month-day',
+    }));
+  }
+
+  async saveGroupPolicy(
+    sourceId: string,
+    input: SaveGroupPolicyInput,
+  ): Promise<GroupSummary> {
+    void sourceId;
+    this.policies = [
+      {
+        behavior: input.behavior,
+        groupName: input.groupName,
+        ...(input.outputGroupName
+          ? { outputGroupName: input.outputGroupName }
+          : {}),
+        enabled: input.enabled,
+        hidePlaceholders: input.hidePlaceholders,
+        ...(input.placeholderPatterns
+          ? { placeholderPatterns: input.placeholderPatterns }
+          : {}),
+        ...(input.behavior === 'event'
+          ? {
+              timePolicy: {
+                sourceTimeZone: input.sourceTimeZone ?? 'Europe/Stockholm',
+                displayTimeZone: input.displayTimeZone ?? 'Europe/Helsinki',
+                numericDateOrder: input.numericDateOrder ?? 'month-day',
+                referenceDate: '2026-08-04',
+              },
+            }
+          : {}),
+      },
+    ];
+    return {
+      providerGroup: input.groupName,
+      channelCount: this.latestEntries.filter(
+        (entry) => entry.attributes['group-title'] === input.groupName,
+      ).length,
+      configured: true,
+      behavior: input.behavior,
+      enabled: input.enabled,
+      ...(input.outputGroupName
+        ? { outputGroupName: input.outputGroupName }
+        : {}),
+      hidePlaceholders: input.hidePlaceholders,
+      sourceTimeZone: input.sourceTimeZone ?? 'Europe/Stockholm',
+      displayTimeZone: input.displayTimeZone ?? 'Europe/Helsinki',
+      numericDateOrder: input.numericDateOrder ?? 'month-day',
+    };
+  }
+
+  async listOutputGroupPolicies(): Promise<OutputGroupPolicy[]> {
+    return this.policies;
+  }
+
+  async createOutputProfile(
+    sourceId: string,
+    name: string,
+  ): Promise<CreatedOutputProfile> {
+    const accessToken = 'synthetic_output_token_1234567890';
+    this.outputProfile = {
+      id: '00000000-0000-4000-8000-000000000003',
+      name,
+      sourceId,
+    };
+    return {
+      id: this.outputProfile.id,
+      name,
+      accessToken,
+      playlistPath: `/p/${accessToken}/playlist.m3u`,
+    };
+  }
+
+  async resolveOutputProfile(
+    accessToken: string,
+  ): Promise<ResolvedOutputProfile | null> {
+    return accessToken === 'synthetic_output_token_1234567890'
+      ? this.outputProfile
+      : null;
+  }
+
+  async revokeOutputProfile(profileId: string): Promise<boolean> {
+    if (this.outputProfile?.id !== profileId) return false;
+    this.outputProfile = null;
+    return true;
   }
 }
 
@@ -300,5 +409,101 @@ describe('IPTVMaster API', () => {
     expect(response.statusCode).toBe(422);
     expect(response.json().error).toContain('suspicious count drop');
     expect(repository.latestEntries).toHaveLength(0);
+  });
+
+  it('publishes a token-protected M3U with event policies applied', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    repository.latestEntries = [
+      {
+        duration: -1,
+        attributes: { 'tvg-name': 'Yle TV1', 'group-title': 'Finland' },
+        name: 'Yle TV1',
+        url: 'http://provider.test/synthetic/1',
+        mediaType: 'live',
+        lineNumber: 2,
+      },
+      {
+        duration: -1,
+        attributes: {
+          'tvg-name': '17:00 Tennis 8/4',
+          'group-title': 'MTV Urheilu Events FI',
+        },
+        name: '17:00 Tennis 8/4',
+        url: 'http://provider.test/synthetic/2',
+        mediaType: 'live',
+        lineNumber: 4,
+      },
+      {
+        duration: -1,
+        attributes: {
+          'tvg-name': 'Reload your playlist',
+          'group-title': 'MTV Urheilu Events FI',
+        },
+        name: 'Reload your playlist',
+        url: 'http://provider.test/synthetic/3',
+        mediaType: 'live',
+        lineNumber: 6,
+      },
+    ];
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const policyResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/group-policies`,
+      payload: {
+        groupName: 'MTV Urheilu Events FI',
+        behavior: 'event',
+        enabled: true,
+        outputGroupName: "Today's Finnish Sports",
+        hidePlaceholders: true,
+        sourceTimeZone: 'Europe/Stockholm',
+        displayTimeZone: 'Europe/Helsinki',
+        numericDateOrder: 'month-day',
+      },
+    });
+    expect(policyResponse.statusCode).toBe(200);
+
+    const profileResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/output-profiles',
+      payload: { sourceId: source.id, name: 'Living room TiviMate' },
+    });
+    const playlistPath = profileResponse.json().profile.playlistPath as string;
+    const playlistResponse = await app.inject({
+      method: 'GET',
+      url: playlistPath,
+    });
+
+    expect(profileResponse.statusCode).toBe(201);
+    expect(playlistResponse.statusCode).toBe(200);
+    expect(playlistResponse.headers['content-type']).toContain(
+      'audio/x-mpegurl',
+    );
+    expect(playlistResponse.body).toContain('Yle TV1');
+    expect(playlistResponse.body).toContain('18:00 Tennis 8/4');
+    expect(playlistResponse.body).toContain(
+      'group-title="Today\'s Finnish Sports"',
+    );
+    expect(playlistResponse.body).not.toContain('Reload your playlist');
+
+    const profileId = profileResponse.json().profile.id as string;
+    const revokeResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/output-profiles/${profileId}`,
+    });
+    const revokedPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: playlistPath,
+    });
+    expect(revokeResponse.statusCode).toBe(204);
+    expect(revokedPlaylistResponse.statusCode).toBe(404);
   });
 });

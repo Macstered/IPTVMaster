@@ -31,3 +31,9 @@ Provider downloads are not retained after successful parsing. Stream URL fields 
 ## Time handling
 
 All instants are stored as UTC. Provider source and output display zones are stored as IANA timezone names. Event-title localization is applied through selected event-group policies and never as a global EPG offset.
+
+## Published playlist access
+
+An output profile receives a cryptographically random token. PostgreSQL stores only its SHA-256 hash; the plaintext token is returned once when the profile is created. Requests resolve the token, load the current last-known-good snapshot, apply enabled group policies, and serialize the result as M3U. Revoking a profile disables the token without touching the source or snapshot.
+
+Published M3U entries contain the upstream stream URL so the server is not in the playback data path. The endpoint uses private/no-store cache headers until conditional publication and versioning are added.

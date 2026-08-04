@@ -25,6 +25,23 @@ interface ImportSummary {
   issues: number;
 }
 
+interface GroupSummary {
+  providerGroup: string;
+  channelCount: number;
+  configured: boolean;
+  behavior: 'permanent' | 'event';
+  enabled: boolean;
+  outputGroupName?: string;
+  hidePlaceholders: boolean;
+}
+
+interface CreatedOutputProfile {
+  id: string;
+  name: string;
+  accessToken: string;
+  playlistPath: string;
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const value: unknown = await response.json();
   if (!response.ok) {
@@ -52,6 +69,19 @@ export function SourceSetup() {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [groups, setGroups] = useState<GroupSummary[]>([]);
+  const [groupFilter, setGroupFilter] = useState('Events FI');
+  const [savingGroup, setSavingGroup] = useState<string | null>(null);
+  const [creatingOutput, setCreatingOutput] = useState(false);
+  const [outputProfile, setOutputProfile] =
+    useState<CreatedOutputProfile | null>(null);
+  const [playlistOutputUrl, setPlaylistOutputUrl] = useState('');
+
+  async function loadGroups(sourceId: string) {
+    const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
+    const payload = await readJson<{ groups: GroupSummary[] }>(response);
+    setGroups(payload.groups);
+  }
 
   useEffect(() => {
     let active = true;
@@ -67,7 +97,11 @@ export function SourceSetup() {
           const payload = await readJson<{ sources: SafeSource[] }>(
             sourcesResponse,
           );
-          if (active) setSources(payload.sources);
+          if (active) {
+            setSources(payload.sources);
+            const firstSource = payload.sources[0];
+            if (firstSource) await loadGroups(firstSource.id);
+          }
         }
       } catch (caught) {
         if (active)
@@ -122,6 +156,7 @@ export function SourceSetup() {
       });
       const payload = await readJson<{ summary: ImportSummary }>(response);
       setImportSummary(payload.summary);
+      await loadGroups(source.id);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not inspect source',
@@ -130,6 +165,111 @@ export function SourceSetup() {
       setInspectingId(null);
     }
   }
+
+  async function setGroupBehavior(
+    source: SafeSource,
+    group: GroupSummary,
+    behavior: 'permanent' | 'event',
+  ) {
+    setSavingGroup(group.providerGroup);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/group-policies`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            groupName: group.providerGroup,
+            behavior,
+            enabled: true,
+            hidePlaceholders: true,
+            sourceTimeZone: 'Europe/Stockholm',
+            displayTimeZone: 'Europe/Helsinki',
+            numericDateOrder: 'month-day',
+          }),
+        },
+      );
+      const payload = await readJson<{ group: GroupSummary }>(response);
+      setGroups((current) =>
+        current.map((candidate) =>
+          candidate.providerGroup === payload.group.providerGroup
+            ? payload.group
+            : candidate,
+        ),
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save group policy',
+      );
+    } finally {
+      setSavingGroup(null);
+    }
+  }
+
+  async function createOutputProfile(source: SafeSource) {
+    setCreatingOutput(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/v1/output-profiles', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sourceId: source.id, name: 'TiviMate' }),
+      });
+      const payload = await readJson<{ profile: CreatedOutputProfile }>(
+        response,
+      );
+      setOutputProfile(payload.profile);
+      setPlaylistOutputUrl(
+        `${window.location.origin}${payload.profile.playlistPath}`,
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not create output URL',
+      );
+    } finally {
+      setCreatingOutput(false);
+    }
+  }
+
+  async function revokeOutputProfile() {
+    if (!outputProfile) return;
+    setCreatingOutput(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/output-profiles/${outputProfile.id}`,
+        { method: 'DELETE' },
+      );
+      if (!response.ok) {
+        await readJson<unknown>(response);
+      }
+      setOutputProfile(null);
+      setPlaylistOutputUrl('');
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not revoke output URL',
+      );
+    } finally {
+      setCreatingOutput(false);
+    }
+  }
+
+  const normalizedFilter = groupFilter.trim().toLocaleLowerCase();
+  const visibleGroups = groups
+    .filter((group) =>
+      normalizedFilter
+        ? group.providerGroup.toLocaleLowerCase().includes(normalizedFilter)
+        : group.behavior === 'event',
+    )
+    .slice(0, 50);
+  const primarySource = sources[0];
 
   return (
     <section className="panel source-panel" id="source-setup">
@@ -252,6 +392,104 @@ export function SourceSetup() {
             <small>PARSE ISSUES</small>
             <strong>{importSummary.issues.toLocaleString()}</strong>
           </div>
+        </div>
+      ) : null}
+
+      {groups.length > 0 && primarySource ? (
+        <div className="group-policy-editor">
+          <div className="subsection-heading">
+            <div>
+              <small>GROUP RULES</small>
+              <strong>Choose transient live-event groups</strong>
+            </div>
+            <input
+              aria-label="Filter provider groups"
+              placeholder="Filter groups"
+              value={groupFilter}
+              onChange={(event) => setGroupFilter(event.target.value)}
+            />
+          </div>
+          <p className="secret-note">
+            Event groups receive Swedish-to-Finnish time conversion and
+            placeholder filtering. Ordinary TV groups remain unchanged.
+          </p>
+          <div className="group-list">
+            {visibleGroups.map((group) => (
+              <div className="group-row" key={group.providerGroup}>
+                <div>
+                  <strong>{group.providerGroup || '(Ungrouped)'}</strong>
+                  <small>
+                    {group.channelCount.toLocaleString()} live entries
+                  </small>
+                </div>
+                <span className={`behavior-badge ${group.behavior}`}>
+                  {group.behavior === 'event' ? 'LIVE EVENT' : 'LIVE TV'}
+                </span>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={savingGroup !== null}
+                  onClick={() =>
+                    void setGroupBehavior(
+                      primarySource,
+                      group,
+                      group.behavior === 'event' ? 'permanent' : 'event',
+                    )
+                  }
+                >
+                  {savingGroup === group.providerGroup
+                    ? 'Saving…'
+                    : group.behavior === 'event'
+                      ? 'Treat as TV'
+                      : 'Mark as event'}
+                </button>
+              </div>
+            ))}
+            {visibleGroups.length === 0 ? (
+              <p className="empty-groups">No groups match this filter.</p>
+            ) : null}
+          </div>
+
+          <div className="output-setup">
+            <div>
+              <strong>TiviMate playlist URL</strong>
+              <small>
+                Create a private, revocable URL after your group rules are
+                ready.
+              </small>
+            </div>
+            <button
+              type="button"
+              disabled={creatingOutput}
+              onClick={() => void createOutputProfile(primarySource)}
+            >
+              {creatingOutput ? 'Creating…' : 'Create TiviMate URL'}
+            </button>
+          </div>
+          {playlistOutputUrl ? (
+            <div className="output-url">
+              <label htmlFor="playlist-output-url">
+                Copy this URL into TiviMate
+              </label>
+              <input
+                id="playlist-output-url"
+                readOnly
+                value={playlistOutputUrl}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <small>
+                This token is shown only for the current browser session.
+              </small>
+              <button
+                className="revoke-button"
+                type="button"
+                disabled={creatingOutput}
+                onClick={() => void revokeOutputProfile()}
+              >
+                Revoke this URL
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

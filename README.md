@@ -14,8 +14,12 @@ The project is in its first implementation phase. The initial vertical slice pro
 - AES-256-GCM encrypted provider source storage in PostgreSQL.
 - A live-only remote playlist inspection flow with bounded streaming downloads.
 - Transactional last-known-good snapshots with encrypted stream URLs and unchanged-feed detection.
-- A small API and browser UI for source setup and validating conversions.
+- Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
+- Token-protected, revocable M3U output URLs for TiviMate.
+- A small API and browser UI for encrypted setup, playlist imports, group rules, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
+
+Automated playlist/EPG scheduling and XMLTV publication are the next implementation milestones; refreshes are manual in the current slice.
 
 See [EXECUTION_PLAN.md](./EXECUTION_PLAN.md) for the complete delivery plan.
 
@@ -51,6 +55,17 @@ docker compose up --build
 Open `http://localhost:8080`.
 
 Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` before starting the stack. Losing this key makes stored provider credentials unrecoverable; committing it would expose them.
+
+## First-use workflow
+
+1. Open the web UI from a LAN address that the Nvidia Shield can reach.
+2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again.
+3. Import the live playlist. VOD and series entries are skipped.
+4. Filter the provider groups and mark only daily live-event groups as events. Those groups use `Europe/Stockholm` to `Europe/Helsinki` title conversion; ordinary live TV stays unchanged.
+5. Create the TiviMate URL and copy it immediately. Only its SHA-256 hash is stored, so the complete URL cannot be shown again later.
+6. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
+
+The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 
 ## Security
 

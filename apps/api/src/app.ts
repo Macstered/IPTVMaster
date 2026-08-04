@@ -2,10 +2,12 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import {
   applyEventGroupPolicy,
+  applyOutputGroupPolicies,
   inspectRemotePlaylist,
   localizeEventName,
   parseM3uText,
   redactStreamUrl,
+  serializeM3u,
   SnapshotRejectedError,
   type EventGroupPolicy,
   type M3uEntry,
@@ -59,6 +61,26 @@ const createSourceSchema = z.object({
   displayTimezone: z.string().min(1).default('Europe/Helsinki'),
 });
 
+const groupPolicySchema = z.object({
+  groupName: z.string().min(1).max(500),
+  behavior: z.enum(['permanent', 'event']),
+  enabled: z.boolean().default(true),
+  outputGroupName: z.string().trim().min(1).max(500).optional(),
+  hidePlaceholders: z.boolean().default(true),
+  placeholderPatterns: z
+    .array(z.string().trim().min(1).max(200))
+    .max(100)
+    .optional(),
+  sourceTimeZone: z.string().min(1).default('Europe/Stockholm'),
+  displayTimeZone: z.string().min(1).default('Europe/Helsinki'),
+  numericDateOrder: z.enum(['month-day', 'day-month']).default('month-day'),
+});
+
+const outputProfileSchema = z.object({
+  sourceId: z.uuid(),
+  name: z.string().trim().min(1).max(120).default('TiviMate'),
+});
+
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
   playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
@@ -78,6 +100,19 @@ function validationMessage(error: z.ZodError): string {
   return error.issues
     .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
     .join('; ');
+}
+
+function currentDateInZone(timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+  return `${value['year']}-${value['month']}-${value['day']}`;
 }
 
 export async function buildApp(
@@ -249,6 +284,116 @@ export async function buildApp(
           issues: inspection.issues.length,
         },
       });
+    },
+  );
+
+  app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/groups',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      return { groups: await sourceRepository.listGroups(sourceId.data) };
+    },
+  );
+
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/group-policies',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const policy = groupPolicySchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!policy.success) {
+        return reply.code(400).send({ error: validationMessage(policy.error) });
+      }
+      const saved = await sourceRepository.saveGroupPolicy(
+        sourceId.data,
+        policy.data,
+      );
+      return { group: saved };
+    },
+  );
+
+  app.post('/api/v1/output-profiles', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const parsed = outputProfileSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: validationMessage(parsed.error) });
+    }
+    const profile = await sourceRepository.createOutputProfile(
+      parsed.data.sourceId,
+      parsed.data.name,
+    );
+    return reply.code(201).send({ profile });
+  });
+
+  app.delete<{ Params: { profileId: string } }>(
+    '/api/v1/output-profiles/:profileId',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const profileId = z.uuid().safeParse(request.params.profileId);
+      if (!profileId.success) {
+        return reply.code(400).send({ error: 'profileId must be a UUID' });
+      }
+      const revoked = await sourceRepository.revokeOutputProfile(
+        profileId.data,
+      );
+      if (!revoked) return reply.code(404).send({ error: 'Profile not found' });
+      return reply.code(204).send();
+    },
+  );
+
+  app.get<{ Params: { accessToken: string } }>(
+    '/p/:accessToken/playlist.m3u',
+    async (request, reply) => {
+      if (
+        !sourceRepository ||
+        !/^[A-Za-z0-9_-]{24,128}$/.test(request.params.accessToken)
+      ) {
+        return reply.code(404).send({ error: 'Playlist not found' });
+      }
+      const profile = await sourceRepository.resolveOutputProfile(
+        request.params.accessToken,
+      );
+      if (!profile)
+        return reply.code(404).send({ error: 'Playlist not found' });
+
+      const entries = await sourceRepository.getLatestPlaylistEntries(
+        profile.sourceId,
+      );
+      if (entries.length === 0) {
+        return reply.code(503).send({ error: 'Playlist is not ready' });
+      }
+      const policies = await sourceRepository.listOutputGroupPolicies(
+        profile.sourceId,
+        currentDateInZone('Europe/Stockholm'),
+      );
+      const output = applyOutputGroupPolicies(entries, policies);
+      return reply
+        .type('audio/x-mpegurl; charset=utf-8')
+        .header('cache-control', 'private, no-store')
+        .send(serializeM3u(output.entries));
     },
   );
 

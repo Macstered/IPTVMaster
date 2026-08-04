@@ -47,7 +47,10 @@ Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be
 - The browser UI loads from a trusted LAN computer.
 - The container and VM recover after separate reboots.
 - The provider secret does not appear in container logs.
+- A generated M3U URL loads from another trusted LAN device and stops loading after revocation.
 - A test playlist refresh does not relay playback through the VM.
+
+When creating a TiviMate URL, open the setup UI using the VM's stable LAN hostname or address, not `localhost`. The generated address uses the browser origin and must be reachable from the Nvidia Shield.
 
 ## 5. Back up
 

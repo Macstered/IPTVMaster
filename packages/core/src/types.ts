@@ -56,6 +56,16 @@ export interface EventGroupPolicy {
   timePolicy?: EventTimePolicy;
 }
 
+export interface OutputGroupPolicy extends EventGroupPolicy {
+  behavior: 'permanent' | 'event';
+}
+
+export interface OutputPolicyResult {
+  entries: M3uEntry[];
+  hiddenEntries: number;
+  localizedEvents: number;
+}
+
 export interface AppliedEventPolicy {
   entry: M3uEntry;
   hidden: boolean;

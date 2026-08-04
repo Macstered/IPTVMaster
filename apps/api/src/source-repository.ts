@@ -4,8 +4,11 @@ import {
   SnapshotRejectedError,
   validateSnapshotCandidate,
   type M3uEntry,
+  type NumericDateOrder,
+  type OutputGroupPolicy,
   type PlaylistInspection,
 } from '@iptvmaster/core';
+import { createHash, randomBytes } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 
 export interface SourceCredentials {
@@ -44,6 +47,44 @@ export interface StoredSnapshotSummary {
   unchanged: boolean;
 }
 
+export interface GroupSummary {
+  providerGroup: string;
+  channelCount: number;
+  configured: boolean;
+  behavior: 'permanent' | 'event';
+  enabled: boolean;
+  outputGroupName?: string;
+  hidePlaceholders: boolean;
+  sourceTimeZone: string;
+  displayTimeZone: string;
+  numericDateOrder: NumericDateOrder;
+}
+
+export interface SaveGroupPolicyInput {
+  groupName: string;
+  behavior: 'permanent' | 'event';
+  enabled: boolean;
+  outputGroupName?: string;
+  hidePlaceholders: boolean;
+  placeholderPatterns?: string[];
+  sourceTimeZone?: string;
+  displayTimeZone?: string;
+  numericDateOrder?: NumericDateOrder;
+}
+
+export interface CreatedOutputProfile {
+  id: string;
+  name: string;
+  accessToken: string;
+  playlistPath: string;
+}
+
+export interface ResolvedOutputProfile {
+  id: string;
+  name: string;
+  sourceId: string;
+}
+
 export interface SourceRepository {
   createSource(input: CreateSourceInput): Promise<SafeSource>;
   listSources(): Promise<SafeSource[]>;
@@ -53,6 +94,23 @@ export interface SourceRepository {
     inspection: PlaylistInspection,
   ): Promise<StoredSnapshotSummary>;
   getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]>;
+  listGroups(sourceId: string): Promise<GroupSummary[]>;
+  saveGroupPolicy(
+    sourceId: string,
+    input: SaveGroupPolicyInput,
+  ): Promise<GroupSummary>;
+  listOutputGroupPolicies(
+    sourceId: string,
+    referenceDate: string,
+  ): Promise<OutputGroupPolicy[]>;
+  createOutputProfile(
+    sourceId: string,
+    name: string,
+  ): Promise<CreatedOutputProfile>;
+  resolveOutputProfile(
+    accessToken: string,
+  ): Promise<ResolvedOutputProfile | null>;
+  revokeOutputProfile(profileId: string): Promise<boolean>;
   close?(): Promise<void>;
 }
 
@@ -87,6 +145,26 @@ interface StoredEntryRow {
     duration?: number | null;
     lineNumber?: number;
   };
+}
+
+interface GroupRow {
+  provider_group: string;
+  channel_count: string | number;
+  configured: boolean;
+  behavior: 'permanent' | 'event';
+  enabled: boolean;
+  output_group: string | null;
+  hide_placeholders: boolean;
+  placeholder_patterns: unknown;
+  source_timezone: string;
+  display_timezone: string;
+  numeric_date_order: NumericDateOrder;
+}
+
+interface OutputProfileRow {
+  id: string;
+  name: string;
+  source_id: string;
 }
 
 function toSafeSource(row: SourceRow, hasEpgUrl: boolean): SafeSource {
@@ -131,6 +209,25 @@ function toSnapshotSummary(
     issueCount: row.issue_count,
     unchanged,
   };
+}
+
+function toGroupSummary(row: GroupRow): GroupSummary {
+  return {
+    providerGroup: row.provider_group,
+    channelCount: Number(row.channel_count),
+    configured: row.configured,
+    behavior: row.behavior,
+    enabled: row.enabled,
+    ...(row.output_group ? { outputGroupName: row.output_group } : {}),
+    hidePlaceholders: row.hide_placeholders,
+    sourceTimeZone: row.source_timezone,
+    displayTimeZone: row.display_timezone,
+    numericDateOrder: row.numeric_date_order,
+  };
+}
+
+function accessTokenHash(accessToken: string): string {
+  return createHash('sha256').update(accessToken).digest('hex');
 }
 
 export class PostgresSourceRepository implements SourceRepository {
@@ -387,6 +484,168 @@ export class PostgresSourceRepository implements SourceRepository {
       mediaType: row.media_type,
       lineNumber: row.metadata.lineNumber ?? 0,
     }));
+  }
+
+  async listGroups(sourceId: string): Promise<GroupSummary[]> {
+    const result = await this.#pool.query<GroupRow>(
+      `SELECT i.provider_group,
+              COUNT(*) AS channel_count,
+              (p.id IS NOT NULL) AS configured,
+              COALESCE(p.behavior, 'permanent') AS behavior,
+              COALESCE(p.enabled, TRUE) AS enabled,
+              p.output_group,
+              COALESCE(p.hide_placeholders, TRUE) AS hide_placeholders,
+              COALESCE(p.placeholder_patterns, '[]'::jsonb) AS placeholder_patterns,
+              COALESCE(p.source_timezone, src.source_timezone) AS source_timezone,
+              COALESCE(p.display_timezone, src.display_timezone) AS display_timezone,
+              COALESCE(p.numeric_date_order, 'month-day') AS numeric_date_order
+       FROM source_snapshot s
+       JOIN source src ON src.id = s.source_id
+       JOIN upstream_item i ON i.snapshot_id = s.id
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+       WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+       GROUP BY i.provider_group, p.id, src.source_timezone, src.display_timezone
+       ORDER BY i.provider_group ASC`,
+      [sourceId],
+    );
+    return result.rows.map(toGroupSummary);
+  }
+
+  async saveGroupPolicy(
+    sourceId: string,
+    input: SaveGroupPolicyInput,
+  ): Promise<GroupSummary> {
+    await this.#pool.query(
+      `INSERT INTO group_policy
+        (source_id, provider_group, behavior, enabled, output_group,
+         hide_placeholders, placeholder_patterns, source_timezone,
+         display_timezone, numeric_date_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+       ON CONFLICT (source_id, provider_group) DO UPDATE SET
+         behavior = EXCLUDED.behavior,
+         enabled = EXCLUDED.enabled,
+         output_group = EXCLUDED.output_group,
+         hide_placeholders = EXCLUDED.hide_placeholders,
+         placeholder_patterns = EXCLUDED.placeholder_patterns,
+         source_timezone = EXCLUDED.source_timezone,
+         display_timezone = EXCLUDED.display_timezone,
+         numeric_date_order = EXCLUDED.numeric_date_order,
+         updated_at = NOW()`,
+      [
+        sourceId,
+        input.groupName,
+        input.behavior,
+        input.enabled,
+        input.outputGroupName ?? null,
+        input.hidePlaceholders,
+        JSON.stringify(input.placeholderPatterns ?? []),
+        input.sourceTimeZone ?? null,
+        input.displayTimeZone ?? null,
+        input.numericDateOrder ?? 'month-day',
+      ],
+    );
+    const group = (await this.listGroups(sourceId)).find(
+      (candidate) => candidate.providerGroup === input.groupName,
+    );
+    if (!group)
+      throw new Error('Saved group policy does not match a current group');
+    return group;
+  }
+
+  async listOutputGroupPolicies(
+    sourceId: string,
+    referenceDate: string,
+  ): Promise<OutputGroupPolicy[]> {
+    const result = await this.#pool.query<GroupRow>(
+      `SELECT p.provider_group,
+              0 AS channel_count,
+              TRUE AS configured,
+              p.behavior,
+              p.enabled,
+              p.output_group,
+              p.hide_placeholders,
+              p.placeholder_patterns,
+              COALESCE(p.source_timezone, src.source_timezone) AS source_timezone,
+              COALESCE(p.display_timezone, src.display_timezone) AS display_timezone,
+              COALESCE(p.numeric_date_order, 'month-day') AS numeric_date_order
+       FROM group_policy p
+       JOIN source src ON src.id = p.source_id
+       WHERE p.source_id = $1`,
+      [sourceId],
+    );
+    return result.rows.map((row) => {
+      const patterns = Array.isArray(row.placeholder_patterns)
+        ? row.placeholder_patterns.filter(
+            (value): value is string => typeof value === 'string',
+          )
+        : [];
+      return {
+        behavior: row.behavior,
+        groupName: row.provider_group,
+        ...(row.output_group ? { outputGroupName: row.output_group } : {}),
+        enabled: row.enabled,
+        hidePlaceholders: row.hide_placeholders,
+        ...(patterns.length > 0 ? { placeholderPatterns: patterns } : {}),
+        ...(row.behavior === 'event'
+          ? {
+              timePolicy: {
+                sourceTimeZone: row.source_timezone,
+                displayTimeZone: row.display_timezone,
+                numericDateOrder: row.numeric_date_order,
+                referenceDate,
+              },
+            }
+          : {}),
+      };
+    });
+  }
+
+  async createOutputProfile(
+    sourceId: string,
+    name: string,
+  ): Promise<CreatedOutputProfile> {
+    const accessToken = randomBytes(24).toString('base64url');
+    const result = await this.#pool.query<{ id: string; name: string }>(
+      `INSERT INTO output_profile (name, access_token_hash, configuration)
+       SELECT $2, $3, jsonb_build_object('sourceId', s.id)
+       FROM source s
+       WHERE s.id = $1
+       RETURNING id, name`,
+      [sourceId, name, accessTokenHash(accessToken)],
+    );
+    const profile = result.rows[0];
+    if (!profile)
+      throw new Error('Source not found while creating output profile');
+    return {
+      id: profile.id,
+      name: profile.name,
+      accessToken,
+      playlistPath: `/p/${accessToken}/playlist.m3u`,
+    };
+  }
+
+  async resolveOutputProfile(
+    accessToken: string,
+  ): Promise<ResolvedOutputProfile | null> {
+    const result = await this.#pool.query<OutputProfileRow>(
+      `SELECT id, name, configuration->>'sourceId' AS source_id
+       FROM output_profile
+       WHERE access_token_hash = $1 AND enabled = TRUE`,
+      [accessTokenHash(accessToken)],
+    );
+    const row = result.rows[0];
+    return row ? { id: row.id, name: row.name, sourceId: row.source_id } : null;
+  }
+
+  async revokeOutputProfile(profileId: string): Promise<boolean> {
+    const result = await this.#pool.query(
+      `UPDATE output_profile
+       SET enabled = FALSE
+       WHERE id = $1 AND enabled = TRUE`,
+      [profileId],
+    );
+    return result.rowCount === 1;
   }
 
   async close(): Promise<void> {
