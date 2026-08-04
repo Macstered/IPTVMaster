@@ -10,6 +10,9 @@ import {
 
 import { buildApp } from './app.js';
 import type {
+  ChannelListFilters,
+  ChannelListPage,
+  ChannelSummary,
   CreateSourceInput,
   CreatedOutputProfile,
   GroupSummary,
@@ -21,6 +24,7 @@ import type {
   StoredEpgGuide,
   StoredEpgSummary,
   StoredSnapshotSummary,
+  UpdateChannelInput,
 } from './source-repository.js';
 
 const applications: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -39,6 +43,7 @@ class MemorySourceRepository implements SourceRepository {
   policies: OutputGroupPolicy[] = [];
   outputProfile: ResolvedOutputProfile | null = null;
   latestEpg: StoredEpgGuide = { channels: [], programmes: [] };
+  channels: ChannelSummary[] = [];
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -177,6 +182,62 @@ class MemorySourceRepository implements SourceRepository {
 
   async listOutputGroupPolicies(): Promise<OutputGroupPolicy[]> {
     return this.policies;
+  }
+
+  async listChannels(
+    sourceId: string,
+    filters: ChannelListFilters,
+  ): Promise<ChannelListPage> {
+    const search = filters.search?.toLocaleLowerCase() ?? '';
+    const matches = this.channels.filter(
+      (channel) =>
+        channel.sourceId === sourceId &&
+        (!filters.group || channel.providerGroup === filters.group) &&
+        (!filters.status || channel.reconciliationStatus === filters.status) &&
+        (!search ||
+          [
+            channel.providerName,
+            channel.providerGroup,
+            channel.customName ?? '',
+            channel.customGroup ?? '',
+            channel.tvgId ?? '',
+          ].some((value) => value.toLocaleLowerCase().includes(search))),
+    );
+    return {
+      channels: matches.slice(filters.offset, filters.offset + filters.limit),
+      total: matches.length,
+      limit: filters.limit,
+      offset: filters.offset,
+    };
+  }
+
+  async updateChannel(
+    sourceId: string,
+    channelId: string,
+    input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null> {
+    const index = this.channels.findIndex(
+      (channel) => channel.sourceId === sourceId && channel.id === channelId,
+    );
+    const current = this.channels[index];
+    if (!current) return null;
+    const updated: ChannelSummary = {
+      ...current,
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      ...(input.sortOrder === undefined ? {} : { sortOrder: input.sortOrder }),
+      updatedAt: '2026-08-04T01:00:00.000Z',
+    };
+    for (const [key, value] of [
+      ['customName', input.customName],
+      ['customGroup', input.customGroup],
+      ['customLogoUrl', input.customLogoUrl],
+    ] as const) {
+      if (value === undefined) continue;
+      if (value === null) delete updated[key];
+      else updated[key] = value;
+    }
+    this.channels[index] = updated;
+    return updated;
   }
 
   async createOutputProfile(
@@ -440,6 +501,72 @@ describe('IPTVMaster API', () => {
     expect(response.statusCode).toBe(422);
     expect(response.json().error).toContain('suspicious count drop');
     expect(repository.latestEntries).toHaveLength(0);
+  });
+
+  it('lists and updates permanent channel overrides without exposing streams', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const channelId = '00000000-0000-4000-8000-000000000004';
+    repository.channels = [
+      {
+        id: channelId,
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        tvgId: 'yle1.fi',
+        enabled: true,
+        sortOrder: 2,
+        matchLocked: false,
+        matchConfidence: 1,
+        reconciliationStatus: 'matched',
+        lastSeenAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/channels?search=yle&limit=20`,
+    });
+    const updateResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}`,
+      payload: {
+        enabled: false,
+        customName: 'Yle One',
+        customGroup: 'Finnish favourites',
+        customLogoUrl: 'https://images.test/yle-one.png',
+        sortOrder: 10,
+      },
+    });
+    const unsafeLogoResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}`,
+      payload: { customLogoUrl: 'ftp://images.test/yle.png' },
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json()).toEqual(
+      expect.objectContaining({ total: 1, limit: 20 }),
+    );
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json().channel).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        customName: 'Yle One',
+        customGroup: 'Finnish favourites',
+        sortOrder: 10,
+      }),
+    );
+    expect(unsafeLogoResponse.statusCode).toBe(400);
   });
 
   it('publishes a token-protected M3U with event policies applied', async () => {

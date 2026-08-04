@@ -14,6 +14,12 @@ import {
 import { createHash, randomBytes } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 
+import {
+  reconcileChannels,
+  type ReconciliationChannel,
+  type ReconciliationItem,
+} from './channel-reconciliation.js';
+
 export interface SourceCredentials {
   playlistUrl: string;
   epgUrl?: string;
@@ -90,6 +96,51 @@ export interface SaveGroupPolicyInput {
   numericDateOrder?: NumericDateOrder;
 }
 
+export type ChannelReconciliationStatus =
+  'matched' | 'new' | 'missing' | 'ambiguous';
+
+export interface ChannelSummary {
+  id: string;
+  sourceId: string;
+  providerName: string;
+  providerGroup: string;
+  tvgId?: string;
+  providerLogoUrl?: string;
+  enabled: boolean;
+  customName?: string;
+  customGroup?: string;
+  customLogoUrl?: string;
+  sortOrder: number;
+  matchLocked: boolean;
+  matchConfidence?: number;
+  reconciliationStatus: ChannelReconciliationStatus;
+  lastSeenAt?: string;
+  updatedAt: string;
+}
+
+export interface ChannelListFilters {
+  search?: string;
+  group?: string;
+  status?: ChannelReconciliationStatus;
+  limit: number;
+  offset: number;
+}
+
+export interface ChannelListPage {
+  channels: ChannelSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface UpdateChannelInput {
+  enabled?: boolean;
+  customName?: string | null;
+  customGroup?: string | null;
+  customLogoUrl?: string | null;
+  sortOrder?: number;
+}
+
 export interface CreatedOutputProfile {
   id: string;
   name: string;
@@ -123,6 +174,15 @@ export interface SourceRepository {
     sourceId: string,
     input: SaveGroupPolicyInput,
   ): Promise<GroupSummary>;
+  listChannels(
+    sourceId: string,
+    filters: ChannelListFilters,
+  ): Promise<ChannelListPage>;
+  updateChannel(
+    sourceId: string,
+    channelId: string,
+    input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null>;
   listOutputGroupPolicies(
     sourceId: string,
     referenceDate: string,
@@ -178,6 +238,30 @@ interface StoredEntryRow {
     duration?: number | null;
     lineNumber?: number;
   };
+  custom_name: string | null;
+  custom_group: string | null;
+  custom_logo_url: string | null;
+  sort_order: number | null;
+}
+
+interface ChannelRow {
+  id: string;
+  source_id: string;
+  provider_name: string;
+  provider_group: string;
+  tvg_id: string | null;
+  provider_logo_url: string | null;
+  enabled: boolean;
+  custom_name: string | null;
+  custom_group: string | null;
+  custom_logo_url: string | null;
+  sort_order: number;
+  match_locked: boolean;
+  match_confidence: string | number | null;
+  reconciliation_status: ChannelReconciliationStatus;
+  last_seen_at: Date | null;
+  updated_at: Date;
+  total_count?: string | number;
 }
 
 interface GroupRow {
@@ -256,6 +340,31 @@ function toGroupSummary(row: GroupRow): GroupSummary {
     sourceTimeZone: row.source_timezone,
     displayTimeZone: row.display_timezone,
     numericDateOrder: row.numeric_date_order,
+  };
+}
+
+function toChannelSummary(row: ChannelRow): ChannelSummary {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    providerName: row.provider_name,
+    providerGroup: row.provider_group,
+    ...(row.tvg_id ? { tvgId: row.tvg_id } : {}),
+    ...(row.provider_logo_url
+      ? { providerLogoUrl: row.provider_logo_url }
+      : {}),
+    enabled: row.enabled,
+    ...(row.custom_name ? { customName: row.custom_name } : {}),
+    ...(row.custom_group ? { customGroup: row.custom_group } : {}),
+    ...(row.custom_logo_url ? { customLogoUrl: row.custom_logo_url } : {}),
+    sortOrder: row.sort_order,
+    matchLocked: row.match_locked,
+    ...(row.match_confidence === null
+      ? {}
+      : { matchConfidence: Number(row.match_confidence) }),
+    reconciliationStatus: row.reconciliation_status,
+    ...(row.last_seen_at ? { lastSeenAt: row.last_seen_at.toISOString() } : {}),
+    updatedAt: row.updated_at.toISOString(),
   };
 }
 
@@ -483,6 +592,8 @@ export class PostgresSourceRepository implements SourceRepository {
         );
       }
 
+      await this.#reconcileChannels(client, sourceId, snapshot.id);
+
       const summary = toSnapshotSummary(snapshot, false);
       await client.query(
         `UPDATE sync_run
@@ -514,21 +625,31 @@ export class PostgresSourceRepository implements SourceRepository {
 
   async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
     const result = await this.#pool.query<StoredEntryRow>(
-      `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata
+      `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata,
+              c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order
        FROM source_snapshot s
        JOIN upstream_item i ON i.snapshot_id = s.id
+       LEFT JOIN channel c ON c.current_upstream_item_id = i.id
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
-       ORDER BY COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
+         AND (c.id IS NULL OR c.enabled = TRUE)
+       ORDER BY COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
+                COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
       [sourceId],
     );
-    return result.rows.map((row) => ({
-      duration: row.metadata.duration ?? null,
-      attributes: row.metadata.attributes ?? {},
-      name: row.original_name,
-      url: decryptSecret(row.encrypted_stream_url, this.#masterKey),
-      mediaType: row.media_type,
-      lineNumber: row.metadata.lineNumber ?? 0,
-    }));
+    return result.rows.map((row) => {
+      const attributes = { ...(row.metadata.attributes ?? {}) };
+      if (row.custom_name) attributes['tvg-name'] = row.custom_name;
+      if (row.custom_group) attributes['group-title'] = row.custom_group;
+      if (row.custom_logo_url) attributes['tvg-logo'] = row.custom_logo_url;
+      return {
+        duration: row.metadata.duration ?? null,
+        attributes,
+        name: row.custom_name ?? row.original_name,
+        url: decryptSecret(row.encrypted_stream_url, this.#masterKey),
+        mediaType: row.media_type,
+        lineNumber: row.metadata.lineNumber ?? 0,
+      };
+    });
   }
 
   async saveEpgSnapshot(
@@ -788,41 +909,147 @@ export class PostgresSourceRepository implements SourceRepository {
     sourceId: string,
     input: SaveGroupPolicyInput,
   ): Promise<GroupSummary> {
-    await this.#pool.query(
-      `INSERT INTO group_policy
-        (source_id, provider_group, behavior, enabled, output_group,
-         hide_placeholders, placeholder_patterns, source_timezone,
-         display_timezone, numeric_date_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
-       ON CONFLICT (source_id, provider_group) DO UPDATE SET
-         behavior = EXCLUDED.behavior,
-         enabled = EXCLUDED.enabled,
-         output_group = EXCLUDED.output_group,
-         hide_placeholders = EXCLUDED.hide_placeholders,
-         placeholder_patterns = EXCLUDED.placeholder_patterns,
-         source_timezone = EXCLUDED.source_timezone,
-         display_timezone = EXCLUDED.display_timezone,
-         numeric_date_order = EXCLUDED.numeric_date_order,
-         updated_at = NOW()`,
-      [
-        sourceId,
-        input.groupName,
-        input.behavior,
-        input.enabled,
-        input.outputGroupName ?? null,
-        input.hidePlaceholders,
-        JSON.stringify(input.placeholderPatterns ?? []),
-        input.sourceTimeZone ?? null,
-        input.displayTimeZone ?? null,
-        input.numericDateOrder ?? 'month-day',
-      ],
-    );
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO group_policy
+          (source_id, provider_group, behavior, enabled, output_group,
+           hide_placeholders, placeholder_patterns, source_timezone,
+           display_timezone, numeric_date_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+         ON CONFLICT (source_id, provider_group) DO UPDATE SET
+           behavior = EXCLUDED.behavior,
+           enabled = EXCLUDED.enabled,
+           output_group = EXCLUDED.output_group,
+           hide_placeholders = EXCLUDED.hide_placeholders,
+           placeholder_patterns = EXCLUDED.placeholder_patterns,
+           source_timezone = EXCLUDED.source_timezone,
+           display_timezone = EXCLUDED.display_timezone,
+           numeric_date_order = EXCLUDED.numeric_date_order,
+           updated_at = NOW()`,
+        [
+          sourceId,
+          input.groupName,
+          input.behavior,
+          input.enabled,
+          input.outputGroupName ?? null,
+          input.hidePlaceholders,
+          JSON.stringify(input.placeholderPatterns ?? []),
+          input.sourceTimeZone ?? null,
+          input.displayTimeZone ?? null,
+          input.numericDateOrder ?? 'month-day',
+        ],
+      );
+      const snapshot = await client.query<{ id: string }>(
+        `SELECT id
+         FROM source_snapshot
+         WHERE source_id = $1 AND is_last_known_good = TRUE`,
+        [sourceId],
+      );
+      if (snapshot.rows[0]) {
+        await this.#reconcileChannels(client, sourceId, snapshot.rows[0].id);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
     const group = (await this.listGroups(sourceId)).find(
       (candidate) => candidate.providerGroup === input.groupName,
     );
     if (!group)
       throw new Error('Saved group policy does not match a current group');
     return group;
+  }
+
+  async listChannels(
+    sourceId: string,
+    filters: ChannelListFilters,
+  ): Promise<ChannelListPage> {
+    const values: unknown[] = [sourceId];
+    const conditions = [
+      'c.source_id = $1',
+      "COALESCE(p.behavior, 'permanent') = 'permanent'",
+    ];
+    if (filters.search) {
+      values.push(`%${filters.search}%`);
+      conditions.push(
+        `(c.provider_name ILIKE $${values.length}
+          OR COALESCE(c.custom_name, '') ILIKE $${values.length}
+          OR c.provider_group ILIKE $${values.length}
+          OR COALESCE(c.custom_group, '') ILIKE $${values.length}
+          OR COALESCE(c.tvg_id, '') ILIKE $${values.length})`,
+      );
+    }
+    if (filters.group !== undefined) {
+      values.push(filters.group);
+      conditions.push(`c.provider_group = $${values.length}`);
+    }
+    if (filters.status) {
+      values.push(filters.status);
+      conditions.push(`c.reconciliation_status = $${values.length}`);
+    }
+    values.push(filters.limit, filters.offset);
+    const limitParameter = `$${values.length - 1}`;
+    const offsetParameter = `$${values.length}`;
+    const result = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.source_id, c.provider_name, c.provider_group, c.tvg_id,
+              c.provider_logo_url, c.enabled, c.custom_name, c.custom_group,
+              c.custom_logo_url, c.sort_order, c.match_locked,
+              c.match_confidence, c.reconciliation_status, c.last_seen_at,
+              c.updated_at, COUNT(*) OVER() AS total_count
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY COALESCE(c.custom_group, c.provider_group), c.sort_order,
+                COALESCE(c.custom_name, c.provider_name), c.id
+       LIMIT ${limitParameter} OFFSET ${offsetParameter}`,
+      values,
+    );
+    return {
+      channels: result.rows.map(toChannelSummary),
+      total: Number(result.rows[0]?.total_count ?? 0),
+      limit: filters.limit,
+      offset: filters.offset,
+    };
+  }
+
+  async updateChannel(
+    sourceId: string,
+    channelId: string,
+    input: UpdateChannelInput,
+  ): Promise<ChannelSummary | null> {
+    const values: unknown[] = [sourceId, channelId];
+    const updates: string[] = [];
+    const addUpdate = (column: string, value: unknown) => {
+      values.push(value);
+      updates.push(`${column} = $${values.length}`);
+    };
+    if (input.enabled !== undefined) addUpdate('enabled', input.enabled);
+    if (input.customName !== undefined)
+      addUpdate('custom_name', input.customName);
+    if (input.customGroup !== undefined)
+      addUpdate('custom_group', input.customGroup);
+    if (input.customLogoUrl !== undefined)
+      addUpdate('custom_logo_url', input.customLogoUrl);
+    if (input.sortOrder !== undefined) addUpdate('sort_order', input.sortOrder);
+    if (updates.length === 0) return null;
+
+    const result = await this.#pool.query<ChannelRow>(
+      `UPDATE channel
+       SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE source_id = $1 AND id = $2
+       RETURNING id, source_id, provider_name, provider_group, tvg_id,
+                 provider_logo_url, enabled, custom_name, custom_group,
+                 custom_logo_url, sort_order, match_locked, match_confidence,
+                 reconciliation_status, last_seen_at, updated_at`,
+      values,
+    );
+    return result.rows[0] ? toChannelSummary(result.rows[0]) : null;
   }
 
   async listOutputGroupPolicies(
@@ -919,6 +1146,160 @@ export class PostgresSourceRepository implements SourceRepository {
       [profileId],
     );
     return result.rowCount === 1;
+  }
+
+  async #reconcileChannels(
+    client: PoolClient,
+    sourceId: string,
+    snapshotId: string,
+  ): Promise<void> {
+    const existingResult = await client.query<{
+      id: string;
+      provider_stream_id: string | null;
+      tvg_id: string | null;
+      provider_name: string;
+      provider_group: string;
+      match_locked: boolean;
+    }>(
+      `SELECT c.id, c.provider_stream_id, c.tvg_id, c.provider_name,
+              c.provider_group, c.match_locked
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'`,
+      [sourceId],
+    );
+    const itemResult = await client.query<{
+      id: string;
+      provider_stream_id: string | null;
+      tvg_id: string | null;
+      provider_name: string;
+      provider_group: string;
+      provider_logo_url: string | null;
+      sort_order: number;
+    }>(
+      `SELECT i.id, i.provider_stream_id, i.tvg_id,
+              i.original_name AS provider_name, i.provider_group,
+              i.logo_url AS provider_logo_url,
+              COALESCE((i.metadata->>'lineNumber')::int, 0) AS sort_order
+       FROM upstream_item i
+       JOIN source_snapshot s ON s.id = i.snapshot_id
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+       WHERE i.snapshot_id = $1 AND i.media_type = 'live'
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+       ORDER BY sort_order, i.id`,
+      [snapshotId],
+    );
+    const channels: ReconciliationChannel[] = existingResult.rows.map(
+      (row) => ({
+        id: row.id,
+        providerStreamId: row.provider_stream_id,
+        tvgId: row.tvg_id,
+        providerName: row.provider_name,
+        providerGroup: row.provider_group,
+        matchLocked: row.match_locked,
+      }),
+    );
+    const items: ReconciliationItem[] = itemResult.rows.map((row) => ({
+      id: row.id,
+      providerStreamId: row.provider_stream_id,
+      tvgId: row.tvg_id,
+      providerName: row.provider_name,
+      providerGroup: row.provider_group,
+      providerLogoUrl: row.provider_logo_url,
+      sortOrder: row.sort_order,
+    }));
+    const reconciliation = reconcileChannels(channels, items);
+
+    await client.query(
+      `UPDATE channel
+       SET current_upstream_item_id = NULL,
+           reconciliation_status = 'missing',
+           match_confidence = NULL,
+           updated_at = NOW()
+       WHERE source_id = $1`,
+      [sourceId],
+    );
+
+    if (reconciliation.matches.length > 0) {
+      const values = reconciliation.matches.map((match) => ({
+        channel_id: match.channelId,
+        item_id: match.item.id,
+        provider_stream_id: match.item.providerStreamId,
+        tvg_id: match.item.tvgId,
+        provider_name: match.item.providerName,
+        provider_group: match.item.providerGroup,
+        provider_logo_url: match.item.providerLogoUrl,
+        confidence: match.confidence,
+      }));
+      await client.query(
+        `UPDATE channel c
+         SET current_upstream_item_id = item.item_id::uuid,
+             provider_stream_id = item.provider_stream_id,
+             tvg_id = item.tvg_id,
+             provider_name = item.provider_name,
+             provider_group = item.provider_group,
+             provider_logo_url = item.provider_logo_url,
+             match_confidence = item.confidence,
+             reconciliation_status = 'matched',
+             last_seen_at = NOW(),
+             updated_at = NOW()
+         FROM jsonb_to_recordset($1::jsonb) AS item(
+           channel_id UUID,
+           item_id TEXT,
+           provider_stream_id TEXT,
+           tvg_id TEXT,
+           provider_name TEXT,
+           provider_group TEXT,
+           provider_logo_url TEXT,
+           confidence NUMERIC
+         )
+         WHERE c.id = item.channel_id`,
+        [JSON.stringify(values)],
+      );
+    }
+
+    if (reconciliation.ambiguousChannelIds.length > 0) {
+      await client.query(
+        `UPDATE channel
+         SET reconciliation_status = 'ambiguous', updated_at = NOW()
+         WHERE source_id = $1 AND id = ANY($2::uuid[])`,
+        [sourceId, reconciliation.ambiguousChannelIds],
+      );
+    }
+
+    if (reconciliation.newItems.length > 0) {
+      const values = reconciliation.newItems.map((item) => ({
+        item_id: item.id,
+        provider_stream_id: item.providerStreamId,
+        tvg_id: item.tvgId,
+        provider_name: item.providerName,
+        provider_group: item.providerGroup,
+        provider_logo_url: item.providerLogoUrl,
+        sort_order: item.sortOrder,
+      }));
+      await client.query(
+        `INSERT INTO channel
+          (source_id, current_upstream_item_id, provider_stream_id, tvg_id,
+           provider_name, provider_group, provider_logo_url, sort_order,
+           reconciliation_status, last_seen_at)
+         SELECT $1, item.item_id::uuid, item.provider_stream_id, item.tvg_id,
+                item.provider_name, item.provider_group, item.provider_logo_url,
+                item.sort_order, 'new', NOW()
+         FROM jsonb_to_recordset($2::jsonb) AS item(
+           item_id TEXT,
+           provider_stream_id TEXT,
+           tvg_id TEXT,
+           provider_name TEXT,
+           provider_group TEXT,
+           provider_logo_url TEXT,
+           sort_order INTEGER
+         )`,
+        [sourceId, JSON.stringify(values)],
+      );
+    }
   }
 
   async close(): Promise<void> {

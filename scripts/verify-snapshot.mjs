@@ -1,10 +1,11 @@
 const repositoryModule =
   process.env.SNAPSHOT_REPOSITORY_MODULE ??
   new URL('../apps/api/dist/source-repository.js', import.meta.url).href;
+const coreModule =
+  process.env.SNAPSHOT_CORE_MODULE ??
+  new URL('../packages/core/dist/index.js', import.meta.url).href;
 const { PostgresSourceRepository } = await import(repositoryModule);
-const { applyOutputGroupPolicies, serializeM3u } = await import(
-  new URL('../packages/core/dist/index.js', import.meta.url).href
-);
+const { applyOutputGroupPolicies, serializeM3u } = await import(coreModule);
 
 const connectionString = process.env.DATABASE_URL;
 const masterKey = process.env.IPTVMASTER_MASTER_KEY;
@@ -73,6 +74,41 @@ try {
 
   const first = await repository.savePlaylistSnapshot(source.id, inspection);
   const second = await repository.savePlaylistSnapshot(source.id, inspection);
+  const channelPage = await repository.listChannels(source.id, {
+    search: 'Yle TV1',
+    limit: 20,
+    offset: 0,
+  });
+  const yleChannel = channelPage.channels[0];
+  if (!yleChannel) throw new Error('Synthetic channel reconciliation failed');
+  await repository.updateChannel(source.id, yleChannel.id, {
+    customName: 'Yle One',
+    customGroup: 'Finnish favourites',
+    customLogoUrl: 'https://images.test/yle-one.png',
+    sortOrder: 1,
+  });
+  const refreshedInspection = {
+    ...inspection,
+    fingerprint: 'd'.repeat(64),
+    entries: inspection.entries.map((entry, index) =>
+      index === 0
+        ? {
+            ...entry,
+            name: 'Yle TV1 HD',
+            attributes: { ...entry.attributes, 'tvg-name': 'Yle TV1 HD' },
+          }
+        : entry,
+    ),
+  };
+  const changedSnapshot = await repository.savePlaylistSnapshot(
+    source.id,
+    refreshedInspection,
+  );
+  const reconciledChannels = await repository.listChannels(source.id, {
+    search: 'Yle One',
+    limit: 20,
+    offset: 0,
+  });
   const entries = await repository.getLatestPlaylistEntries(source.id);
   const groups = await repository.listGroups(source.id);
   await repository.saveGroupPolicy(source.id, {
@@ -136,8 +172,18 @@ try {
   const report = {
     firstUnchanged: first.unchanged,
     secondUnchanged: second.unchanged,
+    changedSnapshotImported: !changedSnapshot.unchanged,
     entryCount: entries.length,
     streamUrlRoundTrip: entries[0]?.url === streamUrl,
+    channelReconciled: channelPage.total === 1,
+    channelEditSurvivedRefresh:
+      reconciledChannels.channels[0]?.id === yleChannel.id &&
+      reconciledChannels.channels[0]?.reconciliationStatus === 'matched',
+    channelNameOverridden: entries[0]?.name === 'Yle One',
+    channelGroupOverridden:
+      entries[0]?.attributes['group-title'] === 'Finnish favourites',
+    channelLogoOverridden:
+      entries[0]?.attributes['tvg-logo'] === 'https://images.test/yle-one.png',
     groupCount: groups.length,
     outputLocalized: output.includes('18:00 Tennis 8/4'),
     outputPlaceholderHidden: !output.includes('Reload your playlist'),
@@ -159,9 +205,15 @@ try {
   process.stdout.write(`${JSON.stringify(report)}\n`);
   if (
     !report.secondUnchanged ||
+    !report.changedSnapshotImported ||
     report.entryCount !== 3 ||
     report.groupCount !== 2 ||
     !report.streamUrlRoundTrip ||
+    !report.channelReconciled ||
+    !report.channelEditSurvivedRefresh ||
+    !report.channelNameOverridden ||
+    !report.channelGroupOverridden ||
+    !report.channelLogoOverridden ||
     !report.outputLocalized ||
     !report.outputPlaceholderHidden ||
     !report.outputGroupRenamed ||

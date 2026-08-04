@@ -61,6 +61,13 @@ function repository(): SourceRepository {
     getLatestPlaylistEntries: vi.fn(async () => []),
     listGroups: vi.fn(async () => []),
     saveGroupPolicy: vi.fn(),
+    listChannels: vi.fn(async (_sourceId, filters) => ({
+      channels: [],
+      total: 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    })),
+    updateChannel: vi.fn(async () => null),
     listOutputGroupPolicies: vi.fn(async () => []),
     createOutputProfile: vi.fn(),
     resolveOutputProfile: vi.fn(async () => null),

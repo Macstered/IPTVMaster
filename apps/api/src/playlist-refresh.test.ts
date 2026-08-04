@@ -42,7 +42,7 @@ function inspection(): PlaylistInspection {
 function repository(
   overrides: Partial<SourceRepository> = {},
 ): SourceRepository {
-  return {
+  const base: SourceRepository = {
     createSource: vi.fn(),
     listSources: vi.fn(async () => [source()]),
     getSourceCredentials: vi.fn(async (): Promise<SourceCredentials> => ({
@@ -63,12 +63,19 @@ function repository(
     getLatestPlaylistEntries: vi.fn(async () => []),
     listGroups: vi.fn(async () => []),
     saveGroupPolicy: vi.fn(),
+    listChannels: vi.fn(async (_sourceId, filters) => ({
+      channels: [],
+      total: 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    })),
+    updateChannel: vi.fn(async () => null),
     listOutputGroupPolicies: vi.fn(async () => []),
     createOutputProfile: vi.fn(),
     resolveOutputProfile: vi.fn(async () => null),
     revokeOutputProfile: vi.fn(async () => false),
-    ...overrides,
   };
+  return Object.assign(base, overrides);
 }
 
 describe('playlist refresh automation', () => {

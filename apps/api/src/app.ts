@@ -92,6 +92,29 @@ const outputProfileSchema = z.object({
   name: z.string().trim().min(1).max(120).default('TiviMate'),
 });
 
+const channelListSchema = z.object({
+  search: z.string().trim().max(200).optional(),
+  group: z.string().max(500).optional(),
+  status: z.enum(['matched', 'new', 'missing', 'ambiguous']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const nullableChannelText = (maximum: number) =>
+  z.union([z.string().trim().min(1).max(maximum), z.null()]).optional();
+
+const channelUpdateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    customName: nullableChannelText(500),
+    customGroup: nullableChannelText(500),
+    customLogoUrl: z.union([z.url().max(4_000), z.null()]).optional(),
+    sortOrder: z.number().int().min(0).max(2_147_483_647).optional(),
+  })
+  .refine((value) => Object.values(value).some((item) => item !== undefined), {
+    message: 'At least one channel field is required',
+  });
+
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
   playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
@@ -476,6 +499,65 @@ export async function buildApp(
         policy.data,
       );
       return { group: saved };
+    },
+  );
+
+  app.get<{
+    Params: { sourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/sources/:sourceId/channels', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const sourceId = z.uuid().safeParse(request.params.sourceId);
+    const filters = channelListSchema.safeParse(request.query);
+    if (!sourceId.success) {
+      return reply.code(400).send({ error: 'sourceId must be a UUID' });
+    }
+    if (!filters.success) {
+      return reply.code(400).send({ error: validationMessage(filters.error) });
+    }
+    return sourceRepository.listChannels(sourceId.data, filters.data);
+  });
+
+  app.patch<{ Params: { sourceId: string; channelId: string } }>(
+    '/api/v1/sources/:sourceId/channels/:channelId',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const channelId = z.uuid().safeParse(request.params.channelId);
+      const update = channelUpdateSchema.safeParse(request.body);
+      if (!sourceId.success || !channelId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and channelId must be UUIDs' });
+      }
+      if (!update.success) {
+        return reply.code(400).send({ error: validationMessage(update.error) });
+      }
+      if (
+        update.data.customLogoUrl &&
+        !['http:', 'https:'].includes(
+          new URL(update.data.customLogoUrl).protocol,
+        )
+      ) {
+        return reply
+          .code(400)
+          .send({ error: 'customLogoUrl must use HTTP or HTTPS' });
+      }
+      const channel = await sourceRepository.updateChannel(
+        sourceId.data,
+        channelId.data,
+        update.data,
+      );
+      if (!channel) return reply.code(404).send({ error: 'Channel not found' });
+      return { channel };
     },
   );
 

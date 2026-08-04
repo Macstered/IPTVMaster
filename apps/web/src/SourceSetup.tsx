@@ -45,6 +45,37 @@ interface GroupSummary {
   hidePlaceholders: boolean;
 }
 
+type ChannelStatus = 'matched' | 'new' | 'missing' | 'ambiguous';
+
+interface ChannelSummary {
+  id: string;
+  sourceId: string;
+  providerName: string;
+  providerGroup: string;
+  tvgId?: string;
+  providerLogoUrl?: string;
+  enabled: boolean;
+  customName?: string;
+  customGroup?: string;
+  customLogoUrl?: string;
+  sortOrder: number;
+  reconciliationStatus: ChannelStatus;
+}
+
+interface ChannelListPage {
+  channels: ChannelSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+interface ChannelDraft {
+  customName: string;
+  customGroup: string;
+  customLogoUrl: string;
+  sortOrder: string;
+}
+
 interface CreatedOutputProfile {
   id: string;
   name: string;
@@ -86,6 +117,18 @@ export function SourceSetup() {
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [groupFilter, setGroupFilter] = useState('Events FI');
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
+  const [channels, setChannels] = useState<ChannelSummary[]>([]);
+  const [channelTotal, setChannelTotal] = useState(0);
+  const [channelSearch, setChannelSearch] = useState('');
+  const [loadingChannels, setLoadingChannels] = useState(false);
+  const [savingChannel, setSavingChannel] = useState<string | null>(null);
+  const [editingChannel, setEditingChannel] = useState<string | null>(null);
+  const [channelDraft, setChannelDraft] = useState<ChannelDraft>({
+    customName: '',
+    customGroup: '',
+    customLogoUrl: '',
+    sortOrder: '0',
+  });
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputProfile, setOutputProfile] =
     useState<CreatedOutputProfile | null>(null);
@@ -96,6 +139,22 @@ export function SourceSetup() {
     const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
     const payload = await readJson<{ groups: GroupSummary[] }>(response);
     setGroups(payload.groups);
+  }
+
+  async function loadChannels(sourceId: string, search = '') {
+    setLoadingChannels(true);
+    try {
+      const parameters = new URLSearchParams({ limit: '100' });
+      if (search.trim()) parameters.set('search', search.trim());
+      const response = await fetch(
+        `/api/v1/sources/${sourceId}/channels?${parameters.toString()}`,
+      );
+      const payload = await readJson<ChannelListPage>(response);
+      setChannels(payload.channels);
+      setChannelTotal(payload.total);
+    } finally {
+      setLoadingChannels(false);
+    }
   }
 
   useEffect(() => {
@@ -115,7 +174,12 @@ export function SourceSetup() {
           if (active) {
             setSources(payload.sources);
             const firstSource = payload.sources[0];
-            if (firstSource) await loadGroups(firstSource.id);
+            if (firstSource) {
+              await Promise.all([
+                loadGroups(firstSource.id),
+                loadChannels(firstSource.id),
+              ]);
+            }
           }
         }
       } catch (caught) {
@@ -171,7 +235,7 @@ export function SourceSetup() {
       });
       const payload = await readJson<{ summary: ImportSummary }>(response);
       setImportSummary(payload.summary);
-      await loadGroups(source.id);
+      await Promise.all([loadGroups(source.id), loadChannels(source.id)]);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not inspect source',
@@ -234,6 +298,7 @@ export function SourceSetup() {
             : candidate,
         ),
       );
+      await loadChannels(source.id, channelSearch);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -242,6 +307,77 @@ export function SourceSetup() {
       );
     } finally {
       setSavingGroup(null);
+    }
+  }
+
+  function beginChannelEdit(channel: ChannelSummary) {
+    setEditingChannel(channel.id);
+    setChannelDraft({
+      customName: channel.customName ?? '',
+      customGroup: channel.customGroup ?? '',
+      customLogoUrl: channel.customLogoUrl ?? '',
+      sortOrder: String(channel.sortOrder),
+    });
+  }
+
+  async function updateChannel(
+    source: SafeSource,
+    channel: ChannelSummary,
+    update: Record<string, unknown>,
+  ) {
+    setSavingChannel(channel.id);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/channels/${channel.id}`,
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(update),
+        },
+      );
+      const payload = await readJson<{ channel: ChannelSummary }>(response);
+      setChannels((current) =>
+        current.map((candidate) =>
+          candidate.id === payload.channel.id ? payload.channel : candidate,
+        ),
+      );
+      return payload.channel;
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not update channel',
+      );
+      return null;
+    } finally {
+      setSavingChannel(null);
+    }
+  }
+
+  async function saveChannelEdit(
+    event: FormEvent,
+    source: SafeSource,
+    channel: ChannelSummary,
+  ) {
+    event.preventDefault();
+    const sortOrder = Number(channelDraft.sortOrder);
+    const updated = await updateChannel(source, channel, {
+      customName: channelDraft.customName.trim() || null,
+      customGroup: channelDraft.customGroup.trim() || null,
+      customLogoUrl: channelDraft.customLogoUrl.trim() || null,
+      sortOrder: Number.isInteger(sortOrder) && sortOrder >= 0 ? sortOrder : 0,
+    });
+    if (updated) setEditingChannel(null);
+  }
+
+  async function searchChannels(event: FormEvent) {
+    event.preventDefault();
+    if (!primarySource) return;
+    try {
+      await loadChannels(primarySource.id, channelSearch);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not load channels',
+      );
     }
   }
 
@@ -533,6 +669,172 @@ export function SourceSetup() {
             ))}
             {visibleGroups.length === 0 ? (
               <p className="empty-groups">No groups match this filter.</p>
+            ) : null}
+          </div>
+
+          <div className="channel-editor" id="channels">
+            <div className="subsection-heading channel-heading">
+              <div>
+                <small>PERMANENT CHANNELS</small>
+                <strong>Edit the TiviMate lineup</strong>
+              </div>
+              <span className="channel-count">
+                {channelTotal.toLocaleString()}{' '}
+                {channelTotal === 1 ? 'channel' : 'channels'}
+              </span>
+            </div>
+            <p className="secret-note">
+              Overrides survive provider refreshes. Event groups are excluded
+              from this list and keep their automatic daily handling.
+            </p>
+            <form className="channel-search" onSubmit={searchChannels}>
+              <input
+                aria-label="Search permanent channels"
+                placeholder="Search name, group, or TVG ID"
+                value={channelSearch}
+                onChange={(event) => setChannelSearch(event.target.value)}
+              />
+              <button
+                className="secondary-button compact"
+                type="submit"
+                disabled={loadingChannels}
+              >
+                {loadingChannels ? 'Loading…' : 'Search'}
+              </button>
+            </form>
+            <div className="channel-list" aria-live="polite">
+              {channels.map((channel) => (
+                <article
+                  className={`channel-row ${channel.enabled ? '' : 'disabled'}`}
+                  key={channel.id}
+                >
+                  <div className="channel-summary">
+                    <strong>
+                      {channel.customName ?? channel.providerName}
+                    </strong>
+                    <small>
+                      {(channel.customGroup ?? channel.providerGroup) ||
+                        '(Ungrouped)'}
+                      {channel.tvgId ? ` · ${channel.tvgId}` : ''}
+                    </small>
+                  </div>
+                  <span
+                    className={`reconciliation-badge ${channel.reconciliationStatus}`}
+                  >
+                    {channel.reconciliationStatus}
+                  </span>
+                  <div className="channel-actions">
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      disabled={savingChannel !== null}
+                      onClick={() =>
+                        void updateChannel(primarySource, channel, {
+                          enabled: !channel.enabled,
+                        })
+                      }
+                    >
+                      {savingChannel === channel.id
+                        ? 'Saving…'
+                        : channel.enabled
+                          ? 'Hide'
+                          : 'Show'}
+                    </button>
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      disabled={savingChannel !== null}
+                      onClick={() =>
+                        editingChannel === channel.id
+                          ? setEditingChannel(null)
+                          : beginChannelEdit(channel)
+                      }
+                    >
+                      {editingChannel === channel.id ? 'Cancel' : 'Edit'}
+                    </button>
+                  </div>
+                  {editingChannel === channel.id ? (
+                    <form
+                      className="channel-edit-form"
+                      onSubmit={(event) =>
+                        void saveChannelEdit(event, primarySource, channel)
+                      }
+                    >
+                      <label>
+                        Display name
+                        <input
+                          value={channelDraft.customName}
+                          placeholder={channel.providerName}
+                          onChange={(event) =>
+                            setChannelDraft((current) => ({
+                              ...current,
+                              customName: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Output group
+                        <input
+                          value={channelDraft.customGroup}
+                          placeholder={channel.providerGroup || '(Ungrouped)'}
+                          onChange={(event) =>
+                            setChannelDraft((current) => ({
+                              ...current,
+                              customGroup: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Logo URL
+                        <input
+                          type="url"
+                          value={channelDraft.customLogoUrl}
+                          placeholder={channel.providerLogoUrl ?? 'https://…'}
+                          onChange={(event) =>
+                            setChannelDraft((current) => ({
+                              ...current,
+                              customLogoUrl: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Sort order
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={channelDraft.sortOrder}
+                          onChange={(event) =>
+                            setChannelDraft((current) => ({
+                              ...current,
+                              sortOrder: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <button type="submit" disabled={savingChannel !== null}>
+                        {savingChannel === channel.id
+                          ? 'Saving…'
+                          : 'Save channel'}
+                      </button>
+                    </form>
+                  ) : null}
+                </article>
+              ))}
+              {!loadingChannels && channels.length === 0 ? (
+                <p className="empty-groups">
+                  Import a playlist or change the search to find channels.
+                </p>
+              ) : null}
+            </div>
+            {channelTotal > channels.length ? (
+              <small className="channel-limit-note">
+                Showing the first {channels.length.toLocaleString()} matches.
+                Narrow the search to edit other channels.
+              </small>
             ) : null}
           </div>
 

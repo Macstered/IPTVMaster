@@ -30,6 +30,12 @@ Provider downloads are not retained after successful parsing. Stream URL fields 
 
 Manual and scheduled playlist imports use the same refresh coordinator. It coalesces concurrent work for each source, executes enabled sources sequentially to avoid provider bursts, and exposes only redacted failure details. The initial single-process deployment makes this lock process-local; a database lease is required before supporting multiple app replicas.
 
+## Permanent-channel reconciliation
+
+Permanent channels store provider identity separately from snapshot-scoped upstream rows. Each accepted playlist refresh attempts exact provider-stream matching first, then TVG ID, then a normalized provider-name and group fallback. A locked match cannot use the name fallback. Only unique, uncontested matches are attached automatically; collisions remain `ambiguous`, removed channels become `missing`, and unmatched current entries become `new` channels. Event-policy groups are excluded from permanent reconciliation.
+
+Hide/show, custom name, custom group, custom logo, and sort order are user-owned fields on the permanent channel and are not overwritten during reconciliation. Playlist publication joins the current upstream item to these fields, omits disabled channels, and applies the remaining event/group policies before serialization.
+
 XMLTV follows the same bounded refresh model on an independent schedule. The SAX parser normalizes explicit XMLTV offsets to UTC, detects duplicate/invalid channel IDs, caps channel/programme counts, and does not apply the event-title timezone rule. A valid guide replaces its predecessor in one PostgreSQL transaction; an unchanged fingerprint skips replacement and a suspicious count drop retains the prior guide.
 
 ## Time handling
