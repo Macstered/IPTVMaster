@@ -21,8 +21,12 @@ import { z } from 'zod';
 import {
   PostgresSourceRepository,
   type SourceRepository,
-  type StoredSnapshotSummary,
 } from './source-repository.js';
+import {
+  PlaylistRefreshCoordinator,
+  PlaylistScheduler,
+  SourceNotFoundError,
+} from './playlist-refresh.js';
 
 const timePolicySchema = z.object({
   sourceTimeZone: z.string().min(1).default('Europe/Stockholm'),
@@ -84,6 +88,9 @@ const outputProfileSchema = z.object({
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
   playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
+  enablePlaylistScheduler?: boolean;
+  playlistRefreshIntervalMs?: number;
+  playlistRefreshInitialDelayMs?: number;
 }
 
 function safeEntry(entry: M3uEntry) {
@@ -113,6 +120,11 @@ function currentDateInZone(timeZone: string): string {
     parts.map((part) => [part.type, part.value]),
   );
   return `${value['year']}-${value['month']}-${value['day']}`;
+}
+
+function positiveEnvironmentNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 export async function buildApp(
@@ -148,8 +160,37 @@ export async function buildApp(
     ownsSourceRepository = true;
   }
 
-  if (ownsSourceRepository && sourceRepository?.close) {
-    app.addHook('onClose', async () => sourceRepository?.close?.());
+  const refreshCoordinator = sourceRepository
+    ? new PlaylistRefreshCoordinator(sourceRepository, playlistInspector)
+    : undefined;
+  const schedulerEnabled =
+    refreshCoordinator !== undefined &&
+    (options.enablePlaylistScheduler ??
+      (ownsSourceRepository &&
+        process.env['PLAYLIST_REFRESH_ENABLED'] !== 'false'));
+  const playlistScheduler =
+    schedulerEnabled && sourceRepository && refreshCoordinator
+      ? new PlaylistScheduler(sourceRepository, refreshCoordinator, app.log, {
+          intervalMs:
+            options.playlistRefreshIntervalMs ??
+            positiveEnvironmentNumber(
+              'PLAYLIST_REFRESH_INTERVAL_MINUTES',
+              120,
+            ) * 60_000,
+          initialDelayMs:
+            options.playlistRefreshInitialDelayMs ??
+            positiveEnvironmentNumber(
+              'PLAYLIST_REFRESH_INITIAL_DELAY_SECONDS',
+              30,
+            ) * 1_000,
+        })
+      : undefined;
+  playlistScheduler?.start();
+  if (playlistScheduler || (ownsSourceRepository && sourceRepository?.close)) {
+    app.addHook('onClose', async () => {
+      await playlistScheduler?.stop();
+      if (ownsSourceRepository) await sourceRepository?.close?.();
+    });
   }
 
   await app.register(cors, {
@@ -162,7 +203,19 @@ export async function buildApp(
     sourcePersistence: sourceRepository !== undefined,
     databaseConfigured: databaseUrl !== undefined,
     encryptionConfigured: masterKey !== undefined,
+    playlistAutomation: playlistScheduler !== undefined,
   }));
+
+  app.get(
+    '/api/v1/automation/status',
+    async () =>
+      playlistScheduler?.status() ?? {
+        enabled: false,
+        running: false,
+        intervalMinutes: 0,
+        sourceStates: refreshCoordinator?.listStates() ?? [],
+      },
+  );
 
   app.get('/api/v1/sources', async (_request, reply) => {
     if (!sourceRepository) {
@@ -254,36 +307,44 @@ export async function buildApp(
       if (!sourceId.success) {
         return reply.code(400).send({ error: 'sourceId must be a UUID' });
       }
-      const credentials = await sourceRepository.getSourceCredentials(
-        sourceId.data,
-      );
-      if (!credentials)
-        return reply.code(404).send({ error: 'Source not found' });
-
-      const inspection = await playlistInspector(credentials.playlistUrl);
-      let snapshot: StoredSnapshotSummary;
+      if (!refreshCoordinator) {
+        return reply
+          .code(503)
+          .send({ error: 'Playlist refresh is not configured' });
+      }
       try {
-        snapshot = await sourceRepository.savePlaylistSnapshot(
-          sourceId.data,
-          inspection,
-        );
+        const result = await refreshCoordinator.refresh(sourceId.data);
+        if (result.status === 'already-running') {
+          return reply.code(202).send({
+            status: result.status,
+            sourceId: result.sourceId,
+            startedAt: result.startedAt,
+          });
+        }
+        const { inspection, snapshot } = result;
+        if (!inspection || !snapshot) {
+          throw new Error('Completed refresh is missing its result');
+        }
+        return reply.code(snapshot.unchanged ? 200 : 201).send({
+          snapshot,
+          summary: {
+            fingerprint: inspection.fingerprint,
+            totalBytes: inspection.totalBytes,
+            retainedLiveEntries: inspection.entries.length,
+            skippedEntries: inspection.skippedEntries,
+            mediaCounts: inspection.mediaCounts,
+            issues: inspection.issues.length,
+          },
+        });
       } catch (error) {
+        if (error instanceof SourceNotFoundError) {
+          return reply.code(404).send({ error: error.message });
+        }
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
         }
         throw error;
       }
-      return reply.code(snapshot.unchanged ? 200 : 201).send({
-        snapshot,
-        summary: {
-          fingerprint: inspection.fingerprint,
-          totalBytes: inspection.totalBytes,
-          retainedLiveEntries: inspection.entries.length,
-          skippedEntries: inspection.skippedEntries,
-          mediaCounts: inspection.mediaCounts,
-          issues: inspection.issues.length,
-        },
-      });
     },
   );
 

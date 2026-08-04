@@ -16,10 +16,11 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Transactional last-known-good snapshots with encrypted stream URLs and unchanged-feed detection.
 - Persistent group rules that apply Stockholm-to-Helsinki conversion only to selected live-event groups.
 - Token-protected, revocable M3U output URLs for TiviMate.
+- Non-overlapping automatic playlist refreshes, enabled every 120 minutes by default.
 - A small API and browser UI for encrypted setup, playlist imports, group rules, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
 
-Automated playlist/EPG scheduling and XMLTV publication are the next implementation milestones; refreshes are manual in the current slice.
+XMLTV ingestion, automatic EPG refreshes, and XMLTV publication are the next implementation milestone.
 
 See [EXECUTION_PLAN.md](./EXECUTION_PLAN.md) for the complete delivery plan.
 
@@ -66,6 +67,8 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 6. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
 
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
+
+Playlist automation starts 30 seconds after the application and then runs every 120 minutes. Override `PLAYLIST_REFRESH_INTERVAL_MINUTES` and `PLAYLIST_REFRESH_INITIAL_DELAY_SECONDS` in `.env`, or set `PLAYLIST_REFRESH_ENABLED=false` to disable it. Overlapping manual and scheduled imports for the same source are coalesced, and a rejected/failed refresh leaves the last-known-good snapshot active.
 
 ## Security
 

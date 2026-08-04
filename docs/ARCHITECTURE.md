@@ -28,6 +28,8 @@ Imports use a staging-and-promote workflow:
 
 Provider downloads are not retained after successful parsing. Stream URL fields are encrypted individually before snapshot persistence and never returned in ordinary API responses. A fingerprint prevents identical refreshes from duplicating snapshot data, while a partial or failed transaction leaves the previous last-known-good snapshot active.
 
+Manual and scheduled playlist imports use the same refresh coordinator. It coalesces concurrent work for each source, executes enabled sources sequentially to avoid provider bursts, and exposes only redacted failure details. The initial single-process deployment makes this lock process-local; a database lease is required before supporting multiple app replicas.
+
 ## Time handling
 
 All instants are stored as UTC. Provider source and output display zones are stored as IANA timezone names. Event-title localization is applied through selected event-group policies and never as a global EPG offset.

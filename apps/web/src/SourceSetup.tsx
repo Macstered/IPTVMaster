@@ -4,6 +4,7 @@ interface Capabilities {
   sourcePersistence: boolean;
   databaseConfigured: boolean;
   encryptionConfigured: boolean;
+  playlistAutomation: boolean;
 }
 
 interface SafeSource {
@@ -354,6 +355,11 @@ export function SourceSetup() {
                 <small>
                   {source.sourceTimezone} → {source.displayTimezone}
                 </small>
+                {capabilities?.playlistAutomation ? (
+                  <small className="automation-note">
+                    Automatic playlist refresh enabled
+                  </small>
+                ) : null}
               </div>
               <button
                 className="secondary-button"

@@ -1,0 +1,130 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import type { PlaylistInspection } from '@iptvmaster/core';
+
+import {
+  PlaylistRefreshCoordinator,
+  PlaylistScheduler,
+  safeRefreshError,
+} from './playlist-refresh.js';
+import type {
+  SafeSource,
+  SourceCredentials,
+  SourceRepository,
+  StoredSnapshotSummary,
+} from './source-repository.js';
+
+function source(): SafeSource {
+  return {
+    id: '00000000-0000-4000-8000-000000000001',
+    name: 'Synthetic source',
+    sourceType: 'm3u',
+    sourceTimezone: 'Europe/Stockholm',
+    displayTimezone: 'Europe/Helsinki',
+    enabled: true,
+    hasEpgUrl: false,
+    createdAt: '2026-08-04T00:00:00.000Z',
+    updatedAt: '2026-08-04T00:00:00.000Z',
+  };
+}
+
+function inspection(): PlaylistInspection {
+  return {
+    fingerprint: 'a'.repeat(64),
+    totalBytes: 100,
+    entries: [],
+    issues: [],
+    mediaCounts: { live: 0, vod: 0, series: 0, unknown: 0 },
+    skippedEntries: 0,
+  };
+}
+
+function repository(
+  overrides: Partial<SourceRepository> = {},
+): SourceRepository {
+  return {
+    createSource: vi.fn(),
+    listSources: vi.fn(async () => [source()]),
+    getSourceCredentials: vi.fn(async (): Promise<SourceCredentials> => ({
+      playlistUrl: 'http://provider.test/synthetic',
+    })),
+    savePlaylistSnapshot: vi.fn(async (): Promise<StoredSnapshotSummary> => ({
+      id: '00000000-0000-4000-8000-000000000002',
+      sourceId: source().id,
+      fingerprint: 'a'.repeat(64),
+      importedAt: '2026-08-04T00:00:00.000Z',
+      liveCount: 42,
+      skippedEntries: 0,
+      issueCount: 0,
+      unchanged: false,
+    })),
+    getLatestPlaylistEntries: vi.fn(async () => []),
+    listGroups: vi.fn(async () => []),
+    saveGroupPolicy: vi.fn(),
+    listOutputGroupPolicies: vi.fn(async () => []),
+    createOutputProfile: vi.fn(),
+    resolveOutputProfile: vi.fn(async () => null),
+    revokeOutputProfile: vi.fn(async () => false),
+    ...overrides,
+  };
+}
+
+describe('playlist refresh automation', () => {
+  it('coalesces overlapping refresh requests for one source', async () => {
+    let releaseInspection: (() => void) | undefined;
+    const inspector = vi.fn(
+      () =>
+        new Promise<PlaylistInspection>((resolve) => {
+          releaseInspection = () => resolve(inspection());
+        }),
+    );
+    const data = repository();
+    const coordinator = new PlaylistRefreshCoordinator(data, inspector);
+
+    const first = coordinator.refresh(source().id);
+    const second = await coordinator.refresh(source().id);
+    expect(second.status).toBe('already-running');
+    expect(inspector).toHaveBeenCalledTimes(1);
+    releaseInspection?.();
+    await expect(first).resolves.toEqual(
+      expect.objectContaining({ status: 'completed' }),
+    );
+    expect(data.savePlaylistSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes every enabled source and exposes safe status', async () => {
+    const data = repository();
+    const coordinator = new PlaylistRefreshCoordinator(data, async () =>
+      inspection(),
+    );
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const scheduler = new PlaylistScheduler(data, coordinator, logger, {
+      intervalMs: 7_200_000,
+      initialDelayMs: 30_000,
+    });
+
+    await scheduler.runNow();
+
+    expect(data.savePlaylistSnapshot).toHaveBeenCalledTimes(1);
+    expect(scheduler.status()).toEqual(
+      expect.objectContaining({
+        running: false,
+        intervalMinutes: 120,
+        sourceStates: [
+          expect.objectContaining({ status: 'succeeded', liveCount: 42 }),
+        ],
+      }),
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('redacts provider URLs and credential query values from errors', () => {
+    expect(
+      safeRefreshError(
+        new Error(
+          'Failed http://provider.test/path?username=private&password=secret',
+        ),
+      ),
+    ).toBe('Failed [redacted-url]');
+  });
+});
