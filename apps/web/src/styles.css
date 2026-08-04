@@ -277,6 +277,117 @@ h2 {
   padding: 7px 10px;
   letter-spacing: 0;
 }
+.pill.ready {
+  color: #66dfae;
+  border-color: #246549;
+  background: #0d3027;
+}
+.source-panel {
+  margin-bottom: 14px;
+}
+.source-form {
+  display: grid;
+  grid-template-columns:
+    minmax(150px, 0.7fr) minmax(240px, 1.5fr) minmax(220px, 1.2fr)
+    auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 22px;
+}
+.source-form > div {
+  display: grid;
+  gap: 7px;
+}
+.source-form label,
+.source-form input,
+.source-form button {
+  grid-column: auto;
+  grid-row: auto;
+}
+.secret-note {
+  grid-column: 1 / -1;
+  margin: 3px 0 0;
+  color: #647d94;
+  font-size: 10px;
+}
+.saved-source-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+.saved-source {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 15px;
+  border: 1px solid #1b394e;
+  border-radius: 10px;
+  background: #071723;
+}
+.source-symbol {
+  width: 39px;
+  height: 39px;
+  display: grid;
+  place-items: center;
+  color: #5fc3ff;
+  border-radius: 9px;
+  background: #123653;
+  font-size: 11px;
+  font-weight: 800;
+}
+.saved-source strong,
+.saved-source p,
+.saved-source small {
+  display: block;
+}
+.saved-source strong {
+  color: #e7f3fd;
+  font-size: 13px;
+}
+.saved-source p {
+  margin: 4px 0;
+  color: #89a0b6;
+  font-size: 11px;
+}
+.saved-source small {
+  color: #5f7890;
+  font-size: 10px;
+}
+.secondary-button {
+  color: #83c9f9;
+  border: 1px solid #26557a;
+  background: #0c2940;
+  box-shadow: none;
+}
+.import-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid #1b394e;
+  border-radius: 10px;
+  background: #1b394e;
+}
+.import-summary > div {
+  padding: 15px;
+  background: #071723;
+}
+.import-summary small,
+.import-summary strong {
+  display: block;
+}
+.import-summary small {
+  color: #647d94;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+.import-summary strong {
+  margin-top: 5px;
+  color: #e9f6ff;
+  font-size: 16px;
+}
 .panel-copy {
   max-width: 650px;
   margin: 13px 0 24px;
@@ -470,6 +581,12 @@ button:disabled {
   .content-grid {
     grid-template-columns: 1fr;
   }
+  .source-form {
+    grid-template-columns: 1fr 1fr;
+  }
+  .import-summary {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 650px) {
@@ -495,6 +612,16 @@ button:disabled {
   .result dl {
     grid-column: 1;
     grid-template-columns: 1fr;
+  }
+  .source-form,
+  .import-summary {
+    grid-template-columns: 1fr;
+  }
+  .saved-source {
+    grid-template-columns: auto 1fr;
+  }
+  .saved-source .secondary-button {
+    grid-column: 1 / -1;
   }
   .environment {
     display: none;

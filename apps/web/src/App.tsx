@@ -1,5 +1,7 @@
 import { type FormEvent, useState } from 'react';
 
+import { SourceSetup } from './SourceSetup.js';
+
 interface PreviewResult {
   originalName: string;
   localizedName: string;
@@ -141,6 +143,8 @@ export function App() {
             </div>
           </article>
         </section>
+
+        <SourceSetup />
 
         <section className="content-grid">
           <article className="panel preview-panel">

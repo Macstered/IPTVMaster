@@ -11,7 +11,9 @@ The project is in its first implementation phase. The initial vertical slice pro
 - A streaming M3U parser that separates live entries from VOD/series.
 - Event-group policies and placeholder filtering.
 - Event-title timezone localization using IANA timezones.
-- A small API and browser preview for validating conversions.
+- AES-256-GCM encrypted provider source storage in PostgreSQL.
+- A live-only remote playlist inspection flow with bounded streaming downloads.
+- A small API and browser UI for source setup and validating conversions.
 - Docker and Proxmox-oriented deployment scaffolding.
 
 See [EXECUTION_PLAN.md](./EXECUTION_PLAN.md) for the complete delivery plan.
@@ -46,6 +48,8 @@ docker compose up --build
 ```
 
 Open `http://localhost:8080`.
+
+Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` before starting the stack. Losing this key makes stored provider credentials unrecoverable; committing it would expose them.
 
 ## Security
 

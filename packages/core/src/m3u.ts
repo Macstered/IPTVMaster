@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 import type {
   M3uEntry,
   M3uParseIssue,
+  M3uParseOptions,
   M3uParseResult,
   MediaType,
 } from './types.js';
@@ -85,9 +86,22 @@ export function parseExtinf(line: string, lineNumber: number): M3uEntry | null {
 
 export async function parseM3u(
   input: NodeJS.ReadableStream,
+  options: M3uParseOptions = {},
 ): Promise<M3uParseResult> {
   const entries: M3uEntry[] = [];
   const issues: M3uParseIssue[] = [];
+  const mediaCounts: Record<MediaType, number> = {
+    live: 0,
+    vod: 0,
+    series: 0,
+    unknown: 0,
+  };
+  const includedMediaTypes = options.includeMediaTypes
+    ? new Set(options.includeMediaTypes)
+    : null;
+  const maxRetainedEntries =
+    options.maxRetainedEntries ?? Number.POSITIVE_INFINITY;
+  let skippedEntries = 0;
   const lines = createInterface({ input, crlfDelay: Infinity });
   let lineNumber = 0;
   let pending: M3uEntry | null = null;
@@ -130,7 +144,20 @@ export async function parseM3u(
 
     pending.url = line;
     pending.mediaType = classifyMediaUrl(line);
-    entries.push(pending);
+    mediaCounts[pending.mediaType] += 1;
+    if (
+      includedMediaTypes === null ||
+      includedMediaTypes.has(pending.mediaType)
+    ) {
+      if (entries.length >= maxRetainedEntries) {
+        throw new Error(
+          `Playlist exceeds the ${maxRetainedEntries} retained-entry limit`,
+        );
+      }
+      entries.push(pending);
+    } else {
+      skippedEntries += 1;
+    }
     pending = null;
   }
 
@@ -142,11 +169,14 @@ export async function parseM3u(
     });
   }
 
-  return { entries, issues };
+  return { entries, issues, mediaCounts, skippedEntries };
 }
 
-export function parseM3uText(text: string): Promise<M3uParseResult> {
-  return parseM3u(Readable.from([text]));
+export function parseM3uText(
+  text: string,
+  options: M3uParseOptions = {},
+): Promise<M3uParseResult> {
+  return parseM3u(Readable.from([text]), options);
 }
 
 export function redactStreamUrl(value: string): string {

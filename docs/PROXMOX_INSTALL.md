@@ -28,7 +28,7 @@ Use the currently supported official Debian and Docker instructions during deplo
 
 ## 3. Deploy
 
-Create `/opt/iptvmaster`, check out a pinned release tag, and copy `.env.example` to `.env`. Replace the database password with a long random value and restrict the file to the administrator/root account.
+Create `/opt/iptvmaster`, check out a pinned release tag, and copy `.env.example` to `.env`. Replace the database password with a long random value, generate `IPTVMASTER_MASTER_KEY` using `openssl rand -base64 32`, and restrict the file to the administrator/root account. Back up the master key securely and separately; losing it makes stored provider credentials unrecoverable.
 
 ```sh
 cd /opt/iptvmaster
