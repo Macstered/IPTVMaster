@@ -6,6 +6,7 @@ import {
   type XmltvIssue,
   type XmltvProgramme,
 } from './xmltv.js';
+import { ProviderHttpError } from './provider-error.js';
 
 export interface XmltvInspection {
   fingerprint: string;
@@ -65,8 +66,7 @@ export async function inspectRemoteXmltv(
       'user-agent': 'IPTVMaster/0.1',
     },
   });
-  if (!response.ok)
-    throw new Error(`Provider returned HTTP ${response.status}`);
+  if (!response.ok) throw new ProviderHttpError(response.status);
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (
     contentType.includes('text/html') ||

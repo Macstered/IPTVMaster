@@ -7,7 +7,7 @@ IPTVMaster manages metadata and generated playlist/EPG artifacts. It does not pr
 ## Components
 
 - **API:** source configuration, editing, preview, status, and artifact endpoints.
-- **Worker:** scheduled streaming imports, reconciliation, EPG cleanup, and publication.
+- **Worker:** scheduled streaming imports, reconciliation, expired-session cleanup, and publication.
 - **Web:** local single-administrator interface.
 - **Core:** provider-independent parsing, classification, event rules, matching, and serialization.
 - **PostgreSQL:** user intent, parsed snapshots, EPG data, audit history, and publication state.
@@ -30,7 +30,7 @@ Provider downloads are not retained after successful parsing. Stream URL fields 
 
 Accepted playlist snapshots remain available for deliberate restoration. Snapshot activation takes a per-source database lock, switches the last-known-good pointer and reconciles permanent channels in one transaction, and records the transition in the source audit log. If the next provider refresh matches a retained non-current fingerprint, that snapshot is reactivated instead of being treated as unchanged; this prevents a manual rollback from becoming stuck. The browser uses a two-step confirmation because activation changes the published TiviMate playlist immediately.
 
-Manual and scheduled playlist imports use the same refresh coordinator. It coalesces concurrent work for each source, executes enabled sources sequentially to avoid provider bursts, and exposes only redacted failure details. The initial single-process deployment makes this lock process-local; a database lease is required before supporting multiple app replicas.
+Manual and scheduled playlist imports use the same refresh coordinator. It coalesces concurrent work for each source, executes enabled sources sequentially to avoid provider bursts, and exposes only redacted failure details. Downloads retry timeouts, network interruptions, throttling, and provider server errors with bounded exponential backoff. Authentication/client errors, malformed content, and snapshot validation failures are not retried. Persistence begins only after a complete validated inspection, so retry exhaustion cannot replace last-known-good data. The initial single-process deployment makes this lock process-local; a database lease is required before supporting multiple app replicas.
 
 ## Permanent-channel reconciliation
 
@@ -61,6 +61,8 @@ Published M3U entries contain the upstream stream URL so the server is not in th
 The browser editor and every `/api/v1` route outside the authentication endpoints require a database-backed administrator session. First-run setup is guarded by a database singleton constraint so concurrent requests cannot create multiple administrators. Passwords use scrypt with per-account random salts. Random session and CSRF values are returned only as cookies while PostgreSQL stores their SHA-256 hashes; the session cookie is `HttpOnly`, both are `SameSite=Strict`, and the `Secure` attribute is enabled when HTTPS mode is configured.
 
 Unsafe editor requests require the session, a matching readable CSRF cookie/header pair, the stored CSRF hash, and a same-origin browser request. Login failures are throttled without revealing whether a username exists. Liveness remains public, readiness checks database access, and tokenized `/p/` endpoints remain outside browser authentication so TiviMate can refresh without a session cookie. Security headers deny framing, MIME sniffing, unnecessary browser capabilities, and off-origin scripts.
+
+Expired session rows are removed when a session is issued and by an independent daily maintenance scheduler, so cleanup still runs during long periods without administrator logins. Playlist history is not pruned automatically because it is the rollback source of record. Accepted XMLTV imports delete and replace source guide rows in the same transaction, so a separate programme-retention deletion job is unnecessary.
 
 ## Recovery boundary
 

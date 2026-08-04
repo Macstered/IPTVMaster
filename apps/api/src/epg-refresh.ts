@@ -12,6 +12,10 @@ import type {
   SourceRepository,
   StoredEpgSummary,
 } from './source-repository.js';
+import {
+  withProviderRetry,
+  type ProviderRetryOptions,
+} from './provider-retry.js';
 
 export class EpgNotConfiguredError extends Error {}
 
@@ -22,6 +26,7 @@ export interface EpgRefreshResult {
   finishedAt?: string;
   inspection?: XmltvInspection;
   summary?: StoredEpgSummary;
+  attempts?: number;
 }
 
 export interface EpgRefreshState {
@@ -33,11 +38,13 @@ export interface EpgRefreshState {
   unchanged?: boolean;
   channelCount?: number;
   programmeCount?: number;
+  attempts?: number;
 }
 
 export class EpgRefreshCoordinator {
   readonly #repository: SourceRepository;
   readonly #inspector: (epgUrl: string) => Promise<XmltvInspection>;
+  readonly #retryOptions: Partial<ProviderRetryOptions>;
   readonly #running = new Map<string, Promise<EpgRefreshResult>>();
   readonly #states = new Map<string, EpgRefreshState>();
 
@@ -46,9 +53,11 @@ export class EpgRefreshCoordinator {
     inspector: (
       epgUrl: string,
     ) => Promise<XmltvInspection> = inspectRemoteXmltv,
+    retryOptions: Partial<ProviderRetryOptions> = {},
   ) {
     this.#repository = repository;
     this.#inspector = inspector;
+    this.#retryOptions = retryOptions;
   }
 
   async refresh(sourceId: string): Promise<EpgRefreshResult> {
@@ -77,13 +86,17 @@ export class EpgRefreshCoordinator {
 
   async #execute(sourceId: string): Promise<EpgRefreshResult> {
     const startedAt = new Date().toISOString();
+    let attempts = 0;
     this.#states.set(sourceId, { sourceId, status: 'running', startedAt });
     try {
       const credentials = await this.#repository.getSourceCredentials(sourceId);
       if (!credentials?.epgUrl) {
         throw new EpgNotConfiguredError('Source has no XMLTV URL');
       }
-      const inspection = await this.#inspector(credentials.epgUrl);
+      const inspection = await withProviderRetry(() => {
+        attempts += 1;
+        return this.#inspector(credentials.epgUrl!);
+      }, this.#retryOptions);
       const summary = await this.#repository.saveEpgSnapshot(
         sourceId,
         inspection,
@@ -97,6 +110,7 @@ export class EpgRefreshCoordinator {
         unchanged: summary.unchanged,
         channelCount: summary.channelCount,
         programmeCount: summary.programmeCount,
+        attempts,
       });
       return {
         status: 'completed',
@@ -105,6 +119,7 @@ export class EpgRefreshCoordinator {
         finishedAt,
         inspection,
         summary,
+        attempts,
       };
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -114,6 +129,7 @@ export class EpgRefreshCoordinator {
         startedAt,
         finishedAt,
         safeError: safeRefreshError(error),
+        attempts,
       });
       throw error;
     }

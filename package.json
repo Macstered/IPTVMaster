@@ -16,7 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "test": "npm run test -w @iptvmaster/core && npm run test -w @iptvmaster/api",
+    "test": "npm run build -w @iptvmaster/core && npm run test -w @iptvmaster/core && npm run test -w @iptvmaster/api",
     "typecheck": "npm run build -w @iptvmaster/core && npm run typecheck --workspaces --if-present",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build"
   },

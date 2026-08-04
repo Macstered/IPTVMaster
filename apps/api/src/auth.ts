@@ -51,6 +51,7 @@ export interface AuthRepository {
   createSession(session: NewAdminSession): Promise<void>;
   findSession(tokenHash: string): Promise<StoredAdminSession | null>;
   deleteSession(tokenHash: string): Promise<void>;
+  cleanupExpiredSessions(): Promise<number>;
   healthCheck(): Promise<void>;
   close?(): Promise<void>;
 }
@@ -183,6 +184,10 @@ export class AuthService {
   async logout(sessionToken: string | undefined): Promise<void> {
     if (!sessionToken) return;
     await this.repository.deleteSession(hashAuthToken(sessionToken));
+  }
+
+  async cleanupExpiredSessions(): Promise<number> {
+    return this.repository.cleanupExpiredSessions();
   }
 
   async healthCheck(): Promise<void> {
@@ -390,6 +395,13 @@ export class PostgresAuthRepository implements AuthRepository {
     await this.pool.query('DELETE FROM admin_session WHERE token_hash = $1', [
       tokenHash,
     ]);
+  }
+
+  async cleanupExpiredSessions(): Promise<number> {
+    const result = await this.pool.query(
+      'DELETE FROM admin_session WHERE expires_at <= NOW()',
+    );
+    return result.rowCount ?? 0;
   }
 
   async healthCheck(): Promise<void> {

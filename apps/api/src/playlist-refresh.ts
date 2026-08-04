@@ -8,6 +8,10 @@ import type {
   SourceRepository,
   StoredSnapshotSummary,
 } from './source-repository.js';
+import {
+  withProviderRetry,
+  type ProviderRetryOptions,
+} from './provider-retry.js';
 
 export interface PlaylistRefreshResult {
   status: 'completed' | 'already-running';
@@ -16,6 +20,7 @@ export interface PlaylistRefreshResult {
   finishedAt?: string;
   inspection?: PlaylistInspection;
   snapshot?: StoredSnapshotSummary;
+  attempts?: number;
 }
 
 export interface PlaylistRefreshState {
@@ -26,6 +31,7 @@ export interface PlaylistRefreshState {
   safeError?: string;
   unchanged?: boolean;
   liveCount?: number;
+  attempts?: number;
 }
 
 export class SourceNotFoundError extends Error {}
@@ -43,6 +49,7 @@ export function safeRefreshError(error: unknown): string {
 export class PlaylistRefreshCoordinator {
   readonly #repository: SourceRepository;
   readonly #inspector: (playlistUrl: string) => Promise<PlaylistInspection>;
+  readonly #retryOptions: Partial<ProviderRetryOptions>;
   readonly #running = new Map<string, Promise<PlaylistRefreshResult>>();
   readonly #states = new Map<string, PlaylistRefreshState>();
 
@@ -51,9 +58,11 @@ export class PlaylistRefreshCoordinator {
     inspector: (
       playlistUrl: string,
     ) => Promise<PlaylistInspection> = inspectRemotePlaylist,
+    retryOptions: Partial<ProviderRetryOptions> = {},
   ) {
     this.#repository = repository;
     this.#inspector = inspector;
+    this.#retryOptions = retryOptions;
   }
 
   async refresh(sourceId: string): Promise<PlaylistRefreshResult> {
@@ -83,11 +92,15 @@ export class PlaylistRefreshCoordinator {
 
   async #execute(sourceId: string): Promise<PlaylistRefreshResult> {
     const startedAt = new Date().toISOString();
+    let attempts = 0;
     this.#states.set(sourceId, { sourceId, status: 'running', startedAt });
     try {
       const credentials = await this.#repository.getSourceCredentials(sourceId);
       if (!credentials) throw new SourceNotFoundError('Source not found');
-      const inspection = await this.#inspector(credentials.playlistUrl);
+      const inspection = await withProviderRetry(() => {
+        attempts += 1;
+        return this.#inspector(credentials.playlistUrl);
+      }, this.#retryOptions);
       const snapshot = await this.#repository.savePlaylistSnapshot(
         sourceId,
         inspection,
@@ -100,6 +113,7 @@ export class PlaylistRefreshCoordinator {
         finishedAt,
         unchanged: snapshot.unchanged,
         liveCount: snapshot.liveCount,
+        attempts,
       });
       return {
         status: 'completed',
@@ -108,6 +122,7 @@ export class PlaylistRefreshCoordinator {
         finishedAt,
         inspection,
         snapshot,
+        attempts,
       };
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -117,6 +132,7 @@ export class PlaylistRefreshCoordinator {
         startedAt,
         finishedAt,
         safeError: safeRefreshError(error),
+        attempts,
       });
       throw error;
     }

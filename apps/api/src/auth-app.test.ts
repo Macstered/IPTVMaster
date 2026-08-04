@@ -52,6 +52,15 @@ class MemoryAuthRepository implements AuthRepository {
     this.sessions.delete(tokenHash);
   }
 
+  async cleanupExpiredSessions(): Promise<number> {
+    const before = this.sessions.size;
+    const now = Date.now();
+    for (const [tokenHash, session] of this.sessions) {
+      if (Date.parse(session.expiresAt) <= now) this.sessions.delete(tokenHash);
+    }
+    return before - this.sessions.size;
+  }
+
   async healthCheck(): Promise<void> {}
 }
 

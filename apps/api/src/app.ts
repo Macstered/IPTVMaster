@@ -50,6 +50,7 @@ import {
   type AuthRepository,
   type CreatedAuthSession,
 } from './auth.js';
+import { MaintenanceScheduler } from './maintenance.js';
 
 const SESSION_COOKIE = 'iptvmaster_session';
 const CSRF_COOKIE = 'iptvmaster_csrf';
@@ -214,6 +215,12 @@ export interface BuildAppOptions {
   playlistRefreshInitialDelayMs?: number;
   epgRefreshIntervalMs?: number;
   epgRefreshInitialDelayMs?: number;
+  providerRetryAttempts?: number;
+  providerRetryInitialDelayMs?: number;
+  providerRetryMaxDelayMs?: number;
+  enableMaintenanceScheduler?: boolean;
+  maintenanceIntervalMs?: number;
+  maintenanceInitialDelayMs?: number;
   sessionTtlMs?: number;
   secureCookies?: boolean;
   developmentMode?: boolean;
@@ -391,9 +398,25 @@ export async function buildApp(
     ? new AuthService(authRepository, sessionTtlMs)
     : undefined;
   const loginRateLimiter = new LoginRateLimiter();
+  const providerRetryOptions = {
+    maxAttempts:
+      options.providerRetryAttempts ??
+      positiveEnvironmentNumber('PROVIDER_RETRY_ATTEMPTS', 3),
+    initialDelayMs:
+      options.providerRetryInitialDelayMs ??
+      positiveEnvironmentNumber('PROVIDER_RETRY_INITIAL_DELAY_SECONDS', 2) *
+        1_000,
+    maxDelayMs:
+      options.providerRetryMaxDelayMs ??
+      positiveEnvironmentNumber('PROVIDER_RETRY_MAX_DELAY_SECONDS', 30) * 1_000,
+  };
 
   const refreshCoordinator = sourceRepository
-    ? new PlaylistRefreshCoordinator(sourceRepository, playlistInspector)
+    ? new PlaylistRefreshCoordinator(
+        sourceRepository,
+        playlistInspector,
+        providerRetryOptions,
+      )
     : undefined;
   const schedulerEnabled =
     refreshCoordinator !== undefined &&
@@ -418,7 +441,11 @@ export async function buildApp(
         })
       : undefined;
   const epgRefreshCoordinator = sourceRepository
-    ? new EpgRefreshCoordinator(sourceRepository, epgInspector ?? undefined)
+    ? new EpgRefreshCoordinator(
+        sourceRepository,
+        epgInspector ?? undefined,
+        providerRetryOptions,
+      )
     : undefined;
   const epgSchedulerEnabled =
     epgRefreshCoordinator !== undefined &&
@@ -437,17 +464,39 @@ export async function buildApp(
               1_000,
         })
       : undefined;
+  const maintenanceSchedulerEnabled =
+    authService !== undefined &&
+    (options.enableMaintenanceScheduler ??
+      (ownsAuthRepository && process.env['MAINTENANCE_ENABLED'] !== 'false'));
+  const maintenanceScheduler =
+    maintenanceSchedulerEnabled && authService
+      ? new MaintenanceScheduler(authService, app.log, {
+          intervalMs:
+            options.maintenanceIntervalMs ??
+            positiveEnvironmentNumber('MAINTENANCE_INTERVAL_MINUTES', 1_440) *
+              60_000,
+          initialDelayMs:
+            options.maintenanceInitialDelayMs ??
+            positiveEnvironmentNumber(
+              'MAINTENANCE_INITIAL_DELAY_SECONDS',
+              300,
+            ) * 1_000,
+        })
+      : undefined;
+  maintenanceScheduler?.start();
   epgScheduler?.start();
   playlistScheduler?.start();
   if (
     playlistScheduler ||
     epgScheduler ||
+    maintenanceScheduler ||
     (ownsSourceRepository && sourceRepository?.close) ||
     ownsAuthRepository
   ) {
     app.addHook('onClose', async () => {
       await playlistScheduler?.stop();
       await epgScheduler?.stop();
+      await maintenanceScheduler?.stop();
       if (ownsSourceRepository) await sourceRepository?.close?.();
       if (ownsAuthRepository) await authService?.close();
     });
@@ -686,6 +735,7 @@ export async function buildApp(
     encryptionConfigured: masterKey !== undefined,
     playlistAutomation: playlistScheduler !== undefined,
     epgAutomation: epgScheduler !== undefined,
+    maintenanceAutomation: maintenanceScheduler !== undefined,
   }));
 
   app.get('/api/v1/automation/status', async () => ({
@@ -700,6 +750,11 @@ export async function buildApp(
       running: false,
       intervalMinutes: 0,
       sourceStates: epgRefreshCoordinator?.listStates() ?? [],
+    },
+    maintenance: maintenanceScheduler?.status() ?? {
+      enabled: false,
+      running: false,
+      intervalMinutes: 0,
     },
   }));
 

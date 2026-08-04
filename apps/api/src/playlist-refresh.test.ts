@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { PlaylistInspection } from '@iptvmaster/core';
+import { ProviderHttpError, type PlaylistInspection } from '@iptvmaster/core';
 
 import {
   PlaylistRefreshCoordinator,
@@ -155,6 +155,25 @@ describe('playlist refresh automation', () => {
       }),
     );
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient provider failure before saving once', async () => {
+    const data = repository();
+    const inspector = vi
+      .fn<() => Promise<PlaylistInspection>>()
+      .mockRejectedValueOnce(new ProviderHttpError(503))
+      .mockResolvedValue(inspection());
+    const coordinator = new PlaylistRefreshCoordinator(data, inspector, {
+      maxAttempts: 3,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    const result = await coordinator.refresh(source().id);
+
+    expect(result.attempts).toBe(2);
+    expect(inspector).toHaveBeenCalledTimes(2);
+    expect(data.savePlaylistSnapshot).toHaveBeenCalledTimes(1);
+    expect(coordinator.listStates()[0]?.attempts).toBe(2);
   });
 
   it('redacts provider URLs and credential query values from errors', () => {

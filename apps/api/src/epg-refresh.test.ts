@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { XmltvInspection } from '@iptvmaster/core';
+import { ProviderHttpError, type XmltvInspection } from '@iptvmaster/core';
 
 import { EpgRefreshCoordinator, EpgScheduler } from './epg-refresh.js';
 import type {
@@ -134,5 +134,25 @@ describe('EPG refresh automation', () => {
     expect(data.saveEpgSnapshot).toHaveBeenCalledTimes(1);
     expect(scheduler.status().intervalMinutes).toBe(720);
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient XMLTV failure without replacing the guide early', async () => {
+    const data = repository();
+    const inspector = vi
+      .fn<() => Promise<XmltvInspection>>()
+      .mockRejectedValueOnce(new ProviderHttpError(429))
+      .mockResolvedValue(inspection());
+    const coordinator = new EpgRefreshCoordinator(data, inspector, {
+      maxAttempts: 3,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    const result = await coordinator.refresh(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    expect(result.attempts).toBe(2);
+    expect(inspector).toHaveBeenCalledTimes(2);
+    expect(data.saveEpgSnapshot).toHaveBeenCalledTimes(1);
   });
 });

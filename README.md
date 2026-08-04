@@ -26,6 +26,8 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Non-overlapping automatic playlist refreshes, enabled every 120 minutes by default.
 - Streaming XMLTV parsing with bounded downloads and transactional last-known-good EPG replacement.
 - Non-overlapping automatic EPG refreshes, enabled every 12 hours by default.
+- Bounded exponential retries for transient provider/network failures, without retrying bad credentials or malformed feeds.
+- Daily expired-session cleanup; accepted XMLTV guides replace their predecessors transactionally instead of accumulating stale rows.
 - Verified PostgreSQL backup and transactional restore scripts, with checksum validation, retention, and a daily Proxmox systemd timer.
 - A small API and browser UI for encrypted setup, playlist imports, group rules, permanent-channel editing, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
@@ -83,6 +85,8 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 
 Playlist automation starts 30 seconds after the application and then runs every 120 minutes. EPG automation starts after 60 seconds and runs every 720 minutes. Override the `PLAYLIST_REFRESH_*` and `EPG_REFRESH_*` values in `.env`, or set the corresponding `*_ENABLED=false` value to disable a scheduler. Overlapping manual and scheduled imports for the same source are coalesced, and a rejected/failed refresh leaves the last-known-good playlist or guide active.
+
+Each provider download is attempted up to three times by default, with bounded exponential delay. Only timeouts, network interruptions, HTTP throttling, and server errors are retried; authentication failures, missing feeds, malformed content, and snapshot validation failures stop immediately. Configure this with `PROVIDER_RETRY_*`. Daily `MAINTENANCE_*` automation removes expired administrator sessions. Playlist history remains retained for deliberate rollback, while each accepted XMLTV guide transactionally replaces the previous guide rows.
 
 ## Backup and restore
 
