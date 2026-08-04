@@ -25,6 +25,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Non-overlapping automatic playlist refreshes, enabled every 120 minutes by default.
 - Streaming XMLTV parsing with bounded downloads and transactional last-known-good EPG replacement.
 - Non-overlapping automatic EPG refreshes, enabled every 12 hours by default.
+- Verified PostgreSQL backup and transactional restore scripts, with checksum validation, retention, and a daily Proxmox systemd timer.
 - A small API and browser UI for encrypted setup, playlist imports, group rules, permanent-channel editing, and output creation.
 - Docker and Proxmox-oriented deployment scaffolding.
 
@@ -81,6 +82,24 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 
 Playlist automation starts 30 seconds after the application and then runs every 120 minutes. EPG automation starts after 60 seconds and runs every 720 minutes. Override the `PLAYLIST_REFRESH_*` and `EPG_REFRESH_*` values in `.env`, or set the corresponding `*_ENABLED=false` value to disable a scheduler. Overlapping manual and scheduled imports for the same source are coalesced, and a rejected/failed refresh leaves the last-known-good playlist or guide active.
+
+## Backup and restore
+
+Create a verified PostgreSQL archive and SHA-256 sidecar:
+
+```sh
+./scripts/backup-postgres.sh
+```
+
+Backups default to `./backups` with 14-day retention. They contain encrypted provider data and must still be treated as sensitive. The database does not contain `IPTVMASTER_MASTER_KEY`; keep that key backed up separately or the restored provider configuration cannot be decrypted.
+
+Restore an archive with an explicit confirmation prompt:
+
+```sh
+./scripts/restore-postgres.sh ./backups/iptvmaster-YYYYMMDDTHHMMSSZ.dump
+```
+
+The restore verifies the checksum and archive, stops the app to prevent imports, restores in a single transaction, restarts the app, and waits for a healthy response. See [docs/PROXMOX_INSTALL.md](./docs/PROXMOX_INSTALL.md) for the daily timer and recovery rehearsal.
 
 ## Security
 

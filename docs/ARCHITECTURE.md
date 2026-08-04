@@ -55,3 +55,9 @@ All instants are stored as UTC. Provider source and output display zones are sto
 An output profile receives a cryptographically random token. PostgreSQL stores only its SHA-256 hash; the plaintext token is returned once when the profile is created. Requests resolve the token, load the current last-known-good data, and serialize M3U or XMLTV. M3U generation applies enabled group policies; XMLTV timestamps are emitted in UTC. Revoking a profile disables both URLs without touching the source or snapshots.
 
 Published M3U entries contain the upstream stream URL so the server is not in the playback data path. The endpoint uses private/no-store cache headers until conditional publication and versioning are added.
+
+## Recovery boundary
+
+Application-level backups use PostgreSQL's custom archive format with owner and privilege metadata omitted, then validate the archive and write a SHA-256 sidecar before retention is applied. Restore validates both checksum and archive before stopping the application, terminates stale database sessions, and uses `pg_restore --single-transaction` so a failed restore does not leave a partially replaced schema. The app restarts only after the restore command returns, followed by an internal health check.
+
+Database archives contain encrypted upstream URLs but intentionally exclude the environment-held master key. Production recovery therefore requires two separately protected assets: a recent database archive and the matching `IPTVMASTER_MASTER_KEY`. Proxmox VM backups remain a second recovery layer outside this application boundary.

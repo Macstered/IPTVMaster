@@ -10,6 +10,8 @@ Provider URLs commonly contain usernames and passwords in query strings and stre
 - Redact query strings and stream paths before logging errors.
 - Rotate a provider credential if it is accidentally committed or shared publicly.
 
+Database backups contain encrypted provider URLs and should be stored with restrictive permissions. Keep `IPTVMASTER_MASTER_KEY` in a separate secure backup: it is deliberately absent from database archives, and losing it makes restored provider secrets unreadable. Never upload an application backup to GitHub or attach it to an issue.
+
 ## Deployment
 
 IPTVMaster is intended for trusted-LAN access only. Do not expose the application, database, or generated playlist endpoints directly to the public internet.

@@ -20,6 +20,7 @@ services:
       - no-new-privileges:true
 
   app:
+    image: ${IPTVMASTER_IMAGE:-iptvmaster:local}
     build:
       context: .
       dockerfile: Dockerfile

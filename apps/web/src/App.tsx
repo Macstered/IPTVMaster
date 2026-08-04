@@ -265,11 +265,18 @@ export function App() {
                   <small>Stable M3U and XMLTV endpoints</small>
                 </div>
               </li>
-              <li className="active">
+              <li className="done">
                 <span>6</span>
                 <div>
                   <strong>EPG reconciliation</strong>
                   <small>Coverage review and persistent locks</small>
+                </div>
+              </li>
+              <li className="active">
+                <span>7</span>
+                <div>
+                  <strong>Recovery tooling</strong>
+                  <small>Verified database backup and restore</small>
                 </div>
               </li>
             </ol>

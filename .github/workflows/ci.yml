@@ -20,3 +20,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: docker build -t iptvmaster:ci .
+      - name: Verify database backup and restore
+        run: bash scripts/verify-backup-restore.sh
+        env:
+          IPTVMASTER_IMAGE: iptvmaster:ci
+          VERIFY_SKIP_BUILD: 'true'

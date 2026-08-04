@@ -64,6 +64,33 @@ Use two backup layers:
 
 Do not assume a VM snapshot on the same physical disk is a sufficient backup. Test at least one restore before making IPTVMaster the primary TiviMate source.
 
+The repository includes a daily systemd timer. Install it after choosing storage outside the application checkout:
+
+```sh
+sudo install -d -m 0700 /var/backups/iptvmaster
+sudo install -m 0644 deploy/systemd/iptvmaster-backup.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/iptvmaster-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now iptvmaster-backup.timer
+sudo systemctl start iptvmaster-backup.service
+sudo systemctl status iptvmaster-backup.service
+```
+
+The supplied unit assumes the checkout is `/opt/iptvmaster`, writes to `/var/backups/iptvmaster`, runs at about 03:30 local time with a randomized delay, and keeps 14 days. Use `systemctl edit iptvmaster-backup.service` to override the directory or retention. Copy completed archives and their `.sha256` files to storage outside the VM disk.
+
+Backups include encrypted provider data but do not include `.env` or `IPTVMASTER_MASTER_KEY`. Store the production `.env` or at minimum the master key in a separate secure location.
+
+Rehearse a restore before depending on the service:
+
+```sh
+cd /opt/iptvmaster
+./scripts/restore-postgres.sh /var/backups/iptvmaster/iptvmaster-YYYYMMDDTHHMMSSZ.dump
+docker compose ps
+curl --fail http://127.0.0.1:8080/health
+```
+
+The restore command requires the exact word `RESTORE`, validates the sidecar checksum and archive, stops the application, restores in one transaction, restarts it, and waits for health. A failed transactional restore leaves the pre-restore database intact. Do not use the non-interactive `--yes` option outside disposable automated tests.
+
 ## 6. Upgrade and roll back
 
 Before upgrading:
