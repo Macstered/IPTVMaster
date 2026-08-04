@@ -1,0 +1,36 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Provider data must never be committed
+*.m3u
+*.m3u8
+*.xmltv
+provider-*.xml
+data/
+backups/
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+.tmp/
+tmp/
+

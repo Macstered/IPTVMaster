@@ -1,0 +1,35 @@
+{
+  "name": "iptvmaster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @iptvmaster/core && npm run build -w @iptvmaster/api && npm run build -w @iptvmaster/web",
+    "dev": "npm run build -w @iptvmaster/core && concurrently -n core,api,web -c blue,green,magenta \"npm run dev -w @iptvmaster/core\" \"npm run dev -w @iptvmaster/api\" \"npm run dev -w @iptvmaster/web\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "test": "npm run test -w @iptvmaster/core && npm run test -w @iptvmaster/api",
+    "typecheck": "npm run build -w @iptvmaster/core && npm run typecheck --workspaces --if-present",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "@types/node": "^24.1.0",
+    "concurrently": "^9.2.0",
+    "eslint": "^9.32.0",
+    "globals": "^16.3.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.38.0",
+    "vitest": "^3.2.4"
+  }
+}
