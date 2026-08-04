@@ -27,8 +27,11 @@ describe('secret envelopes', () => {
   it('detects tampering through the GCM authentication tag', () => {
     const key = randomBytes(32).toString('base64');
     const encrypted = encryptSecret('value', key);
-    const replacement = encrypted.endsWith('A') ? 'B' : 'A';
-    const tampered = `${encrypted.slice(0, -1)}${replacement}`;
+    const parts = encrypted.split('.');
+    const tag = Buffer.from(parts[2] ?? '', 'base64url');
+    tag[0] = (tag[0] ?? 0) ^ 1;
+    parts[2] = tag.toString('base64url');
+    const tampered = parts.join('.');
 
     expect(() => decryptSecret(tampered, key)).toThrow();
   });
