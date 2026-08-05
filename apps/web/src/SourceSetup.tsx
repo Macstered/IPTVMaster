@@ -353,7 +353,7 @@ export function SourceSetup() {
     string | null
   >(null);
   const [showHiddenPermanentGroups, setShowHiddenPermanentGroups] =
-    useState(true);
+    useState(false);
   const [customCategories, setCustomCategories] = useState<CustomCategory[]>(
     [],
   );
@@ -1489,14 +1489,23 @@ export function SourceSetup() {
       left.sortOrder - right.sortOrder ||
       left.providerGroup.localeCompare(right.providerGroup),
   );
-  const visibleOutputGroups = outputGroups.filter((group) =>
-    normalizedOutputGroupFilter
+  const hiddenPermanentGroupNames = new Set(
+    permanentGroups
+      .filter((group) => group.enabledCount === 0)
+      .map((group) => group.providerGroup),
+  );
+  const visibleOutputGroups = outputGroups.filter((group) => {
+    const groupMatches = normalizedOutputGroupFilter
       ? [group.providerGroup, group.outputGroupName ?? '']
           .join(' ')
           .toLocaleLowerCase()
           .includes(normalizedOutputGroupFilter)
-      : true,
-  );
+      : true;
+    const visibilityMatches =
+      showHiddenPermanentGroups ||
+      (group.enabled && !hiddenPermanentGroupNames.has(group.providerGroup));
+    return groupMatches && visibilityMatches;
+  });
   const activeEventReview = eventReview?.groups.find(
     (group) => group.groupName === selectedEventGroup,
   );
@@ -2442,6 +2451,16 @@ export function SourceSetup() {
                       setOutputGroupFilter(event.target.value)
                     }
                   />
+                  <label className="hidden-group-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showHiddenPermanentGroups}
+                      onChange={(event) =>
+                        setShowHiddenPermanentGroups(event.target.checked)
+                      }
+                    />
+                    Show hidden groups
+                  </label>
                   <small>
                     {visibleOutputGroups.length.toLocaleString()} shown
                   </small>
@@ -2504,7 +2523,8 @@ export function SourceSetup() {
                   })}
                   {visibleOutputGroups.length === 0 ? (
                     <p className="empty-groups">
-                      Import a playlist or change the group filter.
+                      Import a playlist, change the group filter, or show hidden
+                      groups.
                     </p>
                   ) : null}
                 </div>
