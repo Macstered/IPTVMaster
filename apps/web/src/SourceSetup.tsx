@@ -1,7 +1,7 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
 import { ChannelLogo } from './components/ChannelLogo.js';
-import { IconGrip, IconTv } from './icons.js';
+import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
 import { showToast } from './toast.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
 
@@ -339,6 +339,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     string | null
   >(null);
   const [draggedChannelId, setDraggedChannelId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [permanentGroupNames, setPermanentGroupNames] = useState<
     Record<string, string>
   >({});
@@ -1247,6 +1248,132 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           : 'Could not save channel order',
       );
       await loadChannels(source.id, expandedPermanentGroup);
+    } finally {
+      setSavingChannel(null);
+    }
+  }
+
+  async function moveOutputGroup(
+    source: SafeSource,
+    name: string,
+    direction: -1 | 1,
+  ) {
+    const names = outputGroups.map((group) => group.name);
+    const from = names.indexOf(name);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= names.length) return;
+    const target = names[to];
+    if (target === undefined) return;
+    names[to] = name;
+    names[from] = target;
+    setSavingOutputGroupOrder(name);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/output-groups/order`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ outputGroups: names }),
+        },
+      );
+      if (!response.ok) await readJson<never>(response);
+      await loadOutputGroupCategories(source.id);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save output group order',
+      );
+    } finally {
+      setSavingOutputGroupOrder(null);
+    }
+  }
+
+  async function moveListedChannel(
+    source: SafeSource,
+    channelId: string,
+    direction: -1 | 1,
+  ) {
+    if (expandedPermanentGroup === null) return;
+    const ids = channels.map((channel) => channel.id);
+    const from = ids.indexOf(channelId);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    const swapped = ids[to];
+    if (swapped === undefined) return;
+    ids[to] = channelId;
+    ids[from] = swapped;
+    setSavingChannel(channelId);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/channels/order`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            providerGroup: expandedPermanentGroup,
+            channelIds: ids,
+          }),
+        },
+      );
+      if (!response.ok) await readJson<never>(response);
+      await Promise.all([
+        loadChannels(source.id, expandedPermanentGroup),
+        loadPermanentGroups(source.id),
+      ]);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save channel order',
+      );
+    } finally {
+      setSavingChannel(null);
+    }
+  }
+
+  async function moveOutputGroupChannel(
+    source: SafeSource,
+    channelId: string,
+    direction: -1 | 1,
+  ) {
+    if (expandedOutputGroup === null) return;
+    const ids = outputGroupChannels.map((channel) => channel.id);
+    const from = ids.indexOf(channelId);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    const swapped = ids[to];
+    if (swapped === undefined) return;
+    ids[to] = channelId;
+    ids[from] = swapped;
+    setSavingChannel(channelId);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/output-groups/channels/order`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            outputGroup: expandedOutputGroup,
+            channelIds: ids,
+          }),
+        },
+      );
+      if (!response.ok) await readJson<never>(response);
+      await Promise.all([
+        loadOutputGroupChannels(source.id, expandedOutputGroup),
+        loadOutputGroupCategories(source.id),
+        loadPermanentGroups(source.id),
+      ]);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save output group channel order',
+      );
     } finally {
       setSavingChannel(null);
     }
@@ -2393,7 +2520,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                       group.behavior !== 'event' && group.entryCount > 0;
                     return (
                       <article
-                        className={`output-group-order-row ${group.behavior}`}
+                        className={`output-group-order-row ${group.behavior} ${
+                          dropTarget === group.name && draggedOutputGroup
+                            ? 'drop-target'
+                            : ''
+                        }`}
                         key={group.name}
                         draggable={
                           !normalizedOutputGroupFilter &&
@@ -2403,14 +2534,21 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                           setDraggedOutputGroup(group.name);
                           event.dataTransfer.effectAllowed = 'move';
                         }}
-                        onDragEnd={() => setDraggedOutputGroup(null)}
+                        onDragEnd={() => {
+                          setDraggedOutputGroup(null);
+                          setDropTarget(null);
+                        }}
                         onDragOver={(event: DragEvent<HTMLElement>) => {
-                          if (draggedOutputGroup) event.preventDefault();
+                          if (draggedOutputGroup) {
+                            event.preventDefault();
+                            setDropTarget(group.name);
+                          }
                         }}
                         onDrop={(event: DragEvent<HTMLElement>) => {
                           event.preventDefault();
                           const draggedGroup = draggedOutputGroup;
                           setDraggedOutputGroup(null);
+                          setDropTarget(null);
                           if (draggedGroup) {
                             void saveOutputGroupOrder(
                               primarySource,
@@ -2420,8 +2558,49 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                           }
                         }}
                       >
-                        <span className="drag-handle" aria-hidden="true">
-                          <IconGrip />
+                        <span className="row-order-controls">
+                          <span
+                            className="drag-handle"
+                            aria-hidden="true"
+                            title={
+                              normalizedOutputGroupFilter
+                                ? 'Clear the filter to drag; the arrows still work'
+                                : 'Drag to reorder'
+                            }
+                          >
+                            <IconGrip />
+                          </span>
+                          <button
+                            className="order-arrow"
+                            type="button"
+                            aria-label={`Move ${group.name || 'group'} up`}
+                            disabled={
+                              savingOutputGroupOrder !== null || index === 0
+                            }
+                            onClick={() =>
+                              void moveOutputGroup(
+                                primarySource,
+                                group.name,
+                                -1,
+                              )
+                            }
+                          >
+                            <IconChevronUp />
+                          </button>
+                          <button
+                            className="order-arrow"
+                            type="button"
+                            aria-label={`Move ${group.name || 'group'} down`}
+                            disabled={
+                              savingOutputGroupOrder !== null ||
+                              index === visibleOutputGroups.length - 1
+                            }
+                            onClick={() =>
+                              void moveOutputGroup(primarySource, group.name, 1)
+                            }
+                          >
+                            <IconChevronDown />
+                          </button>
                         </span>
                         <div>
                           <strong>{group.name || '(Ungrouped)'}</strong>
@@ -2468,6 +2647,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                                 <div
                                   className={`output-group-channel-row ${
                                     channel.enabled ? '' : 'disabled'
+                                  } ${
+                                    dropTarget === channel.id &&
+                                    draggedOutputGroupChannelId
+                                      ? 'drop-target'
+                                      : ''
                                   }`}
                                   key={channel.id}
                                   draggable={savingChannel === null}
@@ -2490,6 +2674,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                                     if (draggedOutputGroupChannelId) {
                                       event.preventDefault();
                                       event.stopPropagation();
+                                      setDropTarget(channel.id);
                                     }
                                   }}
                                   onDrop={(event: DragEvent<HTMLElement>) => {
@@ -2507,12 +2692,57 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                                     }
                                   }}
                                 >
-                                  <span
-                                    className="drag-handle"
-                                    aria-hidden="true"
-                                    title="Drag to reorder"
-                                  >
-                                    <IconGrip />
+                                  <span className="row-order-controls">
+                                    <span
+                                      className="drag-handle"
+                                      aria-hidden="true"
+                                      title="Drag to reorder"
+                                    >
+                                      <IconGrip />
+                                    </span>
+                                    <button
+                                      className="order-arrow"
+                                      type="button"
+                                      aria-label={`Move ${
+                                        channel.customName ??
+                                        channel.providerName
+                                      } up`}
+                                      disabled={
+                                        savingChannel !== null ||
+                                        channelIndex === 0
+                                      }
+                                      onClick={() =>
+                                        void moveOutputGroupChannel(
+                                          primarySource,
+                                          channel.id,
+                                          -1,
+                                        )
+                                      }
+                                    >
+                                      <IconChevronUp />
+                                    </button>
+                                    <button
+                                      className="order-arrow"
+                                      type="button"
+                                      aria-label={`Move ${
+                                        channel.customName ??
+                                        channel.providerName
+                                      } down`}
+                                      disabled={
+                                        savingChannel !== null ||
+                                        channelIndex ===
+                                          outputGroupChannels.length - 1
+                                      }
+                                      onClick={() =>
+                                        void moveOutputGroupChannel(
+                                          primarySource,
+                                          channel.id,
+                                          1,
+                                        )
+                                      }
+                                    >
+                                      <IconChevronDown />
+                                    </button>
                                   </span>
                                   <span className="output-group-channel-position">
                                     {channelIndex + 1}
@@ -2755,7 +2985,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                           {isExpanded ? 'Collapse' : 'Expand'}
                         </span>
                       </button>
-                      <div className="permanent-group-actions">
+                      <div
+                        className={`permanent-group-actions ${
+                          isExpanded ? '' : 'collapsed'
+                        }`}
+                      >
                         <label className="permanent-visibility-toggle">
                           <input
                             type="checkbox"
@@ -2771,54 +3005,61 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                             ? 'Visible'
                             : 'Hidden'}
                         </label>
-                        <form
-                          className="permanent-group-name-form"
-                          onSubmit={(event) => {
-                            event.preventDefault();
-                            if (!customGroupValue.trim()) return;
-                            void updatePermanentGroup(primarySource, group, {
-                              customGroup: customGroupValue.trim(),
-                            });
-                          }}
-                        >
-                          <input
-                            aria-label={`Output group for ${group.providerGroup}`}
-                            list="custom-category-choices"
-                            placeholder="Move all to output group"
-                            value={customGroupValue}
-                            onChange={(event) =>
-                              setPermanentGroupNames((current) => ({
-                                ...current,
-                                [group.providerGroup]: event.target.value,
-                              }))
-                            }
-                          />
-                          <button
-                            className="secondary-button compact"
-                            type="submit"
-                            disabled={isSaving || !customGroupValue.trim()}
-                          >
-                            Move all
-                          </button>
-                          <button
-                            className="secondary-button compact"
-                            type="button"
-                            disabled={
-                              isSaving || group.outputGroupStatus === 'provider'
-                            }
-                            onClick={() => {
-                              setPermanentGroupNames((current) => ({
-                                ...current,
-                                [group.providerGroup]: '',
-                              }));
+                        {!isExpanded ? null : (
+                          <form
+                            className="permanent-group-name-form"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              if (!customGroupValue.trim()) return;
                               void updatePermanentGroup(primarySource, group, {
-                                customGroup: null,
+                                customGroup: customGroupValue.trim(),
                               });
                             }}
                           >
-                            Reset
-                          </button>
-                        </form>
+                            <input
+                              aria-label={`Output group for ${group.providerGroup}`}
+                              list="custom-category-choices"
+                              placeholder="Move all to output group"
+                              value={customGroupValue}
+                              onChange={(event) =>
+                                setPermanentGroupNames((current) => ({
+                                  ...current,
+                                  [group.providerGroup]: event.target.value,
+                                }))
+                              }
+                            />
+                            <button
+                              className="secondary-button compact"
+                              type="submit"
+                              disabled={isSaving || !customGroupValue.trim()}
+                            >
+                              Move all
+                            </button>
+                            <button
+                              className="secondary-button compact"
+                              type="button"
+                              disabled={
+                                isSaving ||
+                                group.outputGroupStatus === 'provider'
+                              }
+                              onClick={() => {
+                                setPermanentGroupNames((current) => ({
+                                  ...current,
+                                  [group.providerGroup]: '',
+                                }));
+                                void updatePermanentGroup(
+                                  primarySource,
+                                  group,
+                                  {
+                                    customGroup: null,
+                                  },
+                                );
+                              }}
+                            >
+                              Reset
+                            </button>
+                          </form>
+                        )}
                       </div>
                     </article>
                   );
@@ -3030,7 +3271,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 <div className="channel-list" aria-live="polite">
                   {channels.map((channel) => (
                     <article
-                      className={`channel-row ${channel.enabled ? '' : 'disabled'}`}
+                      className={`channel-row ${channel.enabled ? '' : 'disabled'} ${
+                        dropTarget === channel.id && draggedChannelId
+                          ? 'drop-target'
+                          : ''
+                      }`}
                       key={channel.id}
                       draggable={
                         channelTotal === channels.length &&
@@ -3041,9 +3286,15 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         setDraggedChannelId(channel.id);
                         event.dataTransfer.effectAllowed = 'move';
                       }}
-                      onDragEnd={() => setDraggedChannelId(null)}
+                      onDragEnd={() => {
+                        setDraggedChannelId(null);
+                        setDropTarget(null);
+                      }}
                       onDragOver={(event: DragEvent<HTMLElement>) => {
-                        if (draggedChannelId) event.preventDefault();
+                        if (draggedChannelId) {
+                          event.preventDefault();
+                          setDropTarget(channel.id);
+                        }
                       }}
                       onDrop={(event: DragEvent<HTMLElement>) => {
                         event.preventDefault();
@@ -3058,11 +3309,52 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         }
                       }}
                     >
-                      <span
-                        className="drag-handle channel-drag-handle"
-                        aria-hidden="true"
-                      >
-                        <IconGrip />
+                      <span className="row-order-controls">
+                        <span
+                          className="drag-handle channel-drag-handle"
+                          aria-hidden="true"
+                          title="Drag to reorder"
+                        >
+                          <IconGrip />
+                        </span>
+                        <button
+                          className="order-arrow"
+                          type="button"
+                          aria-label={`Move ${
+                            channel.customName ?? channel.providerName
+                          } up`}
+                          disabled={
+                            savingChannel !== null ||
+                            bulkSaving ||
+                            channels[0]?.id === channel.id
+                          }
+                          onClick={() =>
+                            void moveListedChannel(
+                              primarySource,
+                              channel.id,
+                              -1,
+                            )
+                          }
+                        >
+                          <IconChevronUp />
+                        </button>
+                        <button
+                          className="order-arrow"
+                          type="button"
+                          aria-label={`Move ${
+                            channel.customName ?? channel.providerName
+                          } down`}
+                          disabled={
+                            savingChannel !== null ||
+                            bulkSaving ||
+                            channels[channels.length - 1]?.id === channel.id
+                          }
+                          onClick={() =>
+                            void moveListedChannel(primarySource, channel.id, 1)
+                          }
+                        >
+                          <IconChevronDown />
+                        </button>
                       </span>
                       <input
                         className="channel-select"
@@ -3085,11 +3377,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                           {channel.tvgId ? ` · ${channel.tvgId}` : ''}
                         </small>
                       </div>
-                      <span
-                        className={`reconciliation-badge ${channel.reconciliationStatus}`}
-                      >
-                        {channel.reconciliationStatus}
-                      </span>
+                      {channel.reconciliationStatus !== 'matched' ? (
+                        <span
+                          className={`reconciliation-badge ${channel.reconciliationStatus}`}
+                        >
+                          {channel.reconciliationStatus}
+                        </span>
+                      ) : null}
                       <div className="channel-actions">
                         {channel.matchLocked ? (
                           <button
