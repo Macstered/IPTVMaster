@@ -29,6 +29,8 @@ Conventions for every phase:
 
 ## Track A — remote deploy capability (parallel, blocks on host setup)
 
+**Status: DONE 2026-08-05** — scripts/deploy-remote.sh, docs/DEPLOY.md; rollback tested both ways.
+
 Goal: update the app inside Docker on the Proxmox VM (<host>) from this machine,
 without moving secrets off the host.
 
@@ -74,6 +76,8 @@ matches, and rollback to the recorded prior tag is tested once.
 
 ## Phase 1 — EPG mapping correctness: channels that never have EPG
 
+**Status: DONE 2026-08-06** (EpgWorkspace extraction landed in Phase 2 instead).
+
 The reported problem: the EPG mappings screen lists channels that will never have guide
 data — decorative separator entries such as `-=Finland=-` used as group placeholders, and
 transient live-event stream channels — so "missing" counts are permanently inflated and
@@ -115,6 +119,8 @@ Size: M.
 
 ## Phase 2 — EPG mapping interaction rework
 
+**Status: DONE 2026-08-06.**
+
 - 2.1 Split rows by status: missing/ambiguous first with controls; matched rows collapse
   to compact one-liners (name → guide name) with controls on expand; filter chips
   All / Missing / Ambiguous / Manual / Matched / Excluded.
@@ -135,6 +141,8 @@ hundreds of rows (matched rows render no dropdowns).
 Size: M.
 
 ## Phase 3 — design tokens and visual calm (the "AI-ish" fix)
+
+**Status: DONE 2026-08-06** — tokens live at the top of styles.css; helper-copy demotion (3.5) only partially done (eyebrow removed; secret-notes remain).
 
 - 3.1 Create `apps/web/src/tokens.css`: ~10 colors (bg / surface / surface-raised,
   border, text / text-muted, accent, ok / warn / danger), two radii (6px containers,
@@ -166,6 +174,8 @@ screenshots per workspace).
 
 ## Phase 4 — Overview as a status board + attention model + feedback
 
+**Status: DONE 2026-08-06** — next-run display simplified to interval + last-result (honest, no fake precision).
+
 - 4.1 API: `GET /api/v1/system/status` returning, per source: channel/group counts,
   last playlist/EPG refresh time and outcome, next scheduled run (schedulers expose
   this), EPG coverage (mappable denominator from Phase 1), pending counts (provider
@@ -196,6 +206,8 @@ Size: M.
 
 ## Phase 5 — lineup editor restructure + ordering accessibility
 
+**Status: PARTIAL 2026-08-06** — 5.2/5.4 done (arrow ordering, drop indicator, badge calm, rename-on-expand); 5.1/5.3 master-detail merge and column alignment still open.
+
 - 5.1 Merge "Playlist order" and "Group & channel editor" into one master–detail
   Lineup screen: left pane = output groups (order, visibility, rename, badges), right
   pane = channels of the selected group (search, bulk bar, per-channel edit). Kills the
@@ -218,6 +230,8 @@ keyboard only and on a tablet; per-row visual weight drops noticeably.
 Size: L (the largest UI change; extract `LineupWorkspace` first).
 
 ## Phase 6 — app shell and platform polish
+
+**Status: PARTIAL 2026-08-06** — 6.1 (workspace routing, without provider id), 6.3, 6.4 (Copy, no QR), 6.5, 6.6, 6.7 done; 6.2 data layer/virtualization still open.
 
 - 6.1 Hash routing: `#/overview`, `#/lineup/order`, `#/lineup/channels`, `#/events`,
   `#/epg`, `#/updates` plus selected provider id; restore on load (F5 currently always
