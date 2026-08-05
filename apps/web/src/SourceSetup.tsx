@@ -262,6 +262,11 @@ async function readJson<T>(response: Response): Promise<T> {
   return value as T;
 }
 
+const TIMEZONE_CHOICES: string[] =
+  (
+    Intl as { supportedValuesOf?: (key: string) => string[] }
+  ).supportedValuesOf?.('timeZone') ?? [];
+
 function formatHistoryTime(value: string): string {
   return new Intl.DateTimeFormat('en-FI', {
     dateStyle: 'medium',
@@ -303,7 +308,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [epgImportSummary, setEpgImportSummary] =
     useState<EpgImportSummary | null>(null);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
-  const [groupFilter, setGroupFilter] = useState('Events FI');
+  const [groupFilter, setGroupFilter] = useState('');
+  const [eventGroupView, setEventGroupView] = useState<'events' | 'all'>(
+    'events',
+  );
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [eventReview, setEventReview] = useState<EventReview | null>(null);
   const [selectedEventGroup, setSelectedEventGroup] = useState('');
@@ -1587,13 +1595,17 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   }
 
   const normalizedFilter = groupFilter.trim().toLocaleLowerCase();
-  const visibleGroups = groups
-    .filter((group) =>
-      normalizedFilter
+  const matchingGroups = groups.filter(
+    (group) =>
+      (eventGroupView === 'events' ? group.behavior === 'event' : true) &&
+      (normalizedFilter
         ? group.providerGroup.toLocaleLowerCase().includes(normalizedFilter)
-        : group.behavior === 'event',
-    )
-    .slice(0, 50);
+        : true),
+  );
+  const visibleGroups = matchingGroups.slice(0, 50);
+  const eventGroupCount = groups.filter(
+    (group) => group.behavior === 'event',
+  ).length;
   const primarySource =
     sources.find((source) => source.id === selectedSourceId) ?? sources[0];
   const normalizedPermanentGroupFilter = permanentGroupFilter
@@ -2020,6 +2032,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             </p>
             <div className="history-grid">
               <div className="snapshot-list" aria-label="Retained snapshots">
+                {sourceHistory.snapshots.length > 6 ? (
+                  <small className="channel-limit-note">
+                    Showing the 6 most recent of{' '}
+                    {sourceHistory.snapshots.length.toLocaleString()} retained
+                    snapshots.
+                  </small>
+                ) : null}
                 {sourceHistory.snapshots.slice(0, 6).map((snapshot) => (
                   <article
                     className={`snapshot-row ${snapshot.isCurrent ? 'current' : ''}`}
@@ -2124,9 +2143,25 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               <strong>Choose transient live-event groups</strong>
             </div>
             <div className="section-heading-controls">
+              <div className="epg-chips group-view-chips">
+                <button
+                  type="button"
+                  className={`epg-chip ${eventGroupView === 'events' ? 'active' : ''}`}
+                  onClick={() => setEventGroupView('events')}
+                >
+                  Event groups ({eventGroupCount})
+                </button>
+                <button
+                  type="button"
+                  className={`epg-chip ${eventGroupView === 'all' ? 'active' : ''}`}
+                  onClick={() => setEventGroupView('all')}
+                >
+                  All groups ({groups.length})
+                </button>
+              </div>
               <input
                 aria-label="Filter provider groups"
-                placeholder="Filter groups"
+                placeholder="Search groups"
                 value={groupFilter}
                 onChange={(event) => setGroupFilter(event.target.value)}
               />
@@ -2143,9 +2178,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             hidden={workspace !== 'events' || collapsedSections['group-rules']}
           >
             <p className="secret-note">
-              Event groups receive Swedish-to-Finnish time conversion and
-              placeholder filtering. Search a provider group name to make it an
-              event; permanent TV groups are managed below.
+              Event groups receive source-to-display time conversion and
+              placeholder filtering. Switch to “All groups” to find a provider
+              group and mark it as an event.
             </p>
             <div className="group-list">
               {visibleGroups.map((group) => (
@@ -2195,6 +2230,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 <p className="empty-groups">No groups match this filter.</p>
               ) : null}
             </div>
+            {matchingGroups.length > visibleGroups.length ? (
+              <small className="channel-limit-note">
+                Showing {visibleGroups.length.toLocaleString()} of{' '}
+                {matchingGroups.length.toLocaleString()} groups. Narrow the
+                search to see the rest.
+              </small>
+            ) : null}
 
             {editedEventGroup && eventRuleDraft ? (
               <form
@@ -2271,6 +2313,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 <label>
                   Provider timezone
                   <input
+                    list="timezone-choices"
                     value={eventRuleDraft.sourceTimeZone}
                     onChange={(event) =>
                       setEventRuleDraft((current) =>
@@ -2285,6 +2328,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 <label>
                   Display timezone
                   <input
+                    list="timezone-choices"
                     value={eventRuleDraft.displayTimeZone}
                     onChange={(event) =>
                       setEventRuleDraft((current) =>
@@ -2344,6 +2388,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                     ? 'Saving rule...'
                     : 'Save event rule'}
                 </button>
+                <datalist id="timezone-choices">
+                  {TIMEZONE_CHOICES.map((zone) => (
+                    <option value={zone} key={zone} />
+                  ))}
+                </datalist>
               </form>
             ) : null}
           </div>
@@ -3601,21 +3650,63 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         <label htmlFor={`playlist-output-url-${profile.id}`}>
                           M3U playlist URL
                         </label>
-                        <input
-                          id={`playlist-output-url-${profile.id}`}
-                          readOnly
-                          value={playlistOutputUrl}
-                          onFocus={(event) => event.currentTarget.select()}
-                        />
+                        <div className="copy-row">
+                          <input
+                            id={`playlist-output-url-${profile.id}`}
+                            readOnly
+                            value={playlistOutputUrl}
+                            onFocus={(event) => event.currentTarget.select()}
+                          />
+                          <button
+                            className="secondary-button compact"
+                            type="button"
+                            onClick={() =>
+                              void navigator.clipboard
+                                .writeText(playlistOutputUrl)
+                                .then(() =>
+                                  showToast('success', 'Playlist URL copied'),
+                                )
+                                .catch(() =>
+                                  showToast(
+                                    'error',
+                                    'Could not copy — select the text instead',
+                                  ),
+                                )
+                            }
+                          >
+                            Copy
+                          </button>
+                        </div>
                         <label htmlFor={`epg-output-url-${profile.id}`}>
                           XMLTV EPG URL
                         </label>
-                        <input
-                          id={`epg-output-url-${profile.id}`}
-                          readOnly
-                          value={epgOutputUrl}
-                          onFocus={(event) => event.currentTarget.select()}
-                        />
+                        <div className="copy-row">
+                          <input
+                            id={`epg-output-url-${profile.id}`}
+                            readOnly
+                            value={epgOutputUrl}
+                            onFocus={(event) => event.currentTarget.select()}
+                          />
+                          <button
+                            className="secondary-button compact"
+                            type="button"
+                            onClick={() =>
+                              void navigator.clipboard
+                                .writeText(epgOutputUrl)
+                                .then(() =>
+                                  showToast('success', 'EPG URL copied'),
+                                )
+                                .catch(() =>
+                                  showToast(
+                                    'error',
+                                    'Could not copy — select the text instead',
+                                  ),
+                                )
+                            }
+                          >
+                            Copy
+                          </button>
+                        </div>
                         <small>
                           Available from any device signed in as this
                           administrator. Treat these URLs like passwords.

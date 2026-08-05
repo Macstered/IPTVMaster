@@ -73,6 +73,33 @@ const workspaceDetails: Record<
   },
 };
 
+function routeFromHash(): { workspace: WorkspaceView; lineupView: LineupView } {
+  const fragment = window.location.hash.replace(/^#\/?/, '');
+  const [head, tail] = fragment.split('/');
+  if (head === 'lineup') {
+    return {
+      workspace: 'lineup',
+      lineupView: tail === 'channels' ? 'channels' : 'order',
+    };
+  }
+  if (
+    head === 'overview' ||
+    head === 'events' ||
+    head === 'epg' ||
+    head === 'updates'
+  ) {
+    return { workspace: head, lineupView: 'order' };
+  }
+  return { workspace: 'overview', lineupView: 'order' };
+}
+
+function hashForRoute(
+  workspace: WorkspaceView,
+  lineupView: LineupView,
+): string {
+  return workspace === 'lineup' ? `#/lineup/${lineupView}` : `#/${workspace}`;
+}
+
 const workspaceOrder: WorkspaceView[] = [
   'overview',
   'lineup',
@@ -150,9 +177,27 @@ interface AppProps {
 }
 
 export function App({ authUsername, onLogout }: AppProps) {
-  const [workspace, setWorkspace] = useState<WorkspaceView>('overview');
-  const [lineupView, setLineupView] = useState<LineupView>('order');
-  const [lineupMenuOpen, setLineupMenuOpen] = useState(false);
+  const initialRoute = routeFromHash();
+  const [workspace, setWorkspace] = useState<WorkspaceView>(
+    initialRoute.workspace,
+  );
+  const [lineupView, setLineupView] = useState<LineupView>(
+    initialRoute.lineupView,
+  );
+  const [lineupMenuOpen, setLineupMenuOpen] = useState(
+    initialRoute.workspace === 'lineup',
+  );
+
+  useEffect(() => {
+    function onHashChange() {
+      const route = routeFromHash();
+      setWorkspace(route.workspace);
+      setLineupView(route.lineupView);
+      if (route.workspace === 'lineup') setLineupMenuOpen(true);
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
   const [name, setName] = useState(initialEvent);
   const [referenceDate, setReferenceDate] = useState('2026-08-04');
   const [result, setResult] = useState<PreviewResult | null>(null);
@@ -199,6 +244,7 @@ export function App({ authUsername, onLogout }: AppProps) {
   function openWorkspace(nextWorkspace: WorkspaceView) {
     setWorkspace(nextWorkspace);
     if (nextWorkspace !== 'lineup') setLineupMenuOpen(false);
+    window.location.hash = hashForRoute(nextWorkspace, lineupView);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -206,6 +252,7 @@ export function App({ authUsername, onLogout }: AppProps) {
     setLineupView(nextLineupView);
     setLineupMenuOpen(true);
     setWorkspace('lineup');
+    window.location.hash = hashForRoute('lineup', nextLineupView);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 

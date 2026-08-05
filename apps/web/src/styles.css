@@ -2335,7 +2335,10 @@ button:disabled {
     padding: 0;
   }
   .status-card {
-    display: none;
+    width: 100%;
+    order: 3;
+    margin-top: 10px;
+    padding: 8px 12px;
   }
   .sidebar nav {
     display: flex;
@@ -3030,6 +3033,17 @@ strong {
 }
 .permanent-group-actions.collapsed {
   grid-template-columns: auto;
+}
+.copy-row {
+  display: flex;
+  gap: 7px;
+}
+.copy-row input {
+  flex: 1;
+  min-width: 0;
+}
+.group-view-chips {
+  margin-top: 0;
 }
 .nav-link:focus-visible,
 .brand:focus-visible {
