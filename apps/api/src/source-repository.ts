@@ -294,6 +294,7 @@ export interface EpgMappingReviewItem {
   candidates?: EpgGuideChannelSummary[];
   separatorLike?: boolean;
   eventLike?: boolean;
+  logoUrl?: string;
 }
 
 export interface EpgMappingReview {
@@ -311,6 +312,32 @@ export interface EpgGuideChannelPage {
   channels: EpgGuideChannelSummary[];
   total: number;
   truncated: boolean;
+}
+
+export interface SourceSyncStatus {
+  status: 'succeeded' | 'failed' | 'rejected';
+  finishedAt: string;
+  error?: string;
+}
+
+export interface SourceStatus {
+  sourceId: string;
+  name: string;
+  enabled: boolean;
+  channelCount: number;
+  visibleChannelCount: number;
+  groupCount: number;
+  reviewPending: number;
+  epgMappable: number;
+  epgMapped: number;
+  epgExcluded: number;
+  lastPlaylistSync?: SourceSyncStatus;
+  lastEpgSync?: SourceSyncStatus;
+}
+
+export interface SystemStatusSummary {
+  sources: SourceStatus[];
+  outputProfileCount: number;
 }
 
 export class ManualMatchConflictError extends Error {
@@ -449,6 +476,7 @@ export interface SourceRepository {
     limit: number,
     view?: EpgMappingReviewView,
   ): Promise<EpgMappingReview>;
+  getSystemStatus(): Promise<SystemStatusSummary>;
   searchEpgChannels(
     sourceId: string,
     search: string | undefined,
@@ -2772,10 +2800,12 @@ export class PostgresSourceRepository implements SourceRepository {
       tvg_id: string | null;
       display_name: string;
       provider_group: string;
+      logo_url: string | null;
     }>(
       `SELECT c.id, c.tvg_id,
               COALESCE(c.custom_name, c.provider_name) AS display_name,
-              COALESCE(c.custom_group, c.provider_group) AS provider_group
+              COALESCE(c.custom_group, c.provider_group) AS provider_group,
+              COALESCE(c.custom_logo_url, c.provider_logo_url) AS logo_url
        FROM channel c
        LEFT JOIN group_policy policy
          ON policy.source_id = c.source_id
@@ -2810,6 +2840,7 @@ export class PostgresSourceRepository implements SourceRepository {
             status: 'excluded' as const,
             manuallyLocked: false,
             candidateIds: [],
+            ...(row.logo_url ? { logoUrl: row.logo_url } : {}),
             ...(isSeparatorChannelName(row.display_name)
               ? { separatorLike: true }
               : {}),
@@ -2837,6 +2868,7 @@ export class PostgresSourceRepository implements SourceRepository {
               ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
               status: match ? 'matched' : (unresolved?.status ?? 'missing'),
               manuallyLocked: lockedIds.has(channel.id),
+              ...(channel.logoUrl ? { logoUrl: channel.logoUrl } : {}),
               ...(match
                 ? {
                     epgChannelId: match.epgChannel.id,
@@ -2899,6 +2931,141 @@ export class PostgresSourceRepository implements SourceRepository {
       excludedCount,
       total: channels.length,
       truncated: visible.length > limit,
+    };
+  }
+
+  async getSystemStatus(): Promise<SystemStatusSummary> {
+    const [sourcesResult, profileResult] = await Promise.all([
+      this.#pool.query<{
+        id: string;
+        name: string;
+        enabled: boolean;
+        channel_count: string | number;
+        visible_channel_count: string | number;
+        group_count: string | number;
+        review_pending: string | number;
+        epg_mappable: string | number;
+        epg_mapped: string | number;
+        epg_excluded: string | number;
+        playlist_status: string | null;
+        playlist_finished_at: Date | null;
+        playlist_error: string | null;
+        epg_status: string | null;
+        epg_finished_at: Date | null;
+        epg_error: string | null;
+      }>(
+        `SELECT s.id, s.name, s.enabled,
+                counts.channel_count, counts.visible_channel_count,
+                counts.group_count, counts.review_pending,
+                counts.epg_mappable, counts.epg_excluded,
+                COALESCE(mapped.epg_mapped, 0) AS epg_mapped,
+                playlist_sync.status AS playlist_status,
+                playlist_sync.finished_at AS playlist_finished_at,
+                playlist_sync.safe_error AS playlist_error,
+                epg_sync.status AS epg_status,
+                epg_sync.finished_at AS epg_finished_at,
+                epg_sync.safe_error AS epg_error
+         FROM source s
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) AS channel_count,
+                  COUNT(*) FILTER (WHERE c.enabled) AS visible_channel_count,
+                  COUNT(DISTINCT COALESCE(c.custom_group, c.provider_group))
+                    AS group_count,
+                  COUNT(*) FILTER (
+                    WHERE c.reconciliation_status IN ('missing', 'ambiguous')
+                      AND COALESCE(p.behavior, 'permanent') = 'permanent'
+                  ) AS review_pending,
+                  COUNT(*) FILTER (
+                    WHERE c.enabled AND c.epg_excluded = FALSE
+                      AND COALESCE(p.behavior, 'permanent') = 'permanent'
+                  ) AS epg_mappable,
+                  COUNT(*) FILTER (
+                    WHERE c.enabled AND c.epg_excluded = TRUE
+                      AND COALESCE(p.behavior, 'permanent') = 'permanent'
+                  ) AS epg_excluded
+           FROM channel c
+           LEFT JOIN group_policy p
+             ON p.source_id = c.source_id
+            AND p.provider_group = c.provider_group
+           WHERE c.source_id = s.id AND c.archived_at IS NULL
+             AND c.current_upstream_item_id IS NOT NULL
+         ) counts ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) AS epg_mapped
+           FROM epg_mapping m
+           JOIN channel c ON c.id = m.channel_id
+           LEFT JOIN group_policy p
+             ON p.source_id = c.source_id
+            AND p.provider_group = c.provider_group
+           WHERE c.source_id = s.id AND c.archived_at IS NULL
+             AND c.current_upstream_item_id IS NOT NULL
+             AND c.enabled AND c.epg_excluded = FALSE
+             AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         ) mapped ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT r.status, r.finished_at, r.safe_error
+           FROM sync_run r
+           WHERE r.source_id = s.id AND r.sync_type = 'playlist'
+             AND r.status <> 'running'
+           ORDER BY r.started_at DESC
+           LIMIT 1
+         ) playlist_sync ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT r.status, r.finished_at, r.safe_error
+           FROM sync_run r
+           WHERE r.source_id = s.id AND r.sync_type = 'epg'
+             AND r.status <> 'running'
+           ORDER BY r.started_at DESC
+           LIMIT 1
+         ) epg_sync ON TRUE
+         ORDER BY s.created_at`,
+      ),
+      this.#pool.query<{ profile_count: string | number }>(
+        `SELECT COUNT(*) AS profile_count
+         FROM output_profile
+         WHERE enabled = TRUE`,
+      ),
+    ]);
+    const toSync = (
+      status: string | null,
+      finishedAt: Date | null,
+      error: string | null,
+    ): SourceSyncStatus | undefined =>
+      status && finishedAt
+        ? {
+            status: status as SourceSyncStatus['status'],
+            finishedAt: finishedAt.toISOString(),
+            ...(error ? { error } : {}),
+          }
+        : undefined;
+    return {
+      sources: sourcesResult.rows.map((row) => {
+        const lastPlaylistSync = toSync(
+          row.playlist_status,
+          row.playlist_finished_at,
+          row.playlist_error,
+        );
+        const lastEpgSync = toSync(
+          row.epg_status,
+          row.epg_finished_at,
+          row.epg_error,
+        );
+        return {
+          sourceId: row.id,
+          name: row.name,
+          enabled: row.enabled,
+          channelCount: Number(row.channel_count ?? 0),
+          visibleChannelCount: Number(row.visible_channel_count ?? 0),
+          groupCount: Number(row.group_count ?? 0),
+          reviewPending: Number(row.review_pending ?? 0),
+          epgMappable: Number(row.epg_mappable ?? 0),
+          epgMapped: Number(row.epg_mapped ?? 0),
+          epgExcluded: Number(row.epg_excluded ?? 0),
+          ...(lastPlaylistSync ? { lastPlaylistSync } : {}),
+          ...(lastEpgSync ? { lastEpgSync } : {}),
+        };
+      }),
+      outputProfileCount: Number(profileResult.rows[0]?.profile_count ?? 0),
     };
   }
 
@@ -3446,10 +3613,12 @@ export class PostgresSourceRepository implements SourceRepository {
       tvg_id: string | null;
       display_name: string;
       provider_group: string;
+      logo_url: string | null;
     }>(
       `SELECT c.id, c.tvg_id,
                 COALESCE(c.custom_name, c.provider_name) AS display_name,
-                COALESCE(c.custom_group, c.provider_group) AS provider_group
+                COALESCE(c.custom_group, c.provider_group) AS provider_group,
+                COALESCE(c.custom_logo_url, c.provider_logo_url) AS logo_url
          FROM channel c
          LEFT JOIN group_policy policy
            ON policy.source_id = c.source_id
@@ -3493,6 +3662,7 @@ export class PostgresSourceRepository implements SourceRepository {
       tvgId: row.tvg_id,
       displayName: row.display_name,
       providerGroup: row.provider_group,
+      logoUrl: row.logo_url,
     }));
     const guideChannels: EpgGuideChannel[] = guideResult.rows.map((row) => ({
       id: row.upstream_id,

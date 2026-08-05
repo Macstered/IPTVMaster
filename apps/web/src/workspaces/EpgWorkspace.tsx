@@ -6,6 +6,9 @@ import {
   type KeyboardEvent,
 } from 'react';
 
+import { ChannelLogo } from '../components/ChannelLogo.js';
+import { showToast } from '../toast.js';
+
 interface EpgSource {
   id: string;
   name: string;
@@ -37,6 +40,7 @@ interface EpgMappingReviewItem {
   candidates?: EpgGuideChannelSummary[];
   separatorLike?: boolean;
   eventLike?: boolean;
+  logoUrl?: string;
 }
 
 interface EpgMappingReview {
@@ -183,8 +187,11 @@ function EpgChannelPicker({
               }}
               onMouseEnter={() => setHighlighted(index)}
             >
-              <strong>{option.displayName}</strong>
-              <small>{option.id}</small>
+              <ChannelLogo url={option.iconUrl} name={option.displayName} />
+              <div>
+                <strong>{option.displayName}</strong>
+                <small>{option.id}</small>
+              </div>
             </li>
           ))}
         </ul>
@@ -201,7 +208,6 @@ export function EpgWorkspace({
   const [review, setReview] = useState<EpgMappingReview | null>(null);
   const [filter, setFilter] = useState<EpgFilter>('attention');
   const [search, setSearch] = useState('');
-  const [error, setError] = useState<string | null>(null);
   const [savingChannel, setSavingChannel] = useState<string | null>(null);
   const [savingBulk, setSavingBulk] = useState(false);
   const [changingMatched, setChangingMatched] = useState<string | null>(null);
@@ -231,7 +237,8 @@ export function EpgWorkspace({
     const handle = window.setTimeout(() => {
       void load(sourceId, serverView, search).catch((caught: unknown) => {
         if (!stale) {
-          setError(
+          showToast(
+            'error',
             caught instanceof Error
               ? caught.message
               : 'Could not load EPG coverage',
@@ -252,12 +259,14 @@ export function EpgWorkspace({
   }
 
   async function runMutation(action: () => Promise<void>) {
-    setError(null);
     try {
       await action();
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'EPG update failed');
+      showToast(
+        'error',
+        caught instanceof Error ? caught.message : 'EPG update failed',
+      );
     }
   }
 
@@ -423,6 +432,7 @@ export function EpgWorkspace({
               className={`epg-mapping-row ${isMatched && !isChanging ? 'compact' : ''}`}
               key={mapping.channelId}
             >
+              <ChannelLogo url={mapping.logoUrl} name={mapping.channelName} />
               <div className="epg-playlist-channel">
                 <strong>{mapping.channelName}</strong>
                 <span>
@@ -560,7 +570,6 @@ export function EpgWorkspace({
           see the rest.
         </small>
       ) : null}
-      {error ? <p className="message error">{error}</p> : null}
     </section>
   );
 }

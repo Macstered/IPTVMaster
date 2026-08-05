@@ -863,6 +863,30 @@ export async function buildApp(
     maintenanceAutomation: maintenanceScheduler !== undefined,
   }));
 
+  app.get('/api/v1/system/status', async (_request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const summary = await sourceRepository.getSystemStatus();
+    const playlistStatus = playlistScheduler?.status();
+    const epgStatus = epgScheduler?.status();
+    return {
+      ...summary,
+      automation: {
+        playlist: {
+          enabled: playlistStatus?.enabled ?? false,
+          intervalMinutes: playlistStatus?.intervalMinutes ?? 0,
+        },
+        epg: {
+          enabled: epgStatus?.enabled ?? false,
+          intervalMinutes: epgStatus?.intervalMinutes ?? 0,
+        },
+      },
+    };
+  });
+
   app.get('/api/v1/automation/status', async () => ({
     ...(playlistScheduler?.status() ?? {
       enabled: false,

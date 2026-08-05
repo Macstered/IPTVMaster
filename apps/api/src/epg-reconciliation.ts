@@ -3,6 +3,7 @@ export interface EpgPlaylistChannel {
   tvgId: string | null;
   displayName: string;
   providerGroup: string;
+  logoUrl?: string | null;
 }
 
 export interface EpgGuideChannel {

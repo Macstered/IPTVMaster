@@ -1,6 +1,8 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
+import { ChannelLogo } from './components/ChannelLogo.js';
 import { IconGrip, IconTv } from './icons.js';
+import { showToast } from './toast.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
 
 export type WorkspaceView =
@@ -290,6 +292,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [epgUrl, setEpgUrl] = useState('');
   const [saving, setSaving] = useState(false);
   const [removingSourceId, setRemovingSourceId] = useState<string | null>(null);
+  const [confirmingRemoval, setConfirmingRemoval] = useState<string | null>(
+    null,
+  );
   const [inspectingId, setInspectingId] = useState<string | null>(null);
   const [importingEpgId, setImportingEpgId] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(
@@ -297,7 +302,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   );
   const [epgImportSummary, setEpgImportSummary] =
     useState<EpgImportSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [groupFilter, setGroupFilter] = useState('Events FI');
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
@@ -556,7 +560,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         }
       } catch (caught) {
         if (active)
-          setError(
+          showToast(
+            'error',
             caught instanceof Error ? caught.message : 'Setup check failed',
           );
       }
@@ -580,7 +585,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setChannelTotal(0);
     setSelectedChannelIds([]);
     setEditingChannel(null);
-    setError(null);
     try {
       await Promise.all([
         loadGroups(source.id),
@@ -592,7 +596,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadEventReview(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not load provider',
       );
     }
@@ -612,7 +617,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setName(source.name);
     setPlaylistUrl('');
     setEpgUrl('');
-    setError(null);
     await selectSource(source);
   }
 
@@ -621,7 +625,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     options: { deriveEpgUrl?: boolean; clearEpgUrl?: boolean } = {},
   ) {
     setSaving(true);
-    setError(null);
     try {
       const response = await fetch(`/api/v1/sources/${source.id}`, {
         method: 'PUT',
@@ -649,7 +652,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       }
       clearSourceForm();
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not update provider connection',
@@ -666,7 +670,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       return;
     }
     setSaving(true);
-    setError(null);
     try {
       const response = await fetch('/api/v1/sources', {
         method: 'POST',
@@ -688,7 +691,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       );
       await selectSource(payload.source);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not save source',
       );
     } finally {
@@ -697,12 +701,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   }
 
   async function removeSource(source: SafeSource) {
-    const confirmed = window.confirm(
-      `Remove ${source.name}? This permanently deletes its imported playlists, guide data, edits, and revokes any output URLs that include it.`,
-    );
-    if (!confirmed) return;
+    setConfirmingRemoval(null);
     setRemovingSourceId(source.id);
-    setError(null);
     try {
       const response = await fetch(`/api/v1/sources/${source.id}`, {
         method: 'DELETE',
@@ -713,6 +713,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       const remaining = sources.filter(
         (candidate) => candidate.id !== source.id,
       );
+      showToast('success', `${source.name} removed`);
       setSources(remaining);
       setOutputSourceIds((current) =>
         current.filter((sourceId) => sourceId !== source.id),
@@ -735,14 +736,16 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         if (nextSource) await selectSource(nextSource);
       }
       if (payload.revokedOutputProfiles > 0) {
-        setError(
-          `${payload.revokedOutputProfiles} generated output URL${
+        showToast(
+          'success',
+          `${payload.revokedOutputProfiles} output URL${
             payload.revokedOutputProfiles === 1 ? ' was' : 's were'
           } revoked because it included this provider.`,
         );
       }
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not remove provider',
       );
     } finally {
@@ -753,13 +756,16 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   async function inspectSource(source: SafeSource) {
     setInspectingId(source.id);
     setImportSummary(null);
-    setError(null);
     try {
       const response = await fetch(`/api/v1/sources/${source.id}/import`, {
         method: 'POST',
       });
       const payload = await readJson<{ summary: ImportSummary }>(response);
       setImportSummary(payload.summary);
+      showToast(
+        'success',
+        `Playlist imported: ${payload.summary.retainedLiveEntries.toLocaleString()} live entries`,
+      );
       await Promise.all([
         loadGroups(source.id),
         refreshPermanentWorkspace(source.id),
@@ -768,7 +774,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadEventReview(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not inspect source',
       );
     } finally {
@@ -779,7 +786,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   async function importEpg(source: SafeSource) {
     setImportingEpgId(source.id);
     setEpgImportSummary(null);
-    setError(null);
     try {
       const response = await fetch(`/api/v1/sources/${source.id}/epg/import`, {
         method: 'POST',
@@ -788,9 +794,14 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         response,
       );
       setEpgImportSummary(payload.inspection);
+      showToast(
+        'success',
+        `Guide imported: ${payload.inspection.channelCount.toLocaleString()} EPG channels`,
+      );
       await Promise.all([loadSourceHistory(source.id)]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not import XMLTV',
       );
     } finally {
@@ -804,7 +815,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     behavior: 'permanent' | 'event',
   ) {
     setSavingGroup(group.providerGroup);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/group-policies`,
@@ -836,7 +846,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadEventReview(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not save group policy',
@@ -868,7 +879,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     event.preventDefault();
     if (!eventRuleDraft) return;
     setSavingGroup(group.providerGroup);
-    setError(null);
     try {
       const placeholderPatterns = eventRuleDraft.placeholderPatterns
         .split(/\r?\n/)
@@ -909,7 +919,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       setEditingEventGroup(null);
       setEventRuleDraft(null);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not save event rule',
       );
     } finally {
@@ -933,7 +944,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     update: Record<string, unknown>,
   ) {
     setSavingChannel(channel.id);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/channels/${channel.id}`,
@@ -964,7 +974,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       await Promise.all([refreshPermanentWorkspace(source.id)]);
       return payload.channel;
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not update channel',
       );
       return null;
@@ -1006,7 +1017,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     try {
       await loadChannels(source.id, providerGroup);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not load channels for this group',
@@ -1020,7 +1032,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     update: Record<string, unknown>,
   ) {
     setSavingPermanentGroup(group.providerGroup);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/permanent-groups`,
@@ -1036,7 +1047,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadReconciliationReview(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not update permanent group',
@@ -1051,7 +1063,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     const name = newCustomCategory.trim();
     if (!name) return;
     setSavingCustomCategory(true);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/custom-categories`,
@@ -1068,7 +1079,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadOutputGroupCategories(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not create category',
       );
     } finally {
@@ -1111,7 +1123,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }));
     setOutputGroupCategories(nextGroups);
     setSavingOutputGroupOrder(draggedGroup);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/output-groups/order`,
@@ -1126,7 +1137,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       if (!response.ok) await readJson<never>(response);
       await loadOutputGroupCategories(source.id);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not save output group order',
@@ -1151,7 +1163,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     try {
       await loadOutputGroupChannels(source.id, outputGroup);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not load output group channels',
@@ -1169,7 +1182,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     if (next === outputGroupChannels) return;
     setOutputGroupChannels(next);
     setSavingChannel(draggedId);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/output-groups/channels/order`,
@@ -1189,7 +1201,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadPermanentGroups(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not save output group channel order',
@@ -1209,7 +1222,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     if (next === channels || expandedPermanentGroup === null) return;
     setChannels(next);
     setSavingChannel(draggedId);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/channels/order`,
@@ -1228,7 +1240,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadPermanentGroups(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not save channel order',
@@ -1278,20 +1291,28 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   ) {
     if (selectedChannelIds.length === 0) return;
     setBulkSaving(true);
-    setError(null);
     try {
       const response = await fetch(`/api/v1/sources/${source.id}/channels`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ channelIds: selectedChannelIds, update }),
       });
-      await readJson<{ updatedCount: number }>(response);
+      const bulkResult = await readJson<{ updatedCount: number }>(response);
+      showToast(
+        'success',
+        `${bulkResult.updatedCount.toLocaleString()} channel${
+          bulkResult.updatedCount === 1 ? '' : 's'
+        } updated`,
+      );
       await Promise.all([
         refreshPermanentWorkspace(source.id),
         loadReconciliationReview(source.id),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Bulk update failed');
+      showToast(
+        'error',
+        caught instanceof Error ? caught.message : 'Bulk update failed',
+      );
     } finally {
       setBulkSaving(false);
     }
@@ -1310,7 +1331,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     const upstreamItemId = reviewMatches[channel.id];
     if (!upstreamItemId) return;
     setResolvingChannel(channel.id);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/channels/${channel.id}/resolve`,
@@ -1327,7 +1347,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadSourceHistory(source.id),
       ]);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Manual match failed',
       );
     } finally {
@@ -1340,7 +1361,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     channel: ChannelSummary,
   ) {
     setSavingChannel(channel.id);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/channels/${channel.id}/unlock-match`,
@@ -1354,7 +1374,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       );
       await loadSourceHistory(source.id);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not unlock match',
       );
     } finally {
@@ -1364,13 +1385,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
 
   async function restoreSnapshot(source: SafeSource, snapshotId: string) {
     setRestoringSnapshot(snapshotId);
-    setError(null);
     try {
       const response = await fetch(
         `/api/v1/sources/${source.id}/snapshots/${snapshotId}/activate`,
         { method: 'POST' },
       );
       await readJson<{ snapshot: SnapshotHistoryItem }>(response);
+      showToast('success', 'Snapshot restored');
       await Promise.all([
         loadGroups(source.id),
         refreshPermanentWorkspace(source.id),
@@ -1379,7 +1400,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       ]);
       setConfirmingSnapshot(null);
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error ? caught.message : 'Could not restore snapshot',
       );
     } finally {
@@ -1390,7 +1412,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   async function createOutputProfile() {
     if (outputSourceIds.length === 0) return;
     setCreatingOutput(true);
-    setError(null);
     try {
       const response = await fetch('/api/v1/output-profiles', {
         method: 'POST',
@@ -1401,9 +1422,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         }),
       });
       await readJson<{ profile: CreatedOutputProfile }>(response);
+      showToast('success', 'TiviMate URL created');
       await loadOutputProfiles();
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not create output URL',
@@ -1415,7 +1438,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
 
   async function revokeOutputProfile(profileId: string) {
     setCreatingOutput(true);
-    setError(null);
     try {
       const response = await fetch(`/api/v1/output-profiles/${profileId}`, {
         method: 'DELETE',
@@ -1423,9 +1445,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       if (!response.ok) {
         await readJson<unknown>(response);
       }
+      showToast('success', 'Output URL revoked');
       await loadOutputProfiles();
     } catch (caught) {
-      setError(
+      showToast(
+        'error',
         caught instanceof Error
           ? caught.message
           : 'Could not revoke output URL',
@@ -1694,13 +1718,44 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                     inspectingId !== null ||
                     importingEpgId !== null
                   }
-                  onClick={() => void removeSource(source)}
+                  onClick={() =>
+                    setConfirmingRemoval((current) =>
+                      current === source.id ? null : source.id,
+                    )
+                  }
                 >
                   {removingSourceId === source.id
                     ? 'Removing…'
                     : 'Remove provider'}
                 </button>
               </div>
+              {confirmingRemoval === source.id ? (
+                <div className="snapshot-confirm source-remove-confirm">
+                  <p>
+                    Remove {source.name}? This permanently deletes its imported
+                    playlists, guide data, and edits, and revokes any output
+                    URLs that include it.
+                  </p>
+                  <div>
+                    <button
+                      className="danger-button compact"
+                      type="button"
+                      disabled={removingSourceId !== null}
+                      onClick={() => void removeSource(source)}
+                    >
+                      Remove permanently
+                    </button>
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      disabled={removingSourceId !== null}
+                      onClick={() => setConfirmingRemoval(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </article>
           ))}
         </div>
@@ -2462,6 +2517,15 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                                   <span className="output-group-channel-position">
                                     {channelIndex + 1}
                                   </span>
+                                  <ChannelLogo
+                                    url={
+                                      channel.customLogoUrl ??
+                                      channel.providerLogoUrl
+                                    }
+                                    name={
+                                      channel.customName ?? channel.providerName
+                                    }
+                                  />
                                   <div>
                                     <strong>
                                       {channel.customName ??
@@ -3007,6 +3071,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         checked={selectedChannelIds.includes(channel.id)}
                         onChange={() => toggleChannelSelection(channel.id)}
                       />
+                      <ChannelLogo
+                        url={channel.customLogoUrl ?? channel.providerLogoUrl}
+                        name={channel.customName ?? channel.providerName}
+                      />
                       <div className="channel-summary">
                         <strong>
                           {channel.customName ?? channel.providerName}
@@ -3293,8 +3361,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           </p>
         </div>
       ) : null}
-
-      {error ? <p className="message error">{error}</p> : null}
     </section>
   );
 }

@@ -84,6 +84,10 @@ function repository(): SourceRepository {
     })),
     resolveChannelMatch: vi.fn(async () => null),
     unlockChannelMatch: vi.fn(async () => null),
+    getSystemStatus: vi.fn(async () => ({
+      sources: [],
+      outputProfileCount: 0,
+    })),
     getEpgMappingReview: vi.fn(async () => ({
       mappings: [],
       matchedCount: 0,

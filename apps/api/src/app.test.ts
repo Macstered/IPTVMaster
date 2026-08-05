@@ -840,6 +840,40 @@ class MemorySourceRepository implements SourceRepository {
     return { updatedCount };
   }
 
+  async getSystemStatus() {
+    return {
+      sources: this.sources.map((source) => {
+        const channels = this.channels.filter(
+          (channel) => channel.sourceId === source.id,
+        );
+        return {
+          sourceId: source.id,
+          name: source.name,
+          enabled: source.enabled,
+          channelCount: channels.length,
+          visibleChannelCount: channels.filter((channel) => channel.enabled)
+            .length,
+          groupCount: new Set(
+            channels.map(
+              (channel) => channel.customGroup ?? channel.providerGroup,
+            ),
+          ).size,
+          reviewPending: channels.filter((channel) =>
+            ['missing', 'ambiguous'].includes(channel.reconciliationStatus),
+          ).length,
+          epgMappable: channels.filter(
+            (channel) => channel.enabled && !channel.epgExcluded,
+          ).length,
+          epgMapped: channels.filter((channel) =>
+            this.epgMappings.has(channel.id),
+          ).length,
+          epgExcluded: channels.filter((channel) => channel.epgExcluded).length,
+        };
+      }),
+      outputProfileCount: this.outputProfile ? 1 : 0,
+    };
+  }
+
   async getReconciliationReview(
     sourceId: string,
     search: string | undefined,

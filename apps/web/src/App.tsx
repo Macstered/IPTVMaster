@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useState } from 'react';
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 
 import {
   IconChevronDown,
@@ -8,9 +8,7 @@ import {
   IconHistory,
   IconHome,
   IconPlay,
-  IconRefresh,
   IconRows,
-  IconTv,
 } from './icons.js';
 
 import {
@@ -18,6 +16,11 @@ import {
   type LineupView,
   type WorkspaceView,
 } from './SourceSetup.js';
+import { TOAST_EVENT, type ToastDetail } from './toast.js';
+import {
+  OverviewStatus,
+  type SystemStatus,
+} from './workspaces/OverviewStatus.js';
 
 interface PreviewResult {
   originalName: string;
@@ -107,6 +110,40 @@ function displayInstant(value: string | undefined, timeZone: string): string {
   }).format(new Date(value));
 }
 
+interface ActiveToast extends ToastDetail {
+  id: number;
+}
+
+let toastSequence = 0;
+
+function ToastRegion() {
+  const [toasts, setToasts] = useState<ActiveToast[]>([]);
+  useEffect(() => {
+    function onToast(event: Event) {
+      const detail = (event as CustomEvent<ToastDetail>).detail;
+      const id = ++toastSequence;
+      setToasts((current) => [...current, { ...detail, id }]);
+      window.setTimeout(
+        () => {
+          setToasts((current) => current.filter((toast) => toast.id !== id));
+        },
+        detail.kind === 'error' ? 9000 : 4500,
+      );
+    }
+    window.addEventListener(TOAST_EVENT, onToast);
+    return () => window.removeEventListener(TOAST_EVENT, onToast);
+  }, []);
+  return (
+    <div className="toast-region" role="status" aria-live="polite">
+      {toasts.map((toast) => (
+        <div className={`toast ${toast.kind}`} key={toast.id}>
+          {toast.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 interface AppProps {
   authUsername?: string;
   onLogout?: () => void;
@@ -121,6 +158,39 @@ export function App({ authUsername, onLogout }: AppProps) {
   const [result, setResult] = useState<PreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function loadStatus() {
+      try {
+        const response = await fetch('/api/v1/system/status');
+        if (!response.ok) return;
+        const payload = (await response.json()) as SystemStatus;
+        if (active) setSystemStatus(payload);
+      } catch {
+        // Status polling is advisory; the workspaces surface real errors.
+      }
+    }
+    void loadStatus();
+    const handle = window.setInterval(() => void loadStatus(), 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(handle);
+    };
+  }, [workspace]);
+
+  const reviewPendingTotal =
+    systemStatus?.sources.reduce(
+      (total, source) => total + source.reviewPending,
+      0,
+    ) ?? 0;
+  const epgPendingTotal =
+    systemStatus?.sources.reduce(
+      (total, source) =>
+        total + Math.max(source.epgMappable - source.epgMapped, 0),
+      0,
+    ) ?? 0;
   const activeWorkspace =
     workspace === 'lineup'
       ? { ...workspaceDetails.lineup, ...lineupDetails[lineupView] }
@@ -172,6 +242,7 @@ export function App({ authUsername, onLogout }: AppProps) {
 
   return (
     <div className="shell">
+      <ToastRegion />
       <aside className="sidebar">
         <button
           className="brand"
@@ -211,6 +282,14 @@ export function App({ authUsername, onLogout }: AppProps) {
                   >
                     <span aria-hidden="true">{details.icon}</span>
                     {details.label}
+                    {reviewPendingTotal > 0 ? (
+                      <span
+                        className="nav-badge"
+                        title={`${reviewPendingTotal} provider changes to review`}
+                      >
+                        {reviewPendingTotal}
+                      </span>
+                    ) : null}
                     <span className="nav-chevron" aria-hidden="true">
                       {lineupMenuOpen ? <IconChevronUp /> : <IconChevronDown />}
                     </span>
@@ -252,6 +331,14 @@ export function App({ authUsername, onLogout }: AppProps) {
               >
                 <span aria-hidden="true">{details.icon}</span>
                 {details.label}
+                {item === 'epg' && epgPendingTotal > 0 ? (
+                  <span
+                    className="nav-badge"
+                    title={`${epgPendingTotal} channels without EPG`}
+                  >
+                    {epgPendingTotal}
+                  </span>
+                ) : null}
               </button>
             );
           })}
@@ -274,7 +361,6 @@ export function App({ authUsername, onLogout }: AppProps) {
       <main id="top" className={`workspace workspace-${workspace}`}>
         <header>
           <div>
-            <p className="eyebrow">LOCAL PLAYLIST CONTROL</p>
             <h1>{activeWorkspace.title}</h1>
             <p className="subtitle">{activeWorkspace.subtitle}</p>
           </div>
@@ -282,36 +368,11 @@ export function App({ authUsername, onLogout }: AppProps) {
         </header>
 
         {workspace === 'overview' ? (
-          <section className="metric-grid" aria-label="IPTVMaster workflow">
-            <article className="metric">
-              <span className="metric-icon blue">
-                <IconRefresh />
-              </span>
-              <div>
-                <small>SOURCES</small>
-                <strong>Automatic refresh</strong>
-                <p>Encrypted provider connections</p>
-              </div>
-            </article>
-            <article className="metric">
-              <span className="metric-icon green">+1</span>
-              <div>
-                <small>TIMEZONE RULE</small>
-                <strong>Stockholm → Helsinki</strong>
-                <p>Applied only to live-event groups</p>
-              </div>
-            </article>
-            <article className="metric">
-              <span className="metric-icon amber">
-                <IconTv />
-              </span>
-              <div>
-                <small>OUTPUT</small>
-                <strong>M3U + XMLTV</strong>
-                <p>Private URLs for TiviMate</p>
-              </div>
-            </article>
-          </section>
+          <OverviewStatus
+            status={systemStatus}
+            onOpenLineup={() => openLineup('channels')}
+            onOpenEpg={() => openWorkspace('epg')}
+          />
         ) : null}
 
         <SourceSetup workspace={workspace} lineupView={lineupView} />
