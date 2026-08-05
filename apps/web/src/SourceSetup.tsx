@@ -132,6 +132,16 @@ interface ChannelListPage {
   offset: number;
 }
 
+interface PermanentGroupSummary {
+  providerGroup: string;
+  channelCount: number;
+  enabledCount: number;
+  hiddenCount: number;
+  firstSortOrder: number;
+  outputGroupStatus: 'provider' | 'custom' | 'mixed';
+  outputGroupName?: string;
+}
+
 interface ChannelDraft {
   customName: string;
   customGroup: string;
@@ -287,7 +297,6 @@ export function SourceSetup() {
   );
   const [channels, setChannels] = useState<ChannelSummary[]>([]);
   const [channelTotal, setChannelTotal] = useState(0);
-  const [channelSearch, setChannelSearch] = useState('');
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [savingChannel, setSavingChannel] = useState<string | null>(null);
   const [editingChannel, setEditingChannel] = useState<string | null>(null);
@@ -300,6 +309,23 @@ export function SourceSetup() {
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
   const [bulkGroup, setBulkGroup] = useState('');
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [permanentGroups, setPermanentGroups] = useState<
+    PermanentGroupSummary[]
+  >([]);
+  const [permanentGroupFilter, setPermanentGroupFilter] = useState('');
+  const [expandedPermanentGroup, setExpandedPermanentGroup] = useState<
+    string | null
+  >(null);
+  const [loadingPermanentGroups, setLoadingPermanentGroups] = useState(false);
+  const [savingPermanentGroup, setSavingPermanentGroup] = useState<
+    string | null
+  >(null);
+  const [permanentGroupNames, setPermanentGroupNames] = useState<
+    Record<string, string>
+  >({});
+  const [permanentGroupOrders, setPermanentGroupOrders] = useState<
+    Record<string, string>
+  >({});
   const [review, setReview] = useState<ReconciliationReview | null>(null);
   const [reviewMatches, setReviewMatches] = useState<Record<string, string>>(
     {},
@@ -336,11 +362,11 @@ export function SourceSetup() {
     setGroups(payload.groups);
   }
 
-  async function loadChannels(sourceId: string, search = '') {
+  async function loadChannels(sourceId: string, group?: string) {
     setLoadingChannels(true);
     try {
       const parameters = new URLSearchParams({ limit: '100' });
-      if (search.trim()) parameters.set('search', search.trim());
+      if (group !== undefined) parameters.set('group', group);
       const response = await fetch(
         `/api/v1/sources/${sourceId}/channels?${parameters.toString()}`,
       );
@@ -351,6 +377,29 @@ export function SourceSetup() {
     } finally {
       setLoadingChannels(false);
     }
+  }
+
+  async function loadPermanentGroups(sourceId: string) {
+    setLoadingPermanentGroups(true);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${sourceId}/permanent-groups`,
+      );
+      const payload = await readJson<{ groups: PermanentGroupSummary[] }>(
+        response,
+      );
+      setPermanentGroups(payload.groups);
+    } finally {
+      setLoadingPermanentGroups(false);
+    }
+  }
+
+  async function refreshPermanentWorkspace(sourceId: string) {
+    const updates: Promise<void>[] = [loadPermanentGroups(sourceId)];
+    if (expandedPermanentGroup !== null) {
+      updates.push(loadChannels(sourceId, expandedPermanentGroup));
+    }
+    await Promise.all(updates);
   }
 
   async function loadReconciliationReview(sourceId: string, search = '') {
@@ -437,7 +486,7 @@ export function SourceSetup() {
             if (firstSource) {
               await Promise.all([
                 loadGroups(firstSource.id),
-                loadChannels(firstSource.id),
+                loadPermanentGroups(firstSource.id),
                 loadReconciliationReview(firstSource.id),
                 loadSourceHistory(firstSource.id),
                 loadEventReview(firstSource.id),
@@ -502,8 +551,8 @@ export function SourceSetup() {
       setImportSummary(payload.summary);
       await Promise.all([
         loadGroups(source.id),
-        loadChannels(source.id, channelSearch),
-        loadReconciliationReview(source.id, channelSearch),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
         loadEventReview(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
@@ -577,8 +626,8 @@ export function SourceSetup() {
         ),
       );
       await Promise.all([
-        loadChannels(source.id, channelSearch),
-        loadReconciliationReview(source.id, channelSearch),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
         loadEventReview(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
@@ -693,7 +742,10 @@ export function SourceSetup() {
           candidate.id === payload.channel.id ? payload.channel : candidate,
         ),
       );
-      await loadEpgMappingReview(source.id, epgMappingSearch);
+      await Promise.all([
+        loadPermanentGroups(source.id),
+        loadEpgMappingReview(source.id, epgMappingSearch),
+      ]);
       return payload.channel;
     } catch (caught) {
       setError(
@@ -721,18 +773,61 @@ export function SourceSetup() {
     if (updated) setEditingChannel(null);
   }
 
-  async function searchChannels(event: FormEvent) {
-    event.preventDefault();
-    if (!primarySource) return;
+  async function togglePermanentGroup(
+    source: SafeSource,
+    providerGroup: string,
+  ) {
+    if (expandedPermanentGroup === providerGroup) {
+      setExpandedPermanentGroup(null);
+      setChannels([]);
+      setChannelTotal(0);
+      setSelectedChannelIds([]);
+      setEditingChannel(null);
+      return;
+    }
+    setExpandedPermanentGroup(providerGroup);
+    setEditingChannel(null);
     try {
+      await loadChannels(source.id, providerGroup);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not load channels for this group',
+      );
+    }
+  }
+
+  async function updatePermanentGroup(
+    source: SafeSource,
+    group: PermanentGroupSummary,
+    update: Record<string, unknown>,
+  ) {
+    setSavingPermanentGroup(group.providerGroup);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/permanent-groups`,
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ groupName: group.providerGroup, update }),
+        },
+      );
+      await readJson<{ updatedCount: number }>(response);
       await Promise.all([
-        loadChannels(primarySource.id, channelSearch),
-        loadReconciliationReview(primarySource.id, channelSearch),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
+        loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
     } catch (caught) {
       setError(
-        caught instanceof Error ? caught.message : 'Could not load channels',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not update permanent group',
       );
+    } finally {
+      setSavingPermanentGroup(null);
     }
   }
 
@@ -767,8 +862,8 @@ export function SourceSetup() {
       });
       await readJson<{ updatedCount: number }>(response);
       await Promise.all([
-        loadChannels(source.id, channelSearch),
-        loadReconciliationReview(source.id, channelSearch),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
     } catch (caught) {
@@ -803,8 +898,8 @@ export function SourceSetup() {
       );
       await readJson<{ channel: ChannelSummary }>(response);
       await Promise.all([
-        loadChannels(source.id, channelSearch),
-        loadReconciliationReview(source.id, channelSearch),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
@@ -941,8 +1036,8 @@ export function SourceSetup() {
       await readJson<{ snapshot: SnapshotHistoryItem }>(response);
       await Promise.all([
         loadGroups(source.id),
-        loadChannels(source.id, channelSearch),
-        loadReconciliationReview(source.id, channelSearch),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
@@ -1019,6 +1114,21 @@ export function SourceSetup() {
     )
     .slice(0, 50);
   const primarySource = sources[0];
+  const normalizedPermanentGroupFilter = permanentGroupFilter
+    .trim()
+    .toLocaleLowerCase();
+  const visiblePermanentGroups = permanentGroups.filter((group) =>
+    normalizedPermanentGroupFilter
+      ? [group.providerGroup, group.outputGroupName ?? '']
+          .join(' ')
+          .toLocaleLowerCase()
+          .includes(normalizedPermanentGroupFilter)
+      : true,
+  );
+  const permanentChannelCount = permanentGroups.reduce(
+    (total, group) => total + group.channelCount,
+    0,
+  );
   const activeEventReview = eventReview?.groups.find(
     (group) => group.groupName === selectedEventGroup,
   );
@@ -1313,7 +1423,8 @@ export function SourceSetup() {
           </div>
           <p className="secret-note">
             Event groups receive Swedish-to-Finnish time conversion and
-            placeholder filtering. Ordinary TV groups remain unchanged.
+            placeholder filtering. Search a provider group name to make it an
+            event; permanent TV groups are managed below.
           </p>
           <div className="group-list">
             {visibleGroups.map((group) => (
@@ -1770,33 +1881,212 @@ export function SourceSetup() {
           <div className="channel-editor" id="channels">
             <div className="subsection-heading channel-heading">
               <div>
-                <small>PERMANENT CHANNELS</small>
-                <strong>Edit the TiviMate lineup</strong>
+                <small>PERMANENT GROUPS</small>
+                <strong>Build the TiviMate lineup by group</strong>
               </div>
               <span className="channel-count">
-                {channelTotal.toLocaleString()}{' '}
-                {channelTotal === 1 ? 'channel' : 'channels'}
+                {permanentGroups.length.toLocaleString()}{' '}
+                {permanentGroups.length === 1 ? 'group' : 'groups'} ·{' '}
+                {permanentChannelCount.toLocaleString()} channels
               </span>
             </div>
             <p className="secret-note">
-              Overrides survive provider refreshes. Event groups are excluded
-              from this list and keep their automatic daily handling.
+              Expand a provider group to manage its channels. Group-wide changes
+              affect every current channel in that group; channel edits remain
+              available inside it. Event groups keep their separate automatic
+              daily handling. Setting a group order makes its channels
+              consecutive from that number in the output.
             </p>
-            <form className="channel-search" onSubmit={searchChannels}>
+            <div className="channel-search">
               <input
-                aria-label="Search permanent channels"
-                placeholder="Search name, group, or TVG ID"
-                value={channelSearch}
-                onChange={(event) => setChannelSearch(event.target.value)}
+                aria-label="Filter permanent groups"
+                placeholder="Filter provider or output groups"
+                value={permanentGroupFilter}
+                onChange={(event) =>
+                  setPermanentGroupFilter(event.target.value)
+                }
               />
-              <button
-                className="secondary-button compact"
-                type="submit"
-                disabled={loadingChannels}
-              >
-                {loadingChannels ? 'Loading…' : 'Search'}
-              </button>
-            </form>
+              <small>
+                {visiblePermanentGroups.length.toLocaleString()} shown
+              </small>
+            </div>
+
+            <div className="permanent-group-list" aria-live="polite">
+              {visiblePermanentGroups.map((group) => {
+                const isExpanded =
+                  expandedPermanentGroup === group.providerGroup;
+                const customGroupValue =
+                  permanentGroupNames[group.providerGroup] ??
+                  (group.outputGroupStatus === 'custom'
+                    ? (group.outputGroupName ?? '')
+                    : '');
+                const orderValue =
+                  permanentGroupOrders[group.providerGroup] ??
+                  String(group.firstSortOrder);
+                const outputLabel =
+                  group.outputGroupStatus === 'mixed'
+                    ? 'Mixed output groups'
+                    : `Output: ${
+                        group.outputGroupName ??
+                        (group.providerGroup || '(Ungrouped)')
+                      }`;
+                const isSaving = savingPermanentGroup === group.providerGroup;
+                return (
+                  <article
+                    className={`permanent-group ${
+                      group.hiddenCount === group.channelCount ? 'hidden' : ''
+                    }`}
+                    key={group.providerGroup}
+                  >
+                    <button
+                      className="permanent-group-toggle"
+                      type="button"
+                      aria-expanded={isExpanded}
+                      disabled={isSaving}
+                      onClick={() =>
+                        void togglePermanentGroup(
+                          primarySource,
+                          group.providerGroup,
+                        )
+                      }
+                    >
+                      <span className="permanent-group-title">
+                        <strong>{group.providerGroup || '(Ungrouped)'}</strong>
+                        <small>
+                          {group.enabledCount.toLocaleString()} shown ·{' '}
+                          {group.hiddenCount.toLocaleString()} hidden ·{' '}
+                          {outputLabel}
+                        </small>
+                      </span>
+                      <span className="permanent-group-expand">
+                        {isExpanded ? 'Collapse' : 'Expand'}
+                      </span>
+                    </button>
+                    <div className="permanent-group-actions">
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        disabled={
+                          isSaving || group.enabledCount === group.channelCount
+                        }
+                        onClick={() =>
+                          void updatePermanentGroup(primarySource, group, {
+                            enabled: true,
+                          })
+                        }
+                      >
+                        Show all
+                      </button>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        disabled={
+                          isSaving || group.hiddenCount === group.channelCount
+                        }
+                        onClick={() =>
+                          void updatePermanentGroup(primarySource, group, {
+                            enabled: false,
+                          })
+                        }
+                      >
+                        Hide all
+                      </button>
+                      <form
+                        className="permanent-group-name-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          if (!customGroupValue.trim()) return;
+                          void updatePermanentGroup(primarySource, group, {
+                            customGroup: customGroupValue.trim(),
+                          });
+                        }}
+                      >
+                        <input
+                          aria-label={`Output group for ${group.providerGroup}`}
+                          placeholder="Move all to output group"
+                          value={customGroupValue}
+                          onChange={(event) =>
+                            setPermanentGroupNames((current) => ({
+                              ...current,
+                              [group.providerGroup]: event.target.value,
+                            }))
+                          }
+                        />
+                        <button
+                          className="secondary-button compact"
+                          type="submit"
+                          disabled={isSaving || !customGroupValue.trim()}
+                        >
+                          Move all
+                        </button>
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          disabled={
+                            isSaving || group.outputGroupStatus === 'provider'
+                          }
+                          onClick={() => {
+                            setPermanentGroupNames((current) => ({
+                              ...current,
+                              [group.providerGroup]: '',
+                            }));
+                            void updatePermanentGroup(primarySource, group, {
+                              customGroup: null,
+                            });
+                          }}
+                        >
+                          Reset
+                        </button>
+                      </form>
+                      <form
+                        className="permanent-group-order-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          const nextOrder = Number(orderValue);
+                          if (!Number.isInteger(nextOrder) || nextOrder < 0) {
+                            setError(
+                              'Group order must be a non-negative integer',
+                            );
+                            return;
+                          }
+                          void updatePermanentGroup(primarySource, group, {
+                            startSortOrder: nextOrder,
+                          });
+                        }}
+                      >
+                        <input
+                          aria-label={`First channel order for ${group.providerGroup}`}
+                          type="number"
+                          min="0"
+                          step="1"
+                          placeholder="First order"
+                          value={orderValue}
+                          onChange={(event) =>
+                            setPermanentGroupOrders((current) => ({
+                              ...current,
+                              [group.providerGroup]: event.target.value,
+                            }))
+                          }
+                        />
+                        <button
+                          className="secondary-button compact"
+                          type="submit"
+                          disabled={isSaving}
+                        >
+                          Set order
+                        </button>
+                      </form>
+                    </div>
+                  </article>
+                );
+              })}
+              {!loadingPermanentGroups &&
+              visiblePermanentGroups.length === 0 ? (
+                <p className="empty-groups">
+                  Import a playlist or change the group filter.
+                </p>
+              ) : null}
+            </div>
 
             {review &&
             review.ambiguousCount + review.missingCount + review.newCount >
@@ -1894,235 +2184,259 @@ export function SourceSetup() {
               </section>
             ) : null}
 
-            {channels.length > 0 ? (
-              <div className="bulk-toolbar">
-                <label className="bulk-select-all">
-                  <input
-                    type="checkbox"
-                    checked={
-                      channels.length > 0 &&
-                      selectedChannelIds.length === channels.length
-                    }
-                    onChange={toggleAllVisibleChannels}
-                  />
-                  Select visible
-                </label>
-                <strong>{selectedChannelIds.length} selected</strong>
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  disabled={bulkSaving || selectedChannelIds.length === 0}
-                  onClick={() =>
-                    void applyBulkChannelUpdate(primarySource, {
-                      enabled: true,
-                    })
-                  }
-                >
-                  Show
-                </button>
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  disabled={bulkSaving || selectedChannelIds.length === 0}
-                  onClick={() =>
-                    void applyBulkChannelUpdate(primarySource, {
-                      enabled: false,
-                    })
-                  }
-                >
-                  Hide
-                </button>
-                <form
-                  className="bulk-group-form"
-                  onSubmit={(event) =>
-                    void applyBulkGroup(event, primarySource)
-                  }
-                >
-                  <input
-                    aria-label="Bulk output group"
-                    placeholder="Output group"
-                    value={bulkGroup}
-                    onChange={(event) => setBulkGroup(event.target.value)}
-                  />
-                  <button
-                    className="secondary-button compact"
-                    type="submit"
-                    disabled={
-                      bulkSaving ||
-                      selectedChannelIds.length === 0 ||
-                      !bulkGroup.trim()
-                    }
-                  >
-                    Set group
-                  </button>
-                  <button
-                    className="secondary-button compact"
-                    type="button"
-                    disabled={bulkSaving || selectedChannelIds.length === 0}
-                    onClick={() =>
-                      void applyBulkChannelUpdate(primarySource, {
-                        customGroup: null,
-                      })
-                    }
-                  >
-                    Reset group
-                  </button>
-                </form>
-              </div>
-            ) : null}
-            <div className="channel-list" aria-live="polite">
-              {channels.map((channel) => (
-                <article
-                  className={`channel-row ${channel.enabled ? '' : 'disabled'}`}
-                  key={channel.id}
-                >
-                  <input
-                    className="channel-select"
-                    type="checkbox"
-                    aria-label={`Select ${channel.customName ?? channel.providerName}`}
-                    checked={selectedChannelIds.includes(channel.id)}
-                    onChange={() => toggleChannelSelection(channel.id)}
-                  />
-                  <div className="channel-summary">
-                    <strong>
-                      {channel.customName ?? channel.providerName}
-                    </strong>
-                    <small>
-                      {(channel.customGroup ?? channel.providerGroup) ||
-                        '(Ungrouped)'}
-                      {channel.tvgId ? ` · ${channel.tvgId}` : ''}
-                    </small>
-                  </div>
-                  <span
-                    className={`reconciliation-badge ${channel.reconciliationStatus}`}
-                  >
-                    {channel.reconciliationStatus}
-                  </span>
-                  <div className="channel-actions">
-                    {channel.matchLocked ? (
-                      <button
-                        className="secondary-button compact"
-                        type="button"
-                        disabled={savingChannel !== null}
-                        onClick={() =>
-                          void unlockChannelMatch(primarySource, channel)
+            {expandedPermanentGroup !== null ? (
+              <>
+                <div className="expanded-permanent-group-heading">
+                  <strong>
+                    Channels in {expandedPermanentGroup || '(Ungrouped)'}
+                  </strong>
+                  <small>
+                    {channelTotal.toLocaleString()} channel
+                    {channelTotal === 1 ? '' : 's'} in this provider group
+                  </small>
+                </div>
+                {channels.length > 0 ? (
+                  <div className="bulk-toolbar">
+                    <label className="bulk-select-all">
+                      <input
+                        type="checkbox"
+                        checked={
+                          channels.length > 0 &&
+                          selectedChannelIds.length === channels.length
                         }
-                      >
-                        Unlock match
-                      </button>
-                    ) : null}
+                        onChange={toggleAllVisibleChannels}
+                      />
+                      Select visible
+                    </label>
+                    <strong>{selectedChannelIds.length} selected</strong>
                     <button
                       className="secondary-button compact"
                       type="button"
-                      disabled={savingChannel !== null}
+                      disabled={bulkSaving || selectedChannelIds.length === 0}
                       onClick={() =>
-                        void updateChannel(primarySource, channel, {
-                          enabled: !channel.enabled,
+                        void applyBulkChannelUpdate(primarySource, {
+                          enabled: true,
                         })
                       }
                     >
-                      {savingChannel === channel.id
-                        ? 'Saving…'
-                        : channel.enabled
-                          ? 'Hide'
-                          : 'Show'}
+                      Show
                     </button>
                     <button
                       className="secondary-button compact"
                       type="button"
-                      disabled={savingChannel !== null}
+                      disabled={bulkSaving || selectedChannelIds.length === 0}
                       onClick={() =>
-                        editingChannel === channel.id
-                          ? setEditingChannel(null)
-                          : beginChannelEdit(channel)
+                        void applyBulkChannelUpdate(primarySource, {
+                          enabled: false,
+                        })
                       }
                     >
-                      {editingChannel === channel.id ? 'Cancel' : 'Edit'}
+                      Hide
                     </button>
-                  </div>
-                  {editingChannel === channel.id ? (
                     <form
-                      className="channel-edit-form"
+                      className="bulk-group-form"
                       onSubmit={(event) =>
-                        void saveChannelEdit(event, primarySource, channel)
+                        void applyBulkGroup(event, primarySource)
                       }
                     >
-                      <label>
-                        Display name
-                        <input
-                          value={channelDraft.customName}
-                          placeholder={channel.providerName}
-                          onChange={(event) =>
-                            setChannelDraft((current) => ({
-                              ...current,
-                              customName: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Output group
-                        <input
-                          value={channelDraft.customGroup}
-                          placeholder={channel.providerGroup || '(Ungrouped)'}
-                          onChange={(event) =>
-                            setChannelDraft((current) => ({
-                              ...current,
-                              customGroup: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Logo URL
-                        <input
-                          type="url"
-                          value={channelDraft.customLogoUrl}
-                          placeholder={channel.providerLogoUrl ?? 'https://…'}
-                          onChange={(event) =>
-                            setChannelDraft((current) => ({
-                              ...current,
-                              customLogoUrl: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Sort order
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={channelDraft.sortOrder}
-                          onChange={(event) =>
-                            setChannelDraft((current) => ({
-                              ...current,
-                              sortOrder: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <button type="submit" disabled={savingChannel !== null}>
-                        {savingChannel === channel.id
-                          ? 'Saving…'
-                          : 'Save channel'}
+                      <input
+                        aria-label="Bulk output group"
+                        placeholder="Output group"
+                        value={bulkGroup}
+                        onChange={(event) => setBulkGroup(event.target.value)}
+                      />
+                      <button
+                        className="secondary-button compact"
+                        type="submit"
+                        disabled={
+                          bulkSaving ||
+                          selectedChannelIds.length === 0 ||
+                          !bulkGroup.trim()
+                        }
+                      >
+                        Set group
+                      </button>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        disabled={bulkSaving || selectedChannelIds.length === 0}
+                        onClick={() =>
+                          void applyBulkChannelUpdate(primarySource, {
+                            customGroup: null,
+                          })
+                        }
+                      >
+                        Reset group
                       </button>
                     </form>
+                  </div>
+                ) : null}
+                <div className="channel-list" aria-live="polite">
+                  {channels.map((channel) => (
+                    <article
+                      className={`channel-row ${channel.enabled ? '' : 'disabled'}`}
+                      key={channel.id}
+                    >
+                      <input
+                        className="channel-select"
+                        type="checkbox"
+                        aria-label={`Select ${channel.customName ?? channel.providerName}`}
+                        checked={selectedChannelIds.includes(channel.id)}
+                        onChange={() => toggleChannelSelection(channel.id)}
+                      />
+                      <div className="channel-summary">
+                        <strong>
+                          {channel.customName ?? channel.providerName}
+                        </strong>
+                        <small>
+                          {(channel.customGroup ?? channel.providerGroup) ||
+                            '(Ungrouped)'}
+                          {channel.tvgId ? ` · ${channel.tvgId}` : ''}
+                        </small>
+                      </div>
+                      <span
+                        className={`reconciliation-badge ${channel.reconciliationStatus}`}
+                      >
+                        {channel.reconciliationStatus}
+                      </span>
+                      <div className="channel-actions">
+                        {channel.matchLocked ? (
+                          <button
+                            className="secondary-button compact"
+                            type="button"
+                            disabled={savingChannel !== null}
+                            onClick={() =>
+                              void unlockChannelMatch(primarySource, channel)
+                            }
+                          >
+                            Unlock match
+                          </button>
+                        ) : null}
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          disabled={savingChannel !== null}
+                          onClick={() =>
+                            void updateChannel(primarySource, channel, {
+                              enabled: !channel.enabled,
+                            })
+                          }
+                        >
+                          {savingChannel === channel.id
+                            ? 'Saving…'
+                            : channel.enabled
+                              ? 'Hide'
+                              : 'Show'}
+                        </button>
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          disabled={savingChannel !== null}
+                          onClick={() =>
+                            editingChannel === channel.id
+                              ? setEditingChannel(null)
+                              : beginChannelEdit(channel)
+                          }
+                        >
+                          {editingChannel === channel.id ? 'Cancel' : 'Edit'}
+                        </button>
+                      </div>
+                      {editingChannel === channel.id ? (
+                        <form
+                          className="channel-edit-form"
+                          onSubmit={(event) =>
+                            void saveChannelEdit(event, primarySource, channel)
+                          }
+                        >
+                          <label>
+                            Display name
+                            <input
+                              value={channelDraft.customName}
+                              placeholder={channel.providerName}
+                              onChange={(event) =>
+                                setChannelDraft((current) => ({
+                                  ...current,
+                                  customName: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Output group
+                            <input
+                              value={channelDraft.customGroup}
+                              placeholder={
+                                channel.providerGroup || '(Ungrouped)'
+                              }
+                              onChange={(event) =>
+                                setChannelDraft((current) => ({
+                                  ...current,
+                                  customGroup: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Logo URL
+                            <input
+                              type="url"
+                              value={channelDraft.customLogoUrl}
+                              placeholder={
+                                channel.providerLogoUrl ?? 'https://…'
+                              }
+                              onChange={(event) =>
+                                setChannelDraft((current) => ({
+                                  ...current,
+                                  customLogoUrl: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Sort order
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={channelDraft.sortOrder}
+                              onChange={(event) =>
+                                setChannelDraft((current) => ({
+                                  ...current,
+                                  sortOrder: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <button
+                            type="submit"
+                            disabled={savingChannel !== null}
+                          >
+                            {savingChannel === channel.id
+                              ? 'Saving…'
+                              : 'Save channel'}
+                          </button>
+                        </form>
+                      ) : null}
+                    </article>
+                  ))}
+                  {!loadingChannels && channels.length === 0 ? (
+                    <p className="empty-groups">
+                      Import a playlist or change the search to find channels.
+                    </p>
                   ) : null}
-                </article>
-              ))}
-              {!loadingChannels && channels.length === 0 ? (
-                <p className="empty-groups">
-                  Import a playlist or change the search to find channels.
-                </p>
-              ) : null}
-            </div>
-            {channelTotal > channels.length ? (
-              <small className="channel-limit-note">
-                Showing the first {channels.length.toLocaleString()} matches.
-                Narrow the search to edit other channels.
-              </small>
-            ) : null}
+                </div>
+                {channelTotal > channels.length ? (
+                  <small className="channel-limit-note">
+                    Showing the first {channels.length.toLocaleString()}{' '}
+                    channels in this group.
+                  </small>
+                ) : null}
+              </>
+            ) : (
+              <p className="empty-groups">
+                Expand a permanent group to edit its channels.
+              </p>
+            )}
           </div>
 
           <div className="output-setup">

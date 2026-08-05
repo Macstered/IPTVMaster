@@ -151,6 +151,20 @@ const bulkChannelUpdateSchema = z.object({
     ),
 });
 
+const permanentGroupUpdateSchema = z.object({
+  groupName: z.string().max(500),
+  update: z
+    .object({
+      enabled: z.boolean().optional(),
+      customGroup: nullableChannelText(500),
+      startSortOrder: z.number().int().min(0).max(2_147_483_647).optional(),
+    })
+    .refine(
+      (value) => Object.values(value).some((item) => item !== undefined),
+      { message: 'At least one permanent group field is required' },
+    ),
+});
+
 const reconciliationReviewSchema = z.object({
   search: z.string().trim().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -1172,6 +1186,48 @@ export async function buildApp(
     }
     return sourceRepository.listChannels(sourceId.data, filters.data);
   });
+
+  app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/permanent-groups',
+    async (request, reply) => {
+      if (!sourceRepository?.listPermanentGroups) {
+        return reply
+          .code(503)
+          .send({ error: 'Permanent group management is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      return {
+        groups: await sourceRepository.listPermanentGroups(sourceId.data),
+      };
+    },
+  );
+
+  app.patch<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/permanent-groups',
+    async (request, reply) => {
+      if (!sourceRepository?.updatePermanentGroup) {
+        return reply
+          .code(503)
+          .send({ error: 'Permanent group management is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const update = permanentGroupUpdateSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!update.success) {
+        return reply.code(400).send({ error: validationMessage(update.error) });
+      }
+      return sourceRepository.updatePermanentGroup(
+        sourceId.data,
+        update.data.groupName,
+        update.data.update,
+      );
+    },
+  );
 
   app.patch<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/channels',

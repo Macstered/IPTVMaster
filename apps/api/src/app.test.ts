@@ -19,6 +19,7 @@ import type {
   CreateSourceInput,
   CreatedOutputProfile,
   GroupSummary,
+  PermanentGroupSummary,
   ResolvedOutputProfile,
   ReconciliationCandidate,
   ReconciliationReview,
@@ -33,6 +34,7 @@ import type {
   StoredEpgSummary,
   StoredSnapshotSummary,
   UpdateChannelInput,
+  UpdatePermanentGroupInput,
 } from './source-repository.js';
 
 const applications: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -295,6 +297,92 @@ class MemorySourceRepository implements SourceRepository {
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  async listPermanentGroups(
+    sourceId: string,
+  ): Promise<PermanentGroupSummary[]> {
+    const byGroup = new Map<string, ChannelSummary[]>();
+    for (const channel of this.channels) {
+      if (channel.sourceId !== sourceId) continue;
+      const current = byGroup.get(channel.providerGroup) ?? [];
+      current.push(channel);
+      byGroup.set(channel.providerGroup, current);
+    }
+    return [...byGroup.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([providerGroup, channels]) => {
+        const customGroups = new Set(
+          channels
+            .map((channel) => channel.customGroup)
+            .filter((value): value is string => value !== undefined),
+        );
+        const hasProviderGroup = channels.some(
+          (channel) => channel.customGroup === undefined,
+        );
+        const outputGroupStatus =
+          customGroups.size === 0
+            ? 'provider'
+            : customGroups.size === 1 && !hasProviderGroup
+              ? 'custom'
+              : 'mixed';
+        const enabledCount = channels.filter(
+          (channel) => channel.enabled,
+        ).length;
+        return {
+          providerGroup,
+          channelCount: channels.length,
+          enabledCount,
+          hiddenCount: channels.length - enabledCount,
+          firstSortOrder: Math.min(
+            ...channels.map((channel) => channel.sortOrder),
+          ),
+          outputGroupStatus,
+          ...(outputGroupStatus === 'custom'
+            ? { outputGroupName: [...customGroups][0] }
+            : {}),
+        };
+      });
+  }
+
+  async updatePermanentGroup(
+    sourceId: string,
+    providerGroup: string,
+    input: UpdatePermanentGroupInput,
+  ): Promise<BulkUpdateChannelResult> {
+    const matching = this.channels
+      .filter(
+        (channel) =>
+          channel.sourceId === sourceId &&
+          channel.providerGroup === providerGroup,
+      )
+      .sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.providerName.localeCompare(right.providerName) ||
+          left.id.localeCompare(right.id),
+      );
+    const offsets = new Map(
+      matching.map((channel, index) => [channel.id, index]),
+    );
+    this.channels = this.channels.map((channel) => {
+      if (!offsets.has(channel.id)) return channel;
+      const updated = {
+        ...channel,
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+        ...(input.startSortOrder === undefined
+          ? {}
+          : {
+              sortOrder: input.startSortOrder + (offsets.get(channel.id) ?? 0),
+            }),
+      };
+      if (input.customGroup !== undefined) {
+        if (input.customGroup === null) delete updated.customGroup;
+        else updated.customGroup = input.customGroup;
+      }
+      return updated;
+    });
+    return { updatedCount: matching.length };
   }
 
   async updateChannel(
@@ -959,6 +1047,119 @@ describe('IPTVMaster API', () => {
       }),
     );
     expect(unsafeLogoResponse.statusCode).toBe(400);
+  });
+
+  it('manages permanent groups without applying event rules to them', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    repository.channels = [
+      {
+        id: '00000000-0000-4000-8000-000000000030',
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        enabled: true,
+        sortOrder: 12,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000031',
+        sourceId: source.id,
+        providerName: 'Yle TV2',
+        providerGroup: 'Finland',
+        enabled: false,
+        sortOrder: 18,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000032',
+        sourceId: source.id,
+        providerName: 'BBC World News',
+        providerGroup: 'News',
+        enabled: true,
+        sortOrder: 24,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/permanent-groups`,
+    });
+    const updateResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/permanent-groups`,
+      payload: {
+        groupName: 'Finland',
+        update: {
+          enabled: false,
+          customGroup: 'Finnish favourites',
+          startSortOrder: 100,
+        },
+      },
+    });
+    const updatedListResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/permanent-groups`,
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json().groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerGroup: 'Finland',
+          channelCount: 2,
+          enabledCount: 1,
+          hiddenCount: 1,
+          firstSortOrder: 12,
+          outputGroupStatus: 'provider',
+        }),
+      ]),
+    );
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json()).toEqual({ updatedCount: 2 });
+    expect(updatedListResponse.json().groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerGroup: 'Finland',
+          enabledCount: 0,
+          hiddenCount: 2,
+          firstSortOrder: 100,
+          outputGroupStatus: 'custom',
+          outputGroupName: 'Finnish favourites',
+        }),
+      ]),
+    );
+    expect(repository.channels).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerGroup: 'Finland',
+          enabled: false,
+          customGroup: 'Finnish favourites',
+          sortOrder: 100,
+        }),
+        expect.objectContaining({
+          providerGroup: 'Finland',
+          enabled: false,
+          customGroup: 'Finnish favourites',
+          sortOrder: 101,
+        }),
+      ]),
+    );
   });
 
   it('reviews, manually resolves, unlocks, and bulk-updates channel changes', async () => {

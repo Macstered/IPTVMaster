@@ -139,6 +139,24 @@ export interface SaveGroupPolicyInput {
   numericDateOrder?: NumericDateOrder;
 }
 
+export type PermanentGroupOutputStatus = 'provider' | 'custom' | 'mixed';
+
+export interface PermanentGroupSummary {
+  providerGroup: string;
+  channelCount: number;
+  enabledCount: number;
+  hiddenCount: number;
+  firstSortOrder: number;
+  outputGroupStatus: PermanentGroupOutputStatus;
+  outputGroupName?: string;
+}
+
+export interface UpdatePermanentGroupInput {
+  enabled?: boolean;
+  customGroup?: string | null;
+  startSortOrder?: number;
+}
+
 export type ChannelReconciliationStatus =
   'matched' | 'new' | 'missing' | 'ambiguous';
 
@@ -307,6 +325,12 @@ export interface SourceRepository {
     sourceId: string,
     filters: ChannelListFilters,
   ): Promise<ChannelListPage>;
+  listPermanentGroups?(sourceId: string): Promise<PermanentGroupSummary[]>;
+  updatePermanentGroup?(
+    sourceId: string,
+    providerGroup: string,
+    input: UpdatePermanentGroupInput,
+  ): Promise<BulkUpdateChannelResult>;
   updateChannel(
     sourceId: string,
     channelId: string,
@@ -480,6 +504,16 @@ interface GroupRow {
   numeric_date_order: NumericDateOrder;
 }
 
+interface PermanentGroupRow {
+  provider_group: string;
+  channel_count: string | number;
+  enabled_count: string | number;
+  first_sort_order: string | number;
+  custom_group_count: string | number;
+  has_provider_group: boolean;
+  custom_group_name: string | null;
+}
+
 interface OutputProfileRow {
   id: string;
   name: string;
@@ -575,6 +609,31 @@ function toGroupSummary(row: GroupRow): GroupSummary {
     sourceTimeZone: row.source_timezone,
     displayTimeZone: row.display_timezone,
     numericDateOrder: row.numeric_date_order,
+  };
+}
+
+function toPermanentGroupSummary(
+  row: PermanentGroupRow,
+): PermanentGroupSummary {
+  const customGroupCount = Number(row.custom_group_count);
+  const outputGroupStatus: PermanentGroupOutputStatus =
+    customGroupCount === 0
+      ? 'provider'
+      : customGroupCount === 1 && !row.has_provider_group
+        ? 'custom'
+        : 'mixed';
+  const channelCount = Number(row.channel_count);
+  const enabledCount = Number(row.enabled_count);
+  return {
+    providerGroup: row.provider_group,
+    channelCount,
+    enabledCount,
+    hiddenCount: channelCount - enabledCount,
+    firstSortOrder: Number(row.first_sort_order),
+    outputGroupStatus,
+    ...(outputGroupStatus === 'custom' && row.custom_group_name
+      ? { outputGroupName: row.custom_group_name }
+      : {}),
   };
 }
 
@@ -1398,6 +1457,91 @@ export class PostgresSourceRepository implements SourceRepository {
     if (!group)
       throw new Error('Saved group policy does not match a current group');
     return group;
+  }
+
+  async listPermanentGroups(
+    sourceId: string,
+  ): Promise<PermanentGroupSummary[]> {
+    const result = await this.#pool.query<PermanentGroupRow>(
+      `SELECT c.provider_group,
+              COUNT(*) AS channel_count,
+              COUNT(*) FILTER (WHERE c.enabled = TRUE) AS enabled_count,
+              MIN(c.sort_order) AS first_sort_order,
+              COUNT(DISTINCT c.custom_group) AS custom_group_count,
+              BOOL_OR(c.custom_group IS NULL) AS has_provider_group,
+              MAX(c.custom_group) FILTER (WHERE c.custom_group IS NOT NULL)
+                AS custom_group_name
+       FROM channel c
+       LEFT JOIN group_policy p
+         ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND c.current_upstream_item_id IS NOT NULL
+         AND COALESCE(p.behavior, 'permanent') = 'permanent'
+       GROUP BY c.provider_group
+       ORDER BY c.provider_group ASC`,
+      [sourceId],
+    );
+    return result.rows.map(toPermanentGroupSummary);
+  }
+
+  async updatePermanentGroup(
+    sourceId: string,
+    providerGroup: string,
+    input: UpdatePermanentGroupInput,
+  ): Promise<BulkUpdateChannelResult> {
+    const values: unknown[] = [sourceId, providerGroup];
+    const updates: string[] = [];
+    const addUpdate = (column: string, value: unknown) => {
+      values.push(value);
+      updates.push(`${column} = $${values.length}`);
+    };
+    if (input.enabled !== undefined) addUpdate('enabled', input.enabled);
+    if (input.customGroup !== undefined)
+      addUpdate('custom_group', input.customGroup);
+    if (input.startSortOrder !== undefined) {
+      values.push(input.startSortOrder);
+      updates.push(`sort_order = $${values.length} + selected.sort_offset`);
+    }
+    if (updates.length === 0) return { updatedCount: 0 };
+
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `WITH selected AS (
+           SELECT c.id,
+                  ROW_NUMBER() OVER (
+                    ORDER BY c.sort_order, c.provider_name, c.id
+                  ) - 1 AS sort_offset
+           FROM channel c
+           WHERE c.source_id = $1 AND c.provider_group = $2
+             AND c.archived_at IS NULL
+             AND c.current_upstream_item_id IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM group_policy p
+               WHERE p.source_id = c.source_id
+                 AND p.provider_group = c.provider_group
+                 AND p.behavior = 'event'
+             )
+         )
+         UPDATE channel c
+         SET ${updates.join(', ')}, updated_at = NOW()
+         FROM selected
+         WHERE c.id = selected.id`,
+        values,
+      );
+      if ((result.rowCount ?? 0) > 0) {
+        await this.#reconcileEpgMappings(client, sourceId);
+      }
+      await client.query('COMMIT');
+      return { updatedCount: result.rowCount ?? 0 };
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listChannels(
