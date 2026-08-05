@@ -1757,6 +1757,15 @@ export async function buildApp(
     return reply.code(201).send({ profile });
   });
 
+  app.get('/api/v1/output-profiles', async (_request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    return { profiles: await sourceRepository.listOutputProfiles() };
+  });
+
   app.delete<{ Params: { profileId: string } }>(
     '/api/v1/output-profiles/:profileId',
     async (request, reply) => {
@@ -1777,101 +1786,103 @@ export async function buildApp(
     },
   );
 
+  async function sendPlaylistOutput(accessToken: string, reply: FastifyReply) {
+    if (!sourceRepository || !/^[A-Za-z0-9_-]{16,128}$/.test(accessToken)) {
+      return reply.code(404).send({ error: 'Playlist not found' });
+    }
+    const profile = await sourceRepository.resolveOutputProfile(accessToken);
+    if (!profile) return reply.code(404).send({ error: 'Playlist not found' });
+
+    const sourceOutputs = await Promise.all(
+      profile.sourceIds.map(async (sourceId) => {
+        const [entries, policies] = await Promise.all([
+          sourceRepository.getLatestPlaylistEntries(sourceId),
+          sourceRepository.listOutputGroupPolicies(
+            sourceId,
+            currentDateInZone('Europe/Stockholm'),
+          ),
+        ]);
+        return { sourceId, entries, policies };
+      }),
+    );
+    const readyOutputs = sourceOutputs.filter(
+      (sourceOutput) => sourceOutput.entries.length > 0,
+    );
+    if (readyOutputs.length === 0) {
+      return reply.code(503).send({ error: 'Playlist is not ready' });
+    }
+    const isCombined = profile.sourceIds.length > 1;
+    const entries = readyOutputs.flatMap((sourceOutput) => {
+      const output = applyOutputGroupPolicies(
+        sourceOutput.entries,
+        sourceOutput.policies,
+      );
+      return isCombined
+        ? namespaceGuideEntries(sourceOutput.sourceId, output.entries)
+        : output.entries;
+    });
+    return reply
+      .type('audio/x-mpegurl; charset=utf-8')
+      .header('cache-control', 'private, no-store')
+      .send(serializeM3u(entries));
+  }
+
+  async function sendEpgOutput(accessToken: string, reply: FastifyReply) {
+    if (!sourceRepository || !/^[A-Za-z0-9_-]{16,128}$/.test(accessToken)) {
+      return reply.code(404).send({ error: 'EPG not found' });
+    }
+    const profile = await sourceRepository.resolveOutputProfile(accessToken);
+    if (!profile) return reply.code(404).send({ error: 'EPG not found' });
+    const sourceGuides = await Promise.all(
+      profile.sourceIds.map(async (sourceId) => ({
+        sourceId,
+        guide: await sourceRepository.getLatestEpg(sourceId),
+      })),
+    );
+    const readyGuides = sourceGuides.filter(
+      (sourceGuide) => sourceGuide.guide.channels.length > 0,
+    );
+    if (readyGuides.length === 0) {
+      return reply.code(503).send({ error: 'EPG is not ready' });
+    }
+    const isCombined = profile.sourceIds.length > 1;
+    const guide = readyGuides.reduce<{
+      channels: XmltvChannel[];
+      programmes: XmltvProgramme[];
+    }>(
+      (combined, sourceGuide) => {
+        const next = isCombined
+          ? namespaceGuide(sourceGuide.sourceId, sourceGuide.guide)
+          : sourceGuide.guide;
+        combined.channels.push(...next.channels);
+        combined.programmes.push(...next.programmes);
+        return combined;
+      },
+      { channels: [], programmes: [] },
+    );
+    return reply
+      .type('application/xml; charset=utf-8')
+      .header('cache-control', 'private, no-store')
+      .send(serializeXmltv(guide.channels, guide.programmes));
+  }
+
+  app.get<{ Params: { accessToken: string } }>(
+    '/m/:accessToken',
+    async (request, reply) =>
+      sendPlaylistOutput(request.params.accessToken, reply),
+  );
+  app.get<{ Params: { accessToken: string } }>(
+    '/e/:accessToken',
+    async (request, reply) => sendEpgOutput(request.params.accessToken, reply),
+  );
   app.get<{ Params: { accessToken: string } }>(
     '/p/:accessToken/playlist.m3u',
-    async (request, reply) => {
-      if (
-        !sourceRepository ||
-        !/^[A-Za-z0-9_-]{24,128}$/.test(request.params.accessToken)
-      ) {
-        return reply.code(404).send({ error: 'Playlist not found' });
-      }
-      const profile = await sourceRepository.resolveOutputProfile(
-        request.params.accessToken,
-      );
-      if (!profile)
-        return reply.code(404).send({ error: 'Playlist not found' });
-
-      const sourceOutputs = await Promise.all(
-        profile.sourceIds.map(async (sourceId) => {
-          const [entries, policies] = await Promise.all([
-            sourceRepository.getLatestPlaylistEntries(sourceId),
-            sourceRepository.listOutputGroupPolicies(
-              sourceId,
-              currentDateInZone('Europe/Stockholm'),
-            ),
-          ]);
-          return { sourceId, entries, policies };
-        }),
-      );
-      const readyOutputs = sourceOutputs.filter(
-        (sourceOutput) => sourceOutput.entries.length > 0,
-      );
-      if (readyOutputs.length === 0) {
-        return reply.code(503).send({ error: 'Playlist is not ready' });
-      }
-      const isCombined = profile.sourceIds.length > 1;
-      const entries = readyOutputs.flatMap((sourceOutput) => {
-        const output = applyOutputGroupPolicies(
-          sourceOutput.entries,
-          sourceOutput.policies,
-        );
-        return isCombined
-          ? namespaceGuideEntries(sourceOutput.sourceId, output.entries)
-          : output.entries;
-      });
-      return reply
-        .type('audio/x-mpegurl; charset=utf-8')
-        .header('cache-control', 'private, no-store')
-        .send(serializeM3u(entries));
-    },
+    async (request, reply) =>
+      sendPlaylistOutput(request.params.accessToken, reply),
   );
-
   app.get<{ Params: { accessToken: string } }>(
     '/p/:accessToken/epg.xml',
-    async (request, reply) => {
-      if (
-        !sourceRepository ||
-        !/^[A-Za-z0-9_-]{24,128}$/.test(request.params.accessToken)
-      ) {
-        return reply.code(404).send({ error: 'EPG not found' });
-      }
-      const profile = await sourceRepository.resolveOutputProfile(
-        request.params.accessToken,
-      );
-      if (!profile) return reply.code(404).send({ error: 'EPG not found' });
-      const sourceGuides = await Promise.all(
-        profile.sourceIds.map(async (sourceId) => ({
-          sourceId,
-          guide: await sourceRepository.getLatestEpg(sourceId),
-        })),
-      );
-      const readyGuides = sourceGuides.filter(
-        (sourceGuide) => sourceGuide.guide.channels.length > 0,
-      );
-      if (readyGuides.length === 0) {
-        return reply.code(503).send({ error: 'EPG is not ready' });
-      }
-      const isCombined = profile.sourceIds.length > 1;
-      const guide = readyGuides.reduce<{
-        channels: XmltvChannel[];
-        programmes: XmltvProgramme[];
-      }>(
-        (combined, sourceGuide) => {
-          const next = isCombined
-            ? namespaceGuide(sourceGuide.sourceId, sourceGuide.guide)
-            : sourceGuide.guide;
-          combined.channels.push(...next.channels);
-          combined.programmes.push(...next.programmes);
-          return combined;
-        },
-        { channels: [], programmes: [] },
-      );
-      return reply
-        .type('application/xml; charset=utf-8')
-        .header('cache-control', 'private, no-store')
-        .send(serializeXmltv(guide.channels, guide.programmes));
-    },
+    async (request, reply) => sendEpgOutput(request.params.accessToken, reply),
   );
 
   app.post('/api/v1/event-time/preview', async (request, reply) => {

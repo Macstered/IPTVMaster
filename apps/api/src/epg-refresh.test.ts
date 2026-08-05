@@ -102,6 +102,7 @@ function repository(): SourceRepository {
     unlockEpgMapping: vi.fn(async () => false),
     listOutputGroupPolicies: vi.fn(async () => []),
     createOutputProfile: vi.fn(),
+    listOutputProfiles: vi.fn(async () => []),
     resolveOutputProfile: vi.fn(async () => null),
     revokeOutputProfile: vi.fn(async () => false),
   };

@@ -1505,6 +1505,29 @@ h2 {
   gap: 7px;
   margin-top: 12px;
 }
+.output-profile-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+.output-profile-list .output-url {
+  margin-top: 0;
+  padding: 14px;
+  border: 1px solid #1c4058;
+  border-radius: 10px;
+  background: #091827;
+}
+.output-url-heading {
+  display: grid;
+  gap: 3px;
+}
+.output-url-heading strong {
+  color: #e8f4fd;
+  font-size: 12px;
+}
+.output-url-heading small {
+  margin-top: 0;
+}
 .output-url label {
   grid-row: auto;
 }
@@ -1517,6 +1540,12 @@ h2 {
 .output-url small {
   color: #688198;
   font-size: 10px;
+}
+.legacy-output-note {
+  margin: 0;
+  color: #c9ac6d;
+  font-size: 11px;
+  line-height: 1.5;
 }
 .revoke-button {
   justify-self: start;

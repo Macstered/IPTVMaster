@@ -242,6 +242,15 @@ interface CreatedOutputProfile {
   epgPath: string;
 }
 
+interface ActiveOutputProfile {
+  id: string;
+  name: string;
+  sourceIds: string[];
+  createdAt: string;
+  recoverable: boolean;
+  accessToken?: string;
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const value: unknown = await response.json();
   if (!response.ok) {
@@ -375,10 +384,9 @@ export function SourceSetup() {
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputSourceIds, setOutputSourceIds] = useState<string[]>([]);
   const [outputName, setOutputName] = useState('TiviMate');
-  const [outputProfile, setOutputProfile] =
-    useState<CreatedOutputProfile | null>(null);
-  const [playlistOutputUrl, setPlaylistOutputUrl] = useState('');
-  const [epgOutputUrl, setEpgOutputUrl] = useState('');
+  const [outputProfiles, setOutputProfiles] = useState<ActiveOutputProfile[]>(
+    [],
+  );
   const [collapsedSections, setCollapsedSections] = useState<
     Record<string, boolean>
   >({});
@@ -504,6 +512,14 @@ export function SourceSetup() {
     setEpgGuideChannels(await readJson<EpgGuideChannelPage>(response));
   }
 
+  async function loadOutputProfiles() {
+    const response = await fetch('/api/v1/output-profiles');
+    const payload = await readJson<{ profiles: ActiveOutputProfile[] }>(
+      response,
+    );
+    setOutputProfiles(payload.profiles);
+  }
+
   useEffect(() => {
     let active = true;
     async function load() {
@@ -521,10 +537,11 @@ export function SourceSetup() {
           if (active) {
             setSources(payload.sources);
             const firstSource = payload.sources[0];
+            const initialLoads: Promise<void>[] = [loadOutputProfiles()];
             if (firstSource) {
               setSelectedSourceId(firstSource.id);
               setOutputSourceIds([firstSource.id]);
-              await Promise.all([
+              initialLoads.push(
                 loadGroups(firstSource.id),
                 loadPermanentGroups(firstSource.id),
                 loadCustomCategories(firstSource.id),
@@ -533,8 +550,9 @@ export function SourceSetup() {
                 loadEventReview(firstSource.id),
                 loadEpgMappingReview(firstSource.id),
                 loadEpgGuideChannels(firstSource.id),
-              ]);
+              );
             }
+            await Promise.all(initialLoads);
           }
         }
       } catch (caught) {
@@ -698,9 +716,7 @@ export function SourceSetup() {
       setOutputSourceIds((current) =>
         current.filter((sourceId) => sourceId !== source.id),
       );
-      setOutputProfile(null);
-      setPlaylistOutputUrl('');
-      setEpgOutputUrl('');
+      await loadOutputProfiles();
       clearSourceForm();
       if (selectedSourceId === source.id) {
         const nextSource = remaining[0] ?? null;
@@ -1392,14 +1408,8 @@ export function SourceSetup() {
           name: outputName.trim() || 'TiviMate',
         }),
       });
-      const payload = await readJson<{ profile: CreatedOutputProfile }>(
-        response,
-      );
-      setOutputProfile(payload.profile);
-      setPlaylistOutputUrl(
-        `${window.location.origin}${payload.profile.playlistPath}`,
-      );
-      setEpgOutputUrl(`${window.location.origin}${payload.profile.epgPath}`);
+      await readJson<{ profile: CreatedOutputProfile }>(response);
+      await loadOutputProfiles();
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -1411,21 +1421,17 @@ export function SourceSetup() {
     }
   }
 
-  async function revokeOutputProfile() {
-    if (!outputProfile) return;
+  async function revokeOutputProfile(profileId: string) {
     setCreatingOutput(true);
     setError(null);
     try {
-      const response = await fetch(
-        `/api/v1/output-profiles/${outputProfile.id}`,
-        { method: 'DELETE' },
-      );
+      const response = await fetch(`/api/v1/output-profiles/${profileId}`, {
+        method: 'DELETE',
+      });
       if (!response.ok) {
         await readJson<unknown>(response);
       }
-      setOutputProfile(null);
-      setPlaylistOutputUrl('');
-      setEpgOutputUrl('');
+      await loadOutputProfiles();
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -3093,33 +3099,71 @@ export function SourceSetup() {
               </button>
             </div>
           </div>
-          {!collapsedSections.output && playlistOutputUrl ? (
-            <div className="output-url">
-              <label htmlFor="playlist-output-url">M3U playlist URL</label>
-              <input
-                id="playlist-output-url"
-                readOnly
-                value={playlistOutputUrl}
-                onFocus={(event) => event.currentTarget.select()}
-              />
-              <label htmlFor="epg-output-url">XMLTV EPG URL</label>
-              <input
-                id="epg-output-url"
-                readOnly
-                value={epgOutputUrl}
-                onFocus={(event) => event.currentTarget.select()}
-              />
-              <small>
-                This token is shown only for the current browser session.
-              </small>
-              <button
-                className="revoke-button"
-                type="button"
-                disabled={creatingOutput}
-                onClick={() => void revokeOutputProfile()}
-              >
-                Revoke this URL
-              </button>
+          {!collapsedSections.output && outputProfiles.length > 0 ? (
+            <div className="output-profile-list">
+              {outputProfiles.map((profile) => {
+                const sourceNames = profile.sourceIds
+                  .map(
+                    (sourceId) =>
+                      sources.find((source) => source.id === sourceId)?.name ??
+                      'Removed provider',
+                  )
+                  .join(' + ');
+                const playlistOutputUrl = profile.accessToken
+                  ? `${window.location.origin}/m/${profile.accessToken}`
+                  : '';
+                const epgOutputUrl = profile.accessToken
+                  ? `${window.location.origin}/e/${profile.accessToken}`
+                  : '';
+                return (
+                  <article className="output-url" key={profile.id}>
+                    <div className="output-url-heading">
+                      <strong>{profile.name}</strong>
+                      <small>{sourceNames}</small>
+                    </div>
+                    {profile.recoverable && profile.accessToken ? (
+                      <>
+                        <label htmlFor={`playlist-output-url-${profile.id}`}>
+                          M3U playlist URL
+                        </label>
+                        <input
+                          id={`playlist-output-url-${profile.id}`}
+                          readOnly
+                          value={playlistOutputUrl}
+                          onFocus={(event) => event.currentTarget.select()}
+                        />
+                        <label htmlFor={`epg-output-url-${profile.id}`}>
+                          XMLTV EPG URL
+                        </label>
+                        <input
+                          id={`epg-output-url-${profile.id}`}
+                          readOnly
+                          value={epgOutputUrl}
+                          onFocus={(event) => event.currentTarget.select()}
+                        />
+                        <small>
+                          Available from any device signed in as this
+                          administrator. Treat these URLs like passwords.
+                        </small>
+                      </>
+                    ) : (
+                      <p className="legacy-output-note">
+                        This older URL stays active but cannot be shown again.
+                        Create a replacement, update TiviMate, then revoke this
+                        one.
+                      </p>
+                    )}
+                    <button
+                      className="revoke-button"
+                      type="button"
+                      disabled={creatingOutput}
+                      onClick={() => void revokeOutputProfile(profile.id)}
+                    >
+                      Revoke this URL
+                    </button>
+                  </article>
+                );
+              })}
             </div>
           ) : null}
         </div>

@@ -81,8 +81,8 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 6. If a refresh reports missing or ambiguous channels, use the provider-change review to choose a current provider entry. The original channel identity and edits are preserved and the manual match is locked until explicitly unlocked.
 7. Review update history after imports. If an accepted provider playlist is bad, restore a retained snapshot; current channel overrides are reconciled against it and the action is audited.
 8. Review EPG mappings. Safe exact-ID/name matches are automatic; search the XMLTV channel list and lock a manual choice only for missing or ambiguous channels.
-9. Create the TiviMate URLs, selecting one or more providers for a combined output when appropriate, and copy both the M3U playlist and XMLTV EPG addresses immediately. Combined outputs namespace guide IDs internally to prevent cross-provider EPG collisions. Only the shared token's SHA-256 hash is stored, so the complete URLs cannot be shown again later.
-10. Revoke the URL from the same setup session if it is exposed. A revoked token returns `404`.
+9. Create the TiviMate URLs, selecting one or more providers for a combined output when appropriate. New addresses use short `/m/<token>` (M3U) and `/e/<token>` (XMLTV) paths. Combined outputs namespace guide IDs internally to prevent cross-provider EPG collisions. New tokens are encrypted with the application master key and can be viewed from any device signed in as the local administrator; their SHA-256 hashes are still used to protect public output requests.
+10. Older generated URLs remain valid, but cannot be shown again because only their token hashes were stored. Create a replacement, update TiviMate, then revoke the old URL. A revoked token returns `404`.
 
 The generated playlist contains direct provider stream URLs, so playback traffic goes from the Shield to the provider rather than through IPTVMaster.
 

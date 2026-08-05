@@ -16,6 +16,7 @@ import {
 import type {
   BulkUpdateChannelInput,
   BulkUpdateChannelResult,
+  ActiveOutputProfile,
   ChannelListFilters,
   ChannelListPage,
   ChannelSummary,
@@ -837,9 +838,22 @@ class MemorySourceRepository implements SourceRepository {
       id: this.outputProfile.id,
       name,
       accessToken,
-      playlistPath: `/p/${accessToken}/playlist.m3u`,
-      epgPath: `/p/${accessToken}/epg.xml`,
+      playlistPath: `/m/${accessToken}`,
+      epgPath: `/e/${accessToken}`,
     };
+  }
+
+  async listOutputProfiles(): Promise<ActiveOutputProfile[]> {
+    return this.outputProfile
+      ? [
+          {
+            ...this.outputProfile,
+            createdAt: '2026-08-05T00:00:00.000Z',
+            recoverable: true,
+            accessToken: 'synthetic_output_token_1234567890',
+          },
+        ]
+      : [];
   }
 
   async resolveOutputProfile(
@@ -1707,13 +1721,39 @@ describe('IPTVMaster API', () => {
     });
     const playlistPath = profileResponse.json().profile.playlistPath as string;
     const epgPath = profileResponse.json().profile.epgPath as string;
+    const accessToken = profileResponse.json().profile.accessToken as string;
+    const activeProfilesResponse = await app.inject({
+      method: 'GET',
+      url: '/api/v1/output-profiles',
+    });
     const playlistResponse = await app.inject({
       method: 'GET',
       url: playlistPath,
     });
     const epgResponse = await app.inject({ method: 'GET', url: epgPath });
+    const legacyPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `/p/${accessToken}/playlist.m3u`,
+    });
+    const legacyEpgResponse = await app.inject({
+      method: 'GET',
+      url: `/p/${accessToken}/epg.xml`,
+    });
 
     expect(profileResponse.statusCode).toBe(201);
+    expect(playlistPath).toBe(`/m/${accessToken}`);
+    expect(epgPath).toBe(`/e/${accessToken}`);
+    expect(activeProfilesResponse.statusCode).toBe(200);
+    expect(activeProfilesResponse.json()).toEqual({
+      profiles: [
+        expect.objectContaining({
+          accessToken,
+          name: 'Living room TiviMate',
+          recoverable: true,
+          sourceIds: [source.id],
+        }),
+      ],
+    });
     expect(playlistResponse.statusCode).toBe(200);
     expect(playlistResponse.headers['content-type']).toContain(
       'audio/x-mpegurl',
@@ -1729,6 +1769,8 @@ describe('IPTVMaster API', () => {
     expect(epgResponse.body).toContain('<display-name>Yle TV1</display-name>');
     expect(epgResponse.body).toContain('Synthetic news');
     expect(epgResponse.body).toContain('start="20260804150000 +0000"');
+    expect(legacyPlaylistResponse.statusCode).toBe(200);
+    expect(legacyEpgResponse.statusCode).toBe(200);
 
     const profileId = profileResponse.json().profile.id as string;
     const revokeResponse = await app.inject({

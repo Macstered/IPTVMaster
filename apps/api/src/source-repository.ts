@@ -319,6 +319,15 @@ export interface CreatedOutputProfile {
   epgPath: string;
 }
 
+export interface ActiveOutputProfile {
+  id: string;
+  name: string;
+  sourceIds: string[];
+  createdAt: string;
+  recoverable: boolean;
+  accessToken?: string;
+}
+
 export interface ResolvedOutputProfile {
   id: string;
   name: string;
@@ -426,6 +435,7 @@ export interface SourceRepository {
     sourceIds: string[],
     name: string,
   ): Promise<CreatedOutputProfile>;
+  listOutputProfiles(): Promise<ActiveOutputProfile[]>;
   resolveOutputProfile(
     accessToken: string,
   ): Promise<ResolvedOutputProfile | null>;
@@ -566,6 +576,8 @@ interface OutputProfileRow {
   id: string;
   name: string;
   configuration: unknown;
+  access_token_encrypted?: string | null;
+  created_at?: Date;
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -2639,7 +2651,7 @@ export class PostgresSourceRepository implements SourceRepository {
     if (uniqueSourceIds.length === 0) {
       throw new Error('At least one provider is required for an output');
     }
-    const accessToken = randomBytes(24).toString('base64url');
+    const accessToken = randomBytes(12).toString('base64url');
     const client = await this.#pool.connect();
     let profile: { id: string; name: string } | undefined;
     try {
@@ -2652,10 +2664,20 @@ export class PostgresSourceRepository implements SourceRepository {
         throw new Error('One or more selected providers were not found');
       }
       const result = await client.query<{ id: string; name: string }>(
-        `INSERT INTO output_profile (name, access_token_hash, configuration)
-         VALUES ($1, $2, jsonb_build_object('sourceIds', $3::jsonb))
+        `INSERT INTO output_profile (
+           name,
+           access_token_hash,
+           access_token_encrypted,
+           configuration
+         )
+         VALUES ($1, $2, $3, jsonb_build_object('sourceIds', $4::jsonb))
          RETURNING id, name`,
-        [name, accessTokenHash(accessToken), JSON.stringify(uniqueSourceIds)],
+        [
+          name,
+          accessTokenHash(accessToken),
+          encryptSecret(accessToken, this.#masterKey),
+          JSON.stringify(uniqueSourceIds),
+        ],
       );
       profile = result.rows[0];
       await client.query('COMMIT');
@@ -2670,9 +2692,41 @@ export class PostgresSourceRepository implements SourceRepository {
       id: profile.id,
       name: profile.name,
       accessToken,
-      playlistPath: `/p/${accessToken}/playlist.m3u`,
-      epgPath: `/p/${accessToken}/epg.xml`,
+      playlistPath: `/m/${accessToken}`,
+      epgPath: `/e/${accessToken}`,
     };
+  }
+
+  async listOutputProfiles(): Promise<ActiveOutputProfile[]> {
+    const result = await this.#pool.query<OutputProfileRow>(
+      `SELECT id, name, configuration, access_token_encrypted, created_at
+       FROM output_profile
+       WHERE enabled = TRUE
+       ORDER BY created_at DESC`,
+    );
+    return result.rows.reduce<ActiveOutputProfile[]>((profiles, row) => {
+      const sourceIds = outputProfileSourceIds(row.configuration);
+      if (sourceIds.length === 0 || !row.created_at) return profiles;
+      if (!row.access_token_encrypted) {
+        profiles.push({
+          id: row.id,
+          name: row.name,
+          sourceIds,
+          createdAt: row.created_at.toISOString(),
+          recoverable: false,
+        });
+        return profiles;
+      }
+      profiles.push({
+        id: row.id,
+        name: row.name,
+        sourceIds,
+        createdAt: row.created_at.toISOString(),
+        recoverable: true,
+        accessToken: decryptSecret(row.access_token_encrypted, this.#masterKey),
+      });
+      return profiles;
+    }, []);
   }
 
   async resolveOutputProfile(
