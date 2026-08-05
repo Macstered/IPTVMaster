@@ -25,6 +25,7 @@ import type {
   CreateSourceInput,
   CreatedOutputProfile,
   GroupSummary,
+  OutputGroupSummary,
   PermanentGroupSummary,
   ResolvedOutputProfile,
   ReconciliationCandidate,
@@ -70,6 +71,7 @@ class MemorySourceRepository implements SourceRepository {
   epgMappings = new Map<string, string>();
   readonly customCategories = new Map<string, Set<string>>();
   readonly outputGroupOrders = new Map<string, string[]>();
+  readonly outputCategoryOrders = new Map<string, string[]>();
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -247,20 +249,34 @@ class MemorySourceRepository implements SourceRepository {
   async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
     const entries =
       this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const policiesByGroup = new Map(
+      this.policies.map((policy) => [policy.groupName, policy]),
+    );
     const ranks = new Map(
-      (this.outputGroupOrders.get(sourceId) ?? []).map((group, index) => [
+      (this.outputCategoryOrders.get(sourceId) ?? []).map((group, index) => [
         group,
         index,
       ]),
     );
     return entries
-      .map((entry, index) => ({ entry, index }))
+      .map((entry, index) => {
+        const providerGroup = entry.attributes['group-title'] ?? '';
+        const policy = policiesByGroup.get(providerGroup);
+        const channel = this.channels.find(
+          (candidate) =>
+            candidate.sourceId === sourceId &&
+            candidate.providerGroup === providerGroup &&
+            candidate.providerName === entry.name,
+        );
+        const outputGroup =
+          channel?.customGroup ?? policy?.outputGroupName ?? providerGroup;
+        return { entry, index, outputGroup };
+      })
       .sort(
         (left, right) =>
-          (ranks.get(left.entry.attributes['group-title'] ?? '') ??
-            Number.MAX_SAFE_INTEGER) -
-            (ranks.get(right.entry.attributes['group-title'] ?? '') ??
-              Number.MAX_SAFE_INTEGER) || left.index - right.index,
+          (ranks.get(left.outputGroup) ?? Number.MAX_SAFE_INTEGER) -
+            (ranks.get(right.outputGroup) ?? Number.MAX_SAFE_INTEGER) ||
+          left.index - right.index,
       )
       .map(({ entry }) => entry);
   }
@@ -332,6 +348,79 @@ class MemorySourceRepository implements SourceRepository {
       );
   }
 
+  async listOutputGroups(sourceId: string): Promise<OutputGroupSummary[]> {
+    const entries =
+      this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const policiesByGroup = new Map(
+      this.policies.map((policy) => [policy.groupName, policy]),
+    );
+    const groups = new Map<
+      string,
+      {
+        entryCount: number;
+        visibleEntryCount: number;
+        hasEvent: boolean;
+        hasPermanent: boolean;
+      }
+    >();
+    const add = (name: string) => {
+      const current = groups.get(name) ?? {
+        entryCount: 0,
+        visibleEntryCount: 0,
+        hasEvent: false,
+        hasPermanent: false,
+      };
+      groups.set(name, current);
+      return current;
+    };
+    for (const entry of entries) {
+      const providerGroup = entry.attributes['group-title'] ?? '';
+      const policy = policiesByGroup.get(providerGroup);
+      const channel = this.channels.find(
+        (candidate) =>
+          candidate.sourceId === sourceId &&
+          candidate.providerGroup === providerGroup &&
+          candidate.providerName === entry.name,
+      );
+      const name =
+        channel?.customGroup ?? policy?.outputGroupName ?? providerGroup;
+      const current = add(name);
+      current.entryCount += 1;
+      if (policy?.behavior === 'event') {
+        current.hasEvent = true;
+        if (policy.enabled) current.visibleEntryCount += 1;
+      } else {
+        current.hasPermanent = true;
+        if (channel?.enabled ?? true) current.visibleEntryCount += 1;
+      }
+    }
+    for (const name of this.customCategories.get(sourceId) ?? []) add(name);
+    const ranks = new Map(
+      (this.outputCategoryOrders.get(sourceId) ?? []).map((name, index) => [
+        name,
+        index,
+      ]),
+    );
+    return [...groups.entries()]
+      .map(([name, group], index) => ({
+        name,
+        entryCount: group.entryCount,
+        visibleEntryCount: group.visibleEntryCount,
+        behavior:
+          group.hasEvent && group.hasPermanent
+            ? ('mixed' as const)
+            : group.hasEvent
+              ? ('event' as const)
+              : ('permanent' as const),
+        sortOrder: ranks.get(name) ?? index,
+      }))
+      .sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.name.localeCompare(right.name),
+      );
+  }
+
   async saveGroupPolicy(
     sourceId: string,
     input: SaveGroupPolicyInput,
@@ -399,6 +488,9 @@ class MemorySourceRepository implements SourceRepository {
       (channel) =>
         channel.sourceId === sourceId &&
         (!filters.group || channel.providerGroup === filters.group) &&
+        (!filters.outputGroup ||
+          (channel.customGroup ?? channel.providerGroup) ===
+            filters.outputGroup) &&
         (!filters.status || channel.reconciliationStatus === filters.status) &&
         (!search ||
           [
@@ -410,7 +502,14 @@ class MemorySourceRepository implements SourceRepository {
           ].some((value) => value.toLocaleLowerCase().includes(search))),
     );
     return {
-      channels: matches.slice(filters.offset, filters.offset + filters.limit),
+      channels: matches
+        .sort(
+          (left, right) =>
+            left.sortOrder - right.sortOrder ||
+            left.providerGroup.localeCompare(right.providerGroup) ||
+            left.providerName.localeCompare(right.providerName),
+        )
+        .slice(filters.offset, filters.offset + filters.limit),
       total: matches.length,
       limit: filters.limit,
       offset: filters.offset,
@@ -547,20 +646,18 @@ class MemorySourceRepository implements SourceRepository {
 
   async reorderOutputGroups(
     sourceId: string,
-    providerGroups: string[],
+    outputGroups: string[],
   ): Promise<void> {
-    const entries =
-      this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
     const groups = new Set(
-      entries.map((entry) => entry.attributes['group-title'] ?? ''),
+      (await this.listOutputGroups(sourceId)).map((group) => group.name),
     );
     if (
-      groups.size !== providerGroups.length ||
-      providerGroups.some((group) => !groups.has(group))
+      groups.size !== outputGroups.length ||
+      outputGroups.some((group) => !groups.has(group))
     ) {
       throw new Error('Output group order no longer matches this source');
     }
-    this.outputGroupOrders.set(sourceId, [...providerGroups]);
+    this.outputCategoryOrders.set(sourceId, [...outputGroups]);
   }
 
   async reorderChannels(
@@ -584,6 +681,45 @@ class MemorySourceRepository implements SourceRepository {
     const slots = matching.map((channel) => channel.sortOrder);
     const sortOrders = new Map(
       channelIds.map((id, index) => [id, slots[index]]),
+    );
+    this.channels = this.channels.map((channel) =>
+      sortOrders.has(channel.id)
+        ? {
+            ...channel,
+            sortOrder: sortOrders.get(channel.id) ?? channel.sortOrder,
+          }
+        : channel,
+    );
+  }
+
+  async reorderOutputGroupChannels(
+    sourceId: string,
+    outputGroup: string,
+    channelIds: string[],
+  ): Promise<void> {
+    const matching = this.channels
+      .filter(
+        (channel) =>
+          channel.sourceId === sourceId &&
+          (channel.customGroup ?? channel.providerGroup) === outputGroup,
+      )
+      .sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.providerGroup.localeCompare(right.providerGroup) ||
+          left.providerName.localeCompare(right.providerName),
+      );
+    if (
+      matching.length !== channelIds.length ||
+      matching.some((channel) => !channelIds.includes(channel.id))
+    ) {
+      throw new Error('Output group channels no longer match this source');
+    }
+    const firstSortOrder = Math.min(
+      ...matching.map((channel) => channel.sortOrder),
+    );
+    const sortOrders = new Map(
+      channelIds.map((id, index) => [id, firstSortOrder + index]),
     );
     this.channels = this.channels.map((channel) =>
       sortOrders.has(channel.id)
@@ -1518,6 +1654,139 @@ describe('IPTVMaster API', () => {
     );
   });
 
+  it('orders custom output groups and the channels inside them', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const sportsChannelId = '00000000-0000-4000-8000-000000000041';
+    const newsChannelId = '00000000-0000-4000-8000-000000000042';
+    repository.channels = [
+      {
+        id: '00000000-0000-4000-8000-000000000040',
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        enabled: true,
+        sortOrder: 10,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-05T00:00:00.000Z',
+      },
+      {
+        id: sportsChannelId,
+        sourceId: source.id,
+        providerName: 'Sports one',
+        providerGroup: 'Sports',
+        customGroup: 'My favourites',
+        enabled: true,
+        sortOrder: 20,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-05T00:00:00.000Z',
+      },
+      {
+        id: newsChannelId,
+        sourceId: source.id,
+        providerName: 'News one',
+        providerGroup: 'News',
+        customGroup: 'My favourites',
+        enabled: true,
+        sortOrder: 30,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ];
+    repository.latestEntriesBySource.set(source.id, [
+      {
+        duration: -1,
+        attributes: { 'group-title': 'Finland' },
+        name: 'Yle TV1',
+        url: 'http://provider.test/finland',
+        mediaType: 'live',
+        lineNumber: 1,
+      },
+      {
+        duration: -1,
+        attributes: { 'group-title': 'Sports' },
+        name: 'Sports one',
+        url: 'http://provider.test/sports',
+        mediaType: 'live',
+        lineNumber: 2,
+      },
+      {
+        duration: -1,
+        attributes: { 'group-title': 'News' },
+        name: 'News one',
+        url: 'http://provider.test/news',
+        mediaType: 'live',
+        lineNumber: 3,
+      },
+    ]);
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const initialGroups = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/output-groups`,
+    });
+    const groupOrder = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/output-groups/order`,
+      payload: { outputGroups: ['My favourites', 'Finland'] },
+    });
+    const orderedGroups = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/output-groups`,
+    });
+    const groupChannels = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/channels?outputGroup=My%20favourites&limit=20`,
+    });
+    const channelOrder = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/output-groups/channels/order`,
+      payload: {
+        outputGroup: 'My favourites',
+        channelIds: [newsChannelId, sportsChannelId],
+      },
+    });
+    const reorderedChannels = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/channels?outputGroup=My%20favourites&limit=20`,
+    });
+
+    expect(initialGroups.json().groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'My favourites',
+          entryCount: 2,
+          behavior: 'permanent',
+        }),
+      ]),
+    );
+    expect(groupOrder.statusCode).toBe(204);
+    expect(orderedGroups.json().groups[0]).toEqual(
+      expect.objectContaining({ name: 'My favourites', sortOrder: 0 }),
+    );
+    expect(
+      groupChannels
+        .json()
+        .channels.map((channel: { id: string }) => channel.id),
+    ).toEqual([sportsChannelId, newsChannelId]);
+    expect(channelOrder.statusCode).toBe(204);
+    expect(
+      reorderedChannels
+        .json()
+        .channels.map((channel: { id: string }) => channel.id),
+    ).toEqual([newsChannelId, sportsChannelId]);
+  });
+
   it('reviews, manually resolves, unlocks, and bulk-updates channel changes', async () => {
     const repository = new MemorySourceRepository();
     const source = await repository.createSource({
@@ -1784,22 +2053,22 @@ describe('IPTVMaster API', () => {
       method: 'PUT',
       url: `/api/v1/sources/${source.id}/output-groups/order`,
       payload: {
-        providerGroups: ['MTV Urheilu Events FI', 'Finland'],
+        outputGroups: ["Today's Finnish Sports", 'Finland'],
       },
     });
     const groupsResponse = await app.inject({
       method: 'GET',
-      url: `/api/v1/sources/${source.id}/groups`,
+      url: `/api/v1/sources/${source.id}/output-groups`,
     });
     expect(outputGroupOrderResponse.statusCode).toBe(204);
     expect(groupsResponse.json().groups).toEqual([
       expect.objectContaining({
-        providerGroup: 'MTV Urheilu Events FI',
+        name: "Today's Finnish Sports",
         behavior: 'event',
         sortOrder: 0,
       }),
       expect.objectContaining({
-        providerGroup: 'Finland',
+        name: 'Finland',
         behavior: 'permanent',
         sortOrder: 1,
       }),

@@ -148,6 +148,14 @@ interface CustomCategory {
   channelCount: number;
 }
 
+interface OutputGroupSummary {
+  name: string;
+  entryCount: number;
+  visibleEntryCount: number;
+  behavior: 'permanent' | 'event' | 'mixed';
+  sortOrder: number;
+}
+
 interface ChannelDraft {
   customName: string;
   customGroup: string;
@@ -352,6 +360,20 @@ export function SourceSetup() {
   const [savingOutputGroupOrder, setSavingOutputGroupOrder] = useState<
     string | null
   >(null);
+  const [outputGroupCategories, setOutputGroupCategories] = useState<
+    OutputGroupSummary[]
+  >([]);
+  const [expandedOutputGroup, setExpandedOutputGroup] = useState<string | null>(
+    null,
+  );
+  const [outputGroupChannels, setOutputGroupChannels] = useState<
+    ChannelSummary[]
+  >([]);
+  const [outputGroupChannelTotal, setOutputGroupChannelTotal] = useState(0);
+  const [loadingOutputGroupChannels, setLoadingOutputGroupChannels] =
+    useState(false);
+  const [draggedOutputGroupChannelId, setDraggedOutputGroupChannelId] =
+    useState<string | null>(null);
   const [showHiddenPermanentGroups, setShowHiddenPermanentGroups] =
     useState(false);
   const [customCategories, setCustomCategories] = useState<CustomCategory[]>(
@@ -399,6 +421,12 @@ export function SourceSetup() {
     setGroups(payload.groups);
   }
 
+  async function loadOutputGroupCategories(sourceId: string) {
+    const response = await fetch(`/api/v1/sources/${sourceId}/output-groups`);
+    const payload = await readJson<{ groups: OutputGroupSummary[] }>(response);
+    setOutputGroupCategories(payload.groups);
+  }
+
   async function loadChannels(sourceId: string, group?: string) {
     setLoadingChannels(true);
     try {
@@ -413,6 +441,27 @@ export function SourceSetup() {
       setSelectedChannelIds([]);
     } finally {
       setLoadingChannels(false);
+    }
+  }
+
+  async function loadOutputGroupChannels(
+    sourceId: string,
+    outputGroup: string,
+  ) {
+    setLoadingOutputGroupChannels(true);
+    try {
+      const parameters = new URLSearchParams({
+        limit: '2000',
+        outputGroup,
+      });
+      const response = await fetch(
+        `/api/v1/sources/${sourceId}/channels?${parameters.toString()}`,
+      );
+      const payload = await readJson<ChannelListPage>(response);
+      setOutputGroupChannels(payload.channels);
+      setOutputGroupChannelTotal(payload.total);
+    } finally {
+      setLoadingOutputGroupChannels(false);
     }
   }
 
@@ -443,6 +492,7 @@ export function SourceSetup() {
     const updates: Promise<void>[] = [
       loadPermanentGroups(sourceId),
       loadCustomCategories(sourceId),
+      loadOutputGroupCategories(sourceId),
     ];
     if (expandedPermanentGroup !== null) {
       updates.push(loadChannels(sourceId, expandedPermanentGroup));
@@ -545,6 +595,7 @@ export function SourceSetup() {
               setOutputSourceIds([firstSource.id]);
               initialLoads.push(
                 loadGroups(firstSource.id),
+                loadOutputGroupCategories(firstSource.id),
                 loadPermanentGroups(firstSource.id),
                 loadCustomCategories(firstSource.id),
                 loadReconciliationReview(firstSource.id),
@@ -576,6 +627,9 @@ export function SourceSetup() {
     setImportSummary(null);
     setEpgImportSummary(null);
     setExpandedPermanentGroup(null);
+    setExpandedOutputGroup(null);
+    setOutputGroupChannels([]);
+    setOutputGroupChannelTotal(0);
     setChannels([]);
     setChannelTotal(0);
     setSelectedChannelIds([]);
@@ -584,6 +638,7 @@ export function SourceSetup() {
     try {
       await Promise.all([
         loadGroups(source.id),
+        loadOutputGroupCategories(source.id),
         loadPermanentGroups(source.id),
         loadCustomCategories(source.id),
         loadReconciliationReview(source.id),
@@ -724,6 +779,10 @@ export function SourceSetup() {
         const nextSource = remaining[0] ?? null;
         setSelectedSourceId(nextSource?.id ?? null);
         setGroups([]);
+        setOutputGroupCategories([]);
+        setExpandedOutputGroup(null);
+        setOutputGroupChannels([]);
+        setOutputGroupChannelTotal(0);
         setPermanentGroups([]);
         setChannels([]);
         setChannelTotal(0);
@@ -908,7 +967,10 @@ export function SourceSetup() {
             : candidate,
         ),
       );
-      await loadEventReview(source.id);
+      await Promise.all([
+        loadEventReview(source.id),
+        loadOutputGroupCategories(source.id),
+      ]);
       setEditingEventGroup(null);
       setEventRuleDraft(null);
     } catch (caught) {
@@ -953,7 +1015,7 @@ export function SourceSetup() {
         ),
       );
       await Promise.all([
-        loadPermanentGroups(source.id),
+        refreshPermanentWorkspace(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
       return payload.channel;
@@ -1058,7 +1120,10 @@ export function SourceSetup() {
       );
       await readJson<{ category: CustomCategory }>(response);
       setNewCustomCategory('');
-      await loadCustomCategories(source.id);
+      await Promise.all([
+        loadCustomCategories(source.id),
+        loadOutputGroupCategories(source.id),
+      ]);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not create category',
@@ -1088,20 +1153,20 @@ export function SourceSetup() {
     draggedGroup: string,
     targetGroup: string,
   ) {
-    const rows = [...groups]
+    const rows = [...outputGroupCategories]
       .sort(
         (left, right) =>
           left.sortOrder - right.sortOrder ||
-          left.providerGroup.localeCompare(right.providerGroup),
+          left.name.localeCompare(right.name),
       )
-      .map((group) => ({ id: group.providerGroup, group }));
+      .map((group) => ({ id: group.name, group }));
     const nextRows = reordered(rows, draggedGroup, targetGroup);
     if (nextRows === rows) return;
     const nextGroups = nextRows.map((row, sortOrder) => ({
       ...row.group,
       sortOrder,
     }));
-    setGroups(nextGroups);
+    setOutputGroupCategories(nextGroups);
     setSavingOutputGroupOrder(draggedGroup);
     setError(null);
     try {
@@ -1111,21 +1176,84 @@ export function SourceSetup() {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            providerGroups: nextGroups.map((group) => group.providerGroup),
+            outputGroups: nextGroups.map((group) => group.name),
           }),
         },
       );
       if (!response.ok) await readJson<never>(response);
-      await loadGroups(source.id);
+      await loadOutputGroupCategories(source.id);
     } catch (caught) {
       setError(
         caught instanceof Error
           ? caught.message
           : 'Could not save output group order',
       );
-      await loadGroups(source.id);
+      await loadOutputGroupCategories(source.id);
     } finally {
       setSavingOutputGroupOrder(null);
+    }
+  }
+
+  async function toggleOutputGroupChannels(
+    source: SafeSource,
+    outputGroup: string,
+  ) {
+    if (expandedOutputGroup === outputGroup) {
+      setExpandedOutputGroup(null);
+      setOutputGroupChannels([]);
+      setOutputGroupChannelTotal(0);
+      return;
+    }
+    setExpandedOutputGroup(outputGroup);
+    try {
+      await loadOutputGroupChannels(source.id, outputGroup);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not load output group channels',
+      );
+    }
+  }
+
+  async function saveOutputGroupChannelOrder(
+    source: SafeSource,
+    draggedId: string,
+    targetId: string,
+  ) {
+    if (expandedOutputGroup === null) return;
+    const next = reordered(outputGroupChannels, draggedId, targetId);
+    if (next === outputGroupChannels) return;
+    setOutputGroupChannels(next);
+    setSavingChannel(draggedId);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/output-groups/channels/order`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            outputGroup: expandedOutputGroup,
+            channelIds: next.map((channel) => channel.id),
+          }),
+        },
+      );
+      if (!response.ok) await readJson<never>(response);
+      await Promise.all([
+        loadOutputGroupChannels(source.id, expandedOutputGroup),
+        loadOutputGroupCategories(source.id),
+        loadPermanentGroups(source.id),
+      ]);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save output group channel order',
+      );
+      await loadOutputGroupChannels(source.id, expandedOutputGroup);
+    } finally {
+      setSavingChannel(null);
     }
   }
 
@@ -1484,26 +1612,16 @@ export function SourceSetup() {
   const normalizedOutputGroupFilter = outputGroupFilter
     .trim()
     .toLocaleLowerCase();
-  const outputGroups = [...groups].sort(
+  const outputGroups = [...outputGroupCategories].sort(
     (left, right) =>
-      left.sortOrder - right.sortOrder ||
-      left.providerGroup.localeCompare(right.providerGroup),
-  );
-  const hiddenPermanentGroupNames = new Set(
-    permanentGroups
-      .filter((group) => group.enabledCount === 0)
-      .map((group) => group.providerGroup),
+      left.sortOrder - right.sortOrder || left.name.localeCompare(right.name),
   );
   const visibleOutputGroups = outputGroups.filter((group) => {
     const groupMatches = normalizedOutputGroupFilter
-      ? [group.providerGroup, group.outputGroupName ?? '']
-          .join(' ')
-          .toLocaleLowerCase()
-          .includes(normalizedOutputGroupFilter)
+      ? group.name.toLocaleLowerCase().includes(normalizedOutputGroupFilter)
       : true;
     const visibilityMatches =
-      showHiddenPermanentGroups ||
-      (group.enabled && !hiddenPermanentGroupNames.has(group.providerGroup));
+      showHiddenPermanentGroups || group.visibleEntryCount > 0;
     return groupMatches && visibilityMatches;
   });
   const activeEventReview = eventReview?.groups.find(
@@ -2438,14 +2556,14 @@ export function SourceSetup() {
               </div>
               <div hidden={collapsedSections['output-group-order']}>
                 <p className="secret-note">
-                  Drag any group to its output position. This includes regular
-                  TV and daily event groups, so Finland can be followed by its
-                  event groups.
+                  Drag any final TiviMate group to its output position. Custom
+                  groups are listed once even when they combine channels from
+                  several provider groups; expand one to order its channels.
                 </p>
                 <div className="channel-search output-group-search">
                   <input
                     aria-label="Filter output groups"
-                    placeholder="Filter TV or event groups"
+                    placeholder="Filter TV, event, or custom groups"
                     value={outputGroupFilter}
                     onChange={(event) =>
                       setOutputGroupFilter(event.target.value)
@@ -2467,18 +2585,20 @@ export function SourceSetup() {
                 </div>
                 <div className="output-group-order-list">
                   {visibleOutputGroups.map((group, index) => {
-                    const isSaving =
-                      savingOutputGroupOrder === group.providerGroup;
+                    const isSaving = savingOutputGroupOrder === group.name;
+                    const isExpanded = expandedOutputGroup === group.name;
+                    const canEditChannels =
+                      group.behavior !== 'event' && group.entryCount > 0;
                     return (
                       <article
                         className={`output-group-order-row ${group.behavior}`}
-                        key={group.providerGroup}
+                        key={group.name}
                         draggable={
                           !normalizedOutputGroupFilter &&
                           savingOutputGroupOrder === null
                         }
                         onDragStart={(event: DragEvent<HTMLElement>) => {
-                          setDraggedOutputGroup(group.providerGroup);
+                          setDraggedOutputGroup(group.name);
                           event.dataTransfer.effectAllowed = 'move';
                         }}
                         onDragEnd={() => setDraggedOutputGroup(null)}
@@ -2493,7 +2613,7 @@ export function SourceSetup() {
                             void saveOutputGroupOrder(
                               primarySource,
                               draggedGroup,
-                              group.providerGroup,
+                              group.name,
                             );
                           }
                         }}
@@ -2502,22 +2622,104 @@ export function SourceSetup() {
                           ⋮⋮
                         </span>
                         <div>
-                          <strong>
-                            {group.providerGroup || '(Ungrouped)'}
-                          </strong>
+                          <strong>{group.name || '(Ungrouped)'}</strong>
                           <small>
-                            {group.channelCount.toLocaleString()} live entries
-                            {group.outputGroupName
-                              ? ` · Output: ${group.outputGroupName}`
+                            {group.entryCount.toLocaleString()} live entries
+                            {group.visibleEntryCount < group.entryCount
+                              ? ` · ${group.visibleEntryCount.toLocaleString()} shown`
                               : ''}
                           </small>
                         </div>
                         <span className={`behavior-badge ${group.behavior}`}>
-                          {group.behavior === 'event' ? 'Live event' : 'TV'}
+                          {group.behavior === 'event'
+                            ? 'Live event'
+                            : group.behavior === 'mixed'
+                              ? 'TV + events'
+                              : 'TV'}
                         </span>
+                        <button
+                          className="secondary-button compact output-group-channels-button"
+                          type="button"
+                          disabled={
+                            !canEditChannels || loadingOutputGroupChannels
+                          }
+                          onClick={() =>
+                            void toggleOutputGroupChannels(
+                              primarySource,
+                              group.name,
+                            )
+                          }
+                        >
+                          {isExpanded ? 'Hide channels' : 'Order channels'}
+                        </button>
                         <span className="output-group-position">
                           {isSaving ? 'Saving…' : index + 1}
                         </span>
+                        {isExpanded ? (
+                          <div className="output-group-channel-list">
+                            <small className="output-group-channel-note">
+                              Drag channels to set their order inside{' '}
+                              {group.name}.
+                            </small>
+                            {outputGroupChannels.map((channel) => (
+                              <div
+                                className="output-group-channel-row"
+                                key={channel.id}
+                                draggable={savingChannel === null}
+                                onDragStart={(
+                                  event: DragEvent<HTMLElement>,
+                                ) => {
+                                  event.stopPropagation();
+                                  setDraggedOutputGroupChannelId(channel.id);
+                                  event.dataTransfer.effectAllowed = 'move';
+                                }}
+                                onDragEnd={(event: DragEvent<HTMLElement>) => {
+                                  event.stopPropagation();
+                                  setDraggedOutputGroupChannelId(null);
+                                }}
+                                onDragOver={(event: DragEvent<HTMLElement>) => {
+                                  if (draggedOutputGroupChannelId) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }
+                                }}
+                                onDrop={(event: DragEvent<HTMLElement>) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  const draggedId = draggedOutputGroupChannelId;
+                                  setDraggedOutputGroupChannelId(null);
+                                  if (draggedId) {
+                                    void saveOutputGroupChannelOrder(
+                                      primarySource,
+                                      draggedId,
+                                      channel.id,
+                                    );
+                                  }
+                                }}
+                              >
+                                <span
+                                  className="drag-handle"
+                                  aria-hidden="true"
+                                >
+                                  ⋮⋮
+                                </span>
+                                <div>
+                                  <strong>
+                                    {channel.customName ?? channel.providerName}
+                                  </strong>
+                                  <small>{channel.providerGroup}</small>
+                                </div>
+                              </div>
+                            ))}
+                            {!loadingOutputGroupChannels &&
+                            outputGroupChannelTotal === 0 ? (
+                              <p className="empty-groups">
+                                This output group currently contains only live
+                                events.
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </article>
                     );
                   })}

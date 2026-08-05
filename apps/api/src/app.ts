@@ -145,6 +145,7 @@ const outputProfileSchema = z.object({
 const channelListSchema = z.object({
   search: z.string().trim().max(200).optional(),
   group: z.string().max(500).optional(),
+  outputGroup: z.string().max(500).optional(),
   status: z.enum(['matched', 'new', 'missing', 'ambiguous']).optional(),
   limit: z.coerce.number().int().min(1).max(2_000).default(100),
   offset: z.coerce.number().int().min(0).default(0),
@@ -200,11 +201,16 @@ const permanentGroupOrderSchema = z.object({
 });
 
 const outputGroupOrderSchema = z.object({
-  providerGroups: z.array(z.string().max(500)).min(1).max(5_000),
+  outputGroups: z.array(z.string().max(500)).min(1).max(5_000),
 });
 
 const channelOrderSchema = z.object({
   providerGroup: z.string().max(500),
+  channelIds: z.array(z.uuid()).min(1).max(5_000),
+});
+
+const outputGroupChannelOrderSchema = z.object({
+  outputGroup: z.string().max(500),
   channelIds: z.array(z.uuid()).min(1).max(5_000),
 });
 
@@ -1367,6 +1373,22 @@ export async function buildApp(
     },
   );
 
+  app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/output-groups',
+    async (request, reply) => {
+      if (!sourceRepository?.listOutputGroups) {
+        return reply
+          .code(503)
+          .send({ error: 'Output group ordering is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      return { groups: await sourceRepository.listOutputGroups(sourceId.data) };
+    },
+  );
+
   app.patch<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/permanent-groups',
     async (request, reply) => {
@@ -1433,7 +1455,7 @@ export async function buildApp(
       }
       await sourceRepository.reorderOutputGroups(
         sourceId.data,
-        order.data.providerGroups,
+        order.data.outputGroups,
       );
       return reply.code(204).send();
     },
@@ -1503,6 +1525,31 @@ export async function buildApp(
       await sourceRepository.reorderChannels(
         sourceId.data,
         order.data.providerGroup,
+        order.data.channelIds,
+      );
+      return reply.code(204).send();
+    },
+  );
+
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/output-groups/channels/order',
+    async (request, reply) => {
+      if (!sourceRepository?.reorderOutputGroupChannels) {
+        return reply
+          .code(503)
+          .send({ error: 'Output group channel ordering is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const order = outputGroupChannelOrderSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!order.success) {
+        return reply.code(400).send({ error: validationMessage(order.error) });
+      }
+      await sourceRepository.reorderOutputGroupChannels(
+        sourceId.data,
+        order.data.outputGroup,
         order.data.channelIds,
       );
       return reply.code(204).send();

@@ -177,6 +177,16 @@ export interface CustomCategory {
   channelCount: number;
 }
 
+export type OutputGroupBehavior = 'permanent' | 'event' | 'mixed';
+
+export interface OutputGroupSummary {
+  name: string;
+  entryCount: number;
+  visibleEntryCount: number;
+  behavior: OutputGroupBehavior;
+  sortOrder: number;
+}
+
 export type ChannelReconciliationStatus =
   'matched' | 'new' | 'missing' | 'ambiguous';
 
@@ -202,6 +212,7 @@ export interface ChannelSummary {
 export interface ChannelListFilters {
   search?: string;
   group?: string;
+  outputGroup?: string;
   status?: ChannelReconciliationStatus;
   limit: number;
   offset: number;
@@ -368,6 +379,7 @@ export interface SourceRepository {
     sourceId: string,
     filters: ChannelListFilters,
   ): Promise<ChannelListPage>;
+  listOutputGroups?(sourceId: string): Promise<OutputGroupSummary[]>;
   listPermanentGroups?(sourceId: string): Promise<PermanentGroupSummary[]>;
   updatePermanentGroup?(
     sourceId: string,
@@ -378,13 +390,15 @@ export interface SourceRepository {
     sourceId: string,
     providerGroups: string[],
   ): Promise<void>;
-  reorderOutputGroups?(
-    sourceId: string,
-    providerGroups: string[],
-  ): Promise<void>;
+  reorderOutputGroups?(sourceId: string, outputGroups: string[]): Promise<void>;
   reorderChannels?(
     sourceId: string,
     providerGroup: string,
+    channelIds: string[],
+  ): Promise<void>;
+  reorderOutputGroupChannels?(
+    sourceId: string,
+    outputGroup: string,
     channelIds: string[],
   ): Promise<void>;
   listCustomCategories?(sourceId: string): Promise<CustomCategory[]>;
@@ -579,6 +593,15 @@ interface PermanentGroupRow {
   custom_group_name: string | null;
 }
 
+interface OutputGroupRow {
+  name: string;
+  entry_count: string | number;
+  visible_entry_count: string | number;
+  has_event: boolean;
+  has_permanent: boolean;
+  sort_order: string | number;
+}
+
 interface OutputProfileRow {
   id: string;
   name: string;
@@ -734,6 +757,22 @@ function toPermanentGroupSummary(
     ...(outputGroupStatus === 'custom' && row.custom_group_name
       ? { outputGroupName: row.custom_group_name }
       : {}),
+  };
+}
+
+function toOutputGroupSummary(row: OutputGroupRow): OutputGroupSummary {
+  const behavior: OutputGroupBehavior =
+    row.has_event && row.has_permanent
+      ? 'mixed'
+      : row.has_event
+        ? 'event'
+        : 'permanent';
+  return {
+    name: row.name,
+    entryCount: Number(row.entry_count),
+    visibleEntryCount: Number(row.visible_entry_count),
+    behavior,
+    sortOrder: Number(row.sort_order),
   };
 }
 
@@ -1333,12 +1372,22 @@ export class PostgresSourceRepository implements SourceRepository {
        LEFT JOIN channel c
          ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN epg_mapping mapping ON mapping.channel_id = c.id
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
        LEFT JOIN output_group_order group_order
          ON group_order.source_id = s.source_id
         AND group_order.provider_group = i.provider_group
+       LEFT JOIN output_category_order category_order
+         ON category_order.source_id = s.source_id
+        AND category_order.output_group = COALESCE(
+          c.custom_group,
+          p.output_group,
+          i.provider_group
+        )
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
          AND (c.id IS NULL OR c.enabled = TRUE)
        ORDER BY COALESCE(
+                  category_order.sort_order,
                   group_order.sort_order,
                   c.sort_order,
                   (i.metadata->>'lineNumber')::int,
@@ -1722,6 +1771,61 @@ export class PostgresSourceRepository implements SourceRepository {
     return result.rows.map(toPermanentGroupSummary);
   }
 
+  async listOutputGroups(sourceId: string): Promise<OutputGroupSummary[]> {
+    const result = await this.#pool.query<OutputGroupRow>(
+      `WITH entry_groups AS (
+         SELECT COALESCE(c.custom_group, p.output_group, i.provider_group) AS name,
+                COALESCE(p.behavior, 'permanent') AS behavior,
+                CASE
+                  WHEN COALESCE(p.behavior, 'permanent') = 'event'
+                    THEN COALESCE(p.enabled, TRUE)
+                  ELSE COALESCE(c.enabled, TRUE)
+                END AS visible,
+                group_order.sort_order AS legacy_sort_order,
+                COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0)
+                  AS item_sort_order
+         FROM source_snapshot s
+         JOIN upstream_item i ON i.snapshot_id = s.id
+         LEFT JOIN channel c
+           ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
+         LEFT JOIN group_policy p
+           ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+         LEFT JOIN output_group_order group_order
+           ON group_order.source_id = s.source_id
+          AND group_order.provider_group = i.provider_group
+         WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+       ), names AS (
+         SELECT name FROM entry_groups
+         UNION
+         SELECT name FROM custom_output_category WHERE source_id = $1
+       ), summaries AS (
+         SELECT names.name,
+                COUNT(entry_groups.name) AS entry_count,
+                COUNT(*) FILTER (WHERE entry_groups.visible) AS visible_entry_count,
+                COALESCE(BOOL_OR(entry_groups.behavior = 'event'), FALSE) AS has_event,
+                COALESCE(BOOL_OR(entry_groups.behavior = 'permanent'), FALSE)
+                  AS has_permanent,
+                COALESCE(
+                  category_order.sort_order,
+                  MIN(entry_groups.legacy_sort_order),
+                  1000000 + COALESCE(MIN(entry_groups.item_sort_order), 0)
+                ) AS position
+         FROM names
+         LEFT JOIN entry_groups ON entry_groups.name = names.name
+         LEFT JOIN output_category_order category_order
+           ON category_order.source_id = $1
+          AND category_order.output_group = names.name
+         GROUP BY names.name, category_order.sort_order
+       )
+       SELECT name, entry_count, visible_entry_count, has_event, has_permanent,
+              ROW_NUMBER() OVER (ORDER BY position, name) - 1 AS sort_order
+       FROM summaries
+       ORDER BY sort_order`,
+      [sourceId],
+    );
+    return result.rows.map(toOutputGroupSummary);
+  }
+
   async updatePermanentGroup(
     sourceId: string,
     providerGroup: string,
@@ -1854,7 +1958,7 @@ export class PostgresSourceRepository implements SourceRepository {
 
   async reorderOutputGroups(
     sourceId: string,
-    providerGroups: string[],
+    outputGroups: string[],
   ): Promise<void> {
     const client = await this.#pool.connect();
     try {
@@ -1864,36 +1968,48 @@ export class PostgresSourceRepository implements SourceRepository {
         [sourceId],
       );
       if (!source.rows[0]) throw new Error('Source was not found');
-      const result = await client.query<{ provider_group: string }>(
-        `SELECT DISTINCT i.provider_group
-         FROM source_snapshot s
-         JOIN upstream_item i ON i.snapshot_id = s.id
-         WHERE s.source_id = $1 AND s.is_last_known_good = TRUE`,
+      const result = await client.query<{ output_group: string }>(
+        `WITH names AS (
+           SELECT DISTINCT COALESCE(c.custom_group, p.output_group, i.provider_group)
+             AS output_group
+           FROM source_snapshot s
+           JOIN upstream_item i ON i.snapshot_id = s.id
+           LEFT JOIN channel c
+             ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
+           LEFT JOIN group_policy p
+             ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+           WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+           UNION
+           SELECT name AS output_group
+           FROM custom_output_category
+           WHERE source_id = $1
+         )
+         SELECT output_group FROM names`,
         [sourceId],
       );
-      const knownGroups = new Set(result.rows.map((row) => row.provider_group));
-      const submittedGroups = new Set(providerGroups);
+      const knownGroups = new Set(result.rows.map((row) => row.output_group));
+      const submittedGroups = new Set(outputGroups);
       if (
-        providerGroups.length !== knownGroups.size ||
+        outputGroups.length !== knownGroups.size ||
         submittedGroups.size !== knownGroups.size ||
         [...knownGroups].some((group) => !submittedGroups.has(group))
       ) {
         throw new Error('Output group order no longer matches this source');
       }
       await client.query(
-        `DELETE FROM output_group_order WHERE source_id = $1`,
+        `DELETE FROM output_category_order WHERE source_id = $1`,
         [sourceId],
       );
       await client.query(
-        `INSERT INTO output_group_order (source_id, provider_group, sort_order)
-         SELECT $1, change.provider_group, change.sort_order
+        `INSERT INTO output_category_order (source_id, output_group, sort_order)
+         SELECT $1, change.output_group, change.sort_order
          FROM jsonb_to_recordset($2::jsonb)
-           AS change(provider_group TEXT, sort_order INTEGER)`,
+           AS change(output_group TEXT, sort_order INTEGER)`,
         [
           sourceId,
           JSON.stringify(
-            providerGroups.map((providerGroup, sortOrder) => ({
-              provider_group: providerGroup,
+            outputGroups.map((outputGroup, sortOrder) => ({
+              output_group: outputGroup,
               sort_order: sortOrder,
             })),
           ),
@@ -1955,6 +2071,67 @@ export class PostgresSourceRepository implements SourceRepository {
               channelIds.map((id, index) => ({
                 id,
                 sort_order: slots[index],
+              })),
+            ),
+          ],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async reorderOutputGroupChannels(
+    sourceId: string,
+    outputGroup: string,
+    channelIds: string[],
+  ): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{
+        id: string;
+        sort_order: number;
+      }>(
+        `SELECT c.id, c.sort_order
+         FROM channel c
+         LEFT JOIN group_policy p
+           ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+         WHERE c.source_id = $1 AND c.archived_at IS NULL
+           AND c.current_upstream_item_id IS NOT NULL
+           AND COALESCE(p.behavior, 'permanent') = 'permanent'
+           AND COALESCE(c.custom_group, c.provider_group) = $2
+         ORDER BY c.sort_order, c.provider_group, c.provider_name, c.id
+         FOR UPDATE`,
+        [sourceId, outputGroup],
+      );
+      const submittedIds = new Set(channelIds);
+      if (
+        channelIds.length !== result.rows.length ||
+        submittedIds.size !== result.rows.length ||
+        result.rows.some((row) => !submittedIds.has(row.id))
+      ) {
+        throw new Error('Output group channels no longer match this source');
+      }
+      if (channelIds.length > 0) {
+        const firstSortOrder = Math.min(
+          ...result.rows.map((row) => row.sort_order),
+        );
+        await client.query(
+          `UPDATE channel c
+           SET sort_order = change.sort_order, updated_at = NOW()
+           FROM jsonb_to_recordset($1::jsonb)
+             AS change(id UUID, sort_order INTEGER)
+           WHERE c.id = change.id`,
+          [
+            JSON.stringify(
+              channelIds.map((id, index) => ({
+                id,
+                sort_order: firstSortOrder + index,
               })),
             ),
           ],
@@ -2046,6 +2223,12 @@ export class PostgresSourceRepository implements SourceRepository {
     if (filters.group !== undefined) {
       values.push(filters.group);
       conditions.push(`c.provider_group = $${values.length}`);
+    }
+    if (filters.outputGroup !== undefined) {
+      values.push(filters.outputGroup);
+      conditions.push(
+        `COALESCE(c.custom_group, c.provider_group) = $${values.length}`,
+      );
     }
     if (filters.status) {
       values.push(filters.status);
