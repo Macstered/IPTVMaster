@@ -1246,7 +1246,7 @@ h2 {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 .output-group-order-list {
-  display: grid;
+  display: block;
   gap: 0;
   max-height: 560px;
   margin-top: 12px;
@@ -1310,9 +1310,10 @@ h2 {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
-.output-group-channels-button {
+.output-group-order-row .output-group-channels-button {
   grid-row: auto;
-  min-height: 27px;
+  height: 29px;
+  min-height: 29px;
   padding: 4px 7px;
   font-size: 9px;
   white-space: nowrap;
