@@ -291,6 +291,7 @@ export interface EpgMappingReviewItem {
   epgDisplayName?: string;
   confidence?: number;
   candidateIds: string[];
+  candidates?: EpgGuideChannelSummary[];
   separatorLike?: boolean;
   eventLike?: boolean;
 }
@@ -2851,6 +2852,16 @@ export class PostgresSourceRepository implements SourceRepository {
                     }
                   : {}),
               candidateIds: unresolved?.candidateIds ?? [],
+              ...(unresolved && unresolved.candidateIds.length > 0
+                ? {
+                    candidates: unresolved.candidateIds.flatMap((id) => {
+                      const guide = guideById.get(id);
+                      return guide
+                        ? [{ id: guide.id, displayName: guide.displayName }]
+                        : [];
+                    }),
+                  }
+                : {}),
               ...unresolvedFlags,
             };
           });

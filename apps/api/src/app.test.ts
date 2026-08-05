@@ -999,6 +999,14 @@ class MemorySourceRepository implements SourceRepository {
               ? { epgChannelId: manualId }
               : {}),
           candidateIds: candidates.map((candidate) => candidate.id),
+          ...(candidates.length > 1
+            ? {
+                candidates: candidates.map((candidate) => ({
+                  id: candidate.id,
+                  displayName: candidate.displayName,
+                })),
+              }
+            : {}),
         };
       });
     return {

@@ -1,5 +1,7 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
+import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
+
 export type WorkspaceView =
   'overview' | 'lineup' | 'events' | 'epg' | 'updates';
 export type LineupView = 'order' | 'channels';
@@ -191,40 +193,6 @@ interface ReconciliationReview {
   truncated: boolean;
 }
 
-interface EpgMappingReviewItem {
-  channelId: string;
-  channelName: string;
-  providerGroup: string;
-  tvgId?: string;
-  status: 'matched' | 'missing' | 'ambiguous' | 'excluded';
-  manuallyLocked: boolean;
-  epgChannelId?: string;
-  epgDisplayName?: string;
-  confidence?: number;
-  candidateIds: string[];
-  separatorLike?: boolean;
-  eventLike?: boolean;
-}
-
-type EpgMappingView = 'mappable' | 'excluded';
-
-interface EpgMappingReview {
-  mappings: EpgMappingReviewItem[];
-  matchedCount: number;
-  missingCount: number;
-  ambiguousCount: number;
-  manualCount: number;
-  excludedCount: number;
-  total: number;
-  truncated: boolean;
-}
-
-interface EpgGuideChannelPage {
-  channels: Array<{ id: string; displayName: string; iconUrl?: string }>;
-  total: number;
-  truncated: boolean;
-}
-
 interface SnapshotHistoryItem {
   id: string;
   fingerprint: string;
@@ -402,19 +370,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     {},
   );
   const [resolvingChannel, setResolvingChannel] = useState<string | null>(null);
-  const [epgMappingReview, setEpgMappingReview] =
-    useState<EpgMappingReview | null>(null);
-  const [epgGuideChannels, setEpgGuideChannels] =
-    useState<EpgGuideChannelPage | null>(null);
-  const [epgMappingSearch, setEpgMappingSearch] = useState('');
-  const [epgGuideSearch, setEpgGuideSearch] = useState('');
-  const [epgMappingSelections, setEpgMappingSelections] = useState<
-    Record<string, string>
-  >({});
-  const [savingEpgMapping, setSavingEpgMapping] = useState<string | null>(null);
-  const [epgMappingView, setEpgMappingView] =
-    useState<EpgMappingView>('mappable');
-  const [savingEpgExclusion, setSavingEpgExclusion] = useState(false);
   const [sourceHistory, setSourceHistory] = useState<SourceHistory | null>(
     null,
   );
@@ -556,86 +511,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     );
   }
 
-  async function loadEpgMappingReview(
-    sourceId: string,
-    search = '',
-    view: EpgMappingView = epgMappingView,
-  ) {
-    const parameters = new URLSearchParams({ limit: '100', view });
-    if (search.trim()) parameters.set('search', search.trim());
-    const response = await fetch(
-      `/api/v1/sources/${sourceId}/epg-mappings?${parameters.toString()}`,
-    );
-    const payload = await readJson<EpgMappingReview>(response);
-    setEpgMappingReview(payload);
-    setEpgMappingSelections((current) => {
-      const next: Record<string, string> = {};
-      for (const mapping of payload.mappings) {
-        next[mapping.channelId] =
-          current[mapping.channelId] ?? mapping.epgChannelId ?? '';
-      }
-      return next;
-    });
-  }
-
-  async function setEpgExclusion(
-    source: SafeSource,
-    channelIds: string[],
-    excluded: boolean,
-  ) {
-    if (channelIds.length === 0) return;
-    setSavingEpgExclusion(true);
-    setError(null);
-    try {
-      const response = await fetch(`/api/v1/sources/${source.id}/channels`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          channelIds: channelIds.slice(0, 500),
-          update: { epgExcluded: excluded },
-        }),
-      });
-      await readJson<{ updatedCount: number }>(response);
-      await Promise.all([
-        loadEpgMappingReview(source.id, epgMappingSearch),
-        loadSourceHistory(source.id),
-      ]);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : 'Could not update EPG exclusions',
-      );
-    } finally {
-      setSavingEpgExclusion(false);
-    }
-  }
-
-  async function switchEpgMappingView(
-    source: SafeSource,
-    view: EpgMappingView,
-  ) {
-    setEpgMappingView(view);
-    try {
-      await loadEpgMappingReview(source.id, epgMappingSearch, view);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : 'Could not load EPG coverage',
-      );
-    }
-  }
-
-  async function loadEpgGuideChannels(sourceId: string, search = '') {
-    const parameters = new URLSearchParams({ limit: '200' });
-    if (search.trim()) parameters.set('search', search.trim());
-    const response = await fetch(
-      `/api/v1/sources/${sourceId}/epg-channels?${parameters.toString()}`,
-    );
-    setEpgGuideChannels(await readJson<EpgGuideChannelPage>(response));
-  }
-
   async function loadOutputProfiles() {
     const response = await fetch('/api/v1/output-profiles');
     const payload = await readJson<{ profiles: ActiveOutputProfile[] }>(
@@ -673,8 +548,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 loadReconciliationReview(firstSource.id),
                 loadSourceHistory(firstSource.id),
                 loadEventReview(firstSource.id),
-                loadEpgMappingReview(firstSource.id),
-                loadEpgGuideChannels(firstSource.id),
               );
             }
             await Promise.all(initialLoads);
@@ -716,8 +589,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
         loadEventReview(source.id),
-        loadEpgMappingReview(source.id),
-        loadEpgGuideChannels(source.id),
       ]);
     } catch (caught) {
       setError(
@@ -859,8 +730,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         setChannels([]);
         setChannelTotal(0);
         setEventReview(null);
-        setEpgMappingReview(null);
-        setEpgGuideChannels(null);
         setSourceHistory(null);
         if (nextSource) await selectSource(nextSource);
       }
@@ -896,8 +765,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
         loadEventReview(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
-        loadEpgGuideChannels(source.id, epgGuideSearch),
       ]);
     } catch (caught) {
       setError(
@@ -920,11 +787,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         response,
       );
       setEpgImportSummary(payload.inspection);
-      await Promise.all([
-        loadSourceHistory(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
-        loadEpgGuideChannels(source.id, epgGuideSearch),
-      ]);
+      await Promise.all([loadSourceHistory(source.id)]);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not import XMLTV',
@@ -970,7 +833,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         refreshPermanentWorkspace(source.id),
         loadReconciliationReview(source.id),
         loadEventReview(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
     } catch (caught) {
       setError(
@@ -1098,10 +960,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 expandedOutputGroup,
           ),
       );
-      await Promise.all([
-        refreshPermanentWorkspace(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
-      ]);
+      await Promise.all([refreshPermanentWorkspace(source.id)]);
       return payload.channel;
     } catch (caught) {
       setError(
@@ -1174,7 +1033,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       await Promise.all([
         refreshPermanentWorkspace(source.id),
         loadReconciliationReview(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
     } catch (caught) {
       setError(
@@ -1430,7 +1288,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       await Promise.all([
         refreshPermanentWorkspace(source.id),
         loadReconciliationReview(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Bulk update failed');
@@ -1467,7 +1324,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         refreshPermanentWorkspace(source.id),
         loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
     } catch (caught) {
       setError(
@@ -1505,92 +1361,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }
   }
 
-  async function searchEpgMappings(event: FormEvent) {
-    event.preventDefault();
-    if (!primarySource) return;
-    try {
-      await loadEpgMappingReview(primarySource.id, epgMappingSearch);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : 'Could not load EPG coverage',
-      );
-    }
-  }
-
-  async function searchEpgGuide(event: FormEvent) {
-    event.preventDefault();
-    if (!primarySource) return;
-    try {
-      await loadEpgGuideChannels(primarySource.id, epgGuideSearch);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : 'Could not search XMLTV channels',
-      );
-    }
-  }
-
-  async function saveEpgMapping(
-    source: SafeSource,
-    mapping: EpgMappingReviewItem,
-  ) {
-    const epgChannelId = epgMappingSelections[mapping.channelId];
-    if (!epgChannelId) return;
-    setSavingEpgMapping(mapping.channelId);
-    setError(null);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/channels/${mapping.channelId}/epg-mapping`,
-        {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ epgChannelId }),
-        },
-      );
-      await readJson<{ saved: boolean }>(response);
-      await Promise.all([
-        loadEpgMappingReview(source.id, epgMappingSearch),
-        loadSourceHistory(source.id),
-      ]);
-    } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : 'Could not save EPG mapping',
-      );
-    } finally {
-      setSavingEpgMapping(null);
-    }
-  }
-
-  async function unlockEpgMapping(
-    source: SafeSource,
-    mapping: EpgMappingReviewItem,
-  ) {
-    setSavingEpgMapping(mapping.channelId);
-    setError(null);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/channels/${mapping.channelId}/epg-mapping`,
-        { method: 'DELETE' },
-      );
-      if (!response.ok) await readJson<unknown>(response);
-      await Promise.all([
-        loadEpgMappingReview(source.id, epgMappingSearch),
-        loadSourceHistory(source.id),
-      ]);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : 'Could not unlock EPG mapping',
-      );
-    } finally {
-      setSavingEpgMapping(null);
-    }
-  }
-
   async function restoreSnapshot(source: SafeSource, snapshotId: string) {
     setRestoringSnapshot(snapshotId);
     setError(null);
@@ -1605,7 +1375,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         refreshPermanentWorkspace(source.id),
         loadReconciliationReview(source.id),
         loadSourceHistory(source.id),
-        loadEpgMappingReview(source.id, epgMappingSearch),
       ]);
       setConfirmingSnapshot(null);
     } catch (caught) {
@@ -1711,12 +1480,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const activeEventReview = eventReview?.groups.find(
     (group) => group.groupName === selectedEventGroup,
   );
-  const separatorSuggestions =
-    epgMappingReview?.mappings.filter(
-      (mapping) =>
-        (mapping.status === 'missing' || mapping.status === 'ambiguous') &&
-        mapping.separatorLike === true,
-    ) ?? [];
   const editedEventGroup = groups.find(
     (group) => group.providerGroup === editingEventGroup,
   );
@@ -2500,299 +2263,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             </section>
           ) : null}
 
-          {workspace === 'epg' && epgMappingReview ? (
-            <section className="epg-mapping-review" id="epg-mappings">
-              <div className="subsection-heading epg-mapping-heading">
-                <div>
-                  <small>EPG MAPPINGS</small>
-                  <strong>Pair playlist channels with XMLTV</strong>
-                </div>
-                <span className="channel-count">
-                  {epgMappingReview.matchedCount.toLocaleString()} of{' '}
-                  {epgMappingReview.total.toLocaleString()} mappable matched
-                </span>
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  disabled={savingEpgExclusion}
-                  onClick={() =>
-                    void switchEpgMappingView(
-                      primarySource,
-                      epgMappingView === 'mappable' ? 'excluded' : 'mappable',
-                    )
-                  }
-                >
-                  {epgMappingView === 'mappable'
-                    ? `Excluded (${epgMappingReview.excludedCount.toLocaleString()})`
-                    : 'Back to mappable channels'}
-                </button>
-                <button
-                  className="secondary-button compact section-toggle"
-                  type="button"
-                  onClick={() => toggleSection('epg')}
-                >
-                  {collapsedSections.epg ? 'Expand' : 'Collapse'}
-                </button>
-              </div>
-              <div hidden={collapsedSections.epg}>
-                <p className="secret-note">
-                  Exact TVG IDs and unique normalized names are paired
-                  automatically. Lock a manual choice only when the provider and
-                  XMLTV names do not identify the same channel reliably.
-                </p>
-                <div className="epg-mapping-summary">
-                  <span>{epgMappingReview.matchedCount} matched</span>
-                  <span>{epgMappingReview.missingCount} missing</span>
-                  <span>{epgMappingReview.ambiguousCount} ambiguous</span>
-                  <span>{epgMappingReview.manualCount} manual locks</span>
-                  <span>{epgMappingReview.excludedCount} excluded</span>
-                </div>
-                {epgMappingView === 'mappable' &&
-                separatorSuggestions.length > 0 ? (
-                  <div className="epg-suggestion">
-                    <p>
-                      {separatorSuggestions.length === 1
-                        ? '1 unmatched channel looks like a decorative separator'
-                        : `${separatorSuggestions.length} unmatched channels look like decorative separators`}
-                      {': '}
-                      {separatorSuggestions
-                        .slice(0, 6)
-                        .map((mapping) => mapping.channelName)
-                        .join(', ')}
-                      {separatorSuggestions.length > 6 ? ', …' : ''}. Separators
-                      never carry guide data.
-                    </p>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      disabled={savingEpgExclusion}
-                      onClick={() =>
-                        void setEpgExclusion(
-                          primarySource,
-                          separatorSuggestions.map(
-                            (mapping) => mapping.channelId,
-                          ),
-                          true,
-                        )
-                      }
-                    >
-                      {savingEpgExclusion
-                        ? 'Excluding…'
-                        : `Exclude ${separatorSuggestions.length === 1 ? 'it' : `all ${separatorSuggestions.length}`} from EPG`}
-                    </button>
-                  </div>
-                ) : null}
-                <div className="epg-search-grid">
-                  <form onSubmit={(event) => void searchEpgMappings(event)}>
-                    <label htmlFor="epg-mapping-search">
-                      Filter playlist channels
-                    </label>
-                    <div>
-                      <input
-                        id="epg-mapping-search"
-                        value={epgMappingSearch}
-                        placeholder="Channel, group, or TVG ID"
-                        onChange={(event) =>
-                          setEpgMappingSearch(event.target.value)
-                        }
-                      />
-                      <button className="secondary-button" type="submit">
-                        Filter
-                      </button>
-                    </div>
-                  </form>
-                  <form onSubmit={(event) => void searchEpgGuide(event)}>
-                    <label htmlFor="epg-guide-search">
-                      Search XMLTV choices
-                    </label>
-                    <div>
-                      <input
-                        id="epg-guide-search"
-                        value={epgGuideSearch}
-                        placeholder="Guide name or XMLTV ID"
-                        onChange={(event) =>
-                          setEpgGuideSearch(event.target.value)
-                        }
-                      />
-                      <button className="secondary-button" type="submit">
-                        Search
-                      </button>
-                    </div>
-                  </form>
-                </div>
-                {epgGuideChannels?.truncated ? (
-                  <small className="channel-limit-note">
-                    XMLTV choices are limited to 200 results. Narrow the guide
-                    search to find another channel.
-                  </small>
-                ) : null}
-                <div className="epg-mapping-list">
-                  {epgMappingReview.mappings.map((mapping) => {
-                    const selected =
-                      epgMappingSelections[mapping.channelId] ?? '';
-                    const selectedIsVisible =
-                      epgGuideChannels?.channels.some(
-                        (channel) => channel.id === selected,
-                      ) ?? false;
-                    return (
-                      <article
-                        className="epg-mapping-row"
-                        key={mapping.channelId}
-                      >
-                        <div className="epg-playlist-channel">
-                          <small>PLAYLIST</small>
-                          <strong>{mapping.channelName}</strong>
-                          <span>
-                            {mapping.providerGroup || '(Ungrouped)'}
-                            {mapping.tvgId ? ` · ${mapping.tvgId}` : ''}
-                          </span>
-                        </div>
-                        <span
-                          className={`epg-mapping-status ${mapping.status}`}
-                        >
-                          {mapping.manuallyLocked
-                            ? 'manual lock'
-                            : mapping.status}
-                        </span>
-                        {mapping.status === 'excluded' ? (
-                          <div className="epg-mapping-control">
-                            <button
-                              className="secondary-button compact"
-                              type="button"
-                              disabled={savingEpgExclusion}
-                              onClick={() =>
-                                void setEpgExclusion(
-                                  primarySource,
-                                  [mapping.channelId],
-                                  false,
-                                )
-                              }
-                            >
-                              Re-include in EPG
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="epg-mapping-control">
-                            <select
-                              aria-label={`EPG channel for ${mapping.channelName}`}
-                              value={selected}
-                              onChange={(event) =>
-                                setEpgMappingSelections((current) => ({
-                                  ...current,
-                                  [mapping.channelId]: event.target.value,
-                                }))
-                              }
-                            >
-                              <option value="">Choose XMLTV channel</option>
-                              {selected && !selectedIsVisible ? (
-                                <option value={selected}>
-                                  {mapping.epgDisplayName ?? selected} (current)
-                                </option>
-                              ) : null}
-                              {epgGuideChannels?.channels.map((channel) => (
-                                <option value={channel.id} key={channel.id}>
-                                  {channel.displayName} · {channel.id}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              className="secondary-button compact"
-                              type="button"
-                              disabled={!selected || savingEpgMapping !== null}
-                              onClick={() =>
-                                void saveEpgMapping(primarySource, mapping)
-                              }
-                            >
-                              {savingEpgMapping === mapping.channelId
-                                ? 'Saving...'
-                                : 'Lock mapping'}
-                            </button>
-                            {mapping.manuallyLocked ? (
-                              <button
-                                className="secondary-button compact"
-                                type="button"
-                                disabled={savingEpgMapping !== null}
-                                onClick={() =>
-                                  void unlockEpgMapping(primarySource, mapping)
-                                }
-                              >
-                                Use automatic
-                              </button>
-                            ) : null}
-                            {mapping.status !== 'matched' ? (
-                              <button
-                                className="secondary-button compact"
-                                type="button"
-                                title="Exclude this channel from EPG matching and coverage counts"
-                                disabled={savingEpgExclusion}
-                                onClick={() =>
-                                  void setEpgExclusion(
-                                    primarySource,
-                                    [mapping.channelId],
-                                    true,
-                                  )
-                                }
-                              >
-                                No EPG
-                              </button>
-                            ) : null}
-                          </div>
-                        )}
-                        {mapping.status === 'excluded' ? (
-                          <small className="epg-mapping-note">
-                            Excluded from EPG matching and coverage counts.
-                          </small>
-                        ) : mapping.eventLike ? (
-                          <small className="epg-mapping-note">
-                            Looks like a live-event stream. Mark its provider
-                            group as an event group in the Live events workspace
-                            instead of mapping guide data.
-                          </small>
-                        ) : mapping.status === 'ambiguous' ? (
-                          <small className="epg-mapping-note">
-                            Multiple guide channels share the same normalized
-                            identity. Choose the correct one manually.
-                          </small>
-                        ) : mapping.status === 'missing' ? (
-                          <small className="epg-mapping-note">
-                            No safe automatic match. Search the XMLTV choices or
-                            leave this channel without guide data.
-                          </small>
-                        ) : (
-                          <small className="epg-mapping-note matched">
-                            {mapping.epgDisplayName} · {mapping.epgChannelId}
-                          </small>
-                        )}
-                      </article>
-                    );
-                  })}
-                  {epgMappingReview.mappings.length === 0 ? (
-                    <p className="empty-groups">
-                      {epgMappingView === 'excluded'
-                        ? 'No channels are excluded from EPG matching.'
-                        : 'Import both the playlist and XMLTV guide, or change the channel filter.'}
-                    </p>
-                  ) : null}
-                </div>
-                {epgMappingReview.truncated ? (
-                  <small className="channel-limit-note">
-                    Showing the first 100 playlist channels. Narrow the channel
-                    filter to review the rest.
-                  </small>
-                ) : null}
-              </div>
-            </section>
-          ) : null}
-
-          {workspace === 'epg' && !epgMappingReview ? (
-            <div className="workspace-empty">
-              <strong>No XMLTV guide imported</strong>
-              <p>
-                Import the provider XMLTV guide from Overview to review EPG
-                coverage and manual mappings here.
-              </p>
-            </div>
-          ) : null}
+          <EpgWorkspace
+            source={primarySource}
+            active={workspace === 'epg'}
+            onActivityChanged={() => {
+              if (primarySource) void loadSourceHistory(primarySource.id);
+            }}
+          />
 
           <div
             className={`channel-editor channel-editor-${lineupView}`}
