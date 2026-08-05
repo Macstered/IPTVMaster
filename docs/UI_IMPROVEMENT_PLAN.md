@@ -100,7 +100,7 @@ Design:
     "12 channels look like separators — exclude all", listing them before applying.
   - Coverage line becomes "X of Y mappable matched · Z excluded".
   - Note: channels in groups marked as live-event are already excluded server-side —
-    verified against the fixture stack. When a *missing* channel's provider group looks
+    verified against the fixture stack. When a _missing_ channel's provider group looks
     event-like (matches the event heuristics but is still `permanent`), show an inline
     hint linking to the Live events workspace, since marking the group is the right fix.
 - 1.5 Separator channels stay in the published M3U (many users keep them as visual

@@ -34,3 +34,6 @@ Thumbs.db
 .tmp/
 tmp/
 
+
+# Claude Code local session settings
+.claude/

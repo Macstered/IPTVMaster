@@ -1159,6 +1159,29 @@ h2 {
   color: #e0b66e;
   border-color: #71572b;
 }
+.epg-mapping-status.excluded {
+  color: #8e9aa8;
+  border-color: #3d4a59;
+}
+.epg-suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed #5e5127;
+  border-radius: 8px;
+  background: #1d1a0d;
+}
+.epg-suggestion p {
+  flex: 1 1 320px;
+  margin: 0;
+  color: #cdb578;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .epg-mapping-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;

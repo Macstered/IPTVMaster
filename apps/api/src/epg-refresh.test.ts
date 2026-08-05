@@ -90,6 +90,7 @@ function repository(): SourceRepository {
       missingCount: 0,
       ambiguousCount: 0,
       manualCount: 0,
+      excludedCount: 0,
       total: 0,
       truncated: false,
     })),

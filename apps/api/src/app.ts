@@ -161,6 +161,7 @@ const channelUpdateSchema = z
     customGroup: nullableChannelText(500),
     customLogoUrl: z.union([z.url().max(4_000), z.null()]).optional(),
     sortOrder: z.number().int().min(0).max(2_147_483_647).optional(),
+    epgExcluded: z.boolean().optional(),
   })
   .refine((value) => Object.values(value).some((item) => item !== undefined), {
     message: 'At least one channel field is required',
@@ -173,6 +174,7 @@ const bulkChannelUpdateSchema = z.object({
       enabled: z.boolean().optional(),
       customGroup: nullableChannelText(500),
       customLogoUrl: z.union([z.url().max(4_000), z.null()]).optional(),
+      epgExcluded: z.boolean().optional(),
     })
     .refine(
       (value) => Object.values(value).some((item) => item !== undefined),
@@ -240,6 +242,7 @@ const manualMatchSchema = z.object({
 const epgMappingReviewSchema = z.object({
   search: z.string().trim().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
+  view: z.enum(['mappable', 'excluded']).default('mappable'),
 });
 
 const epgChannelSearchSchema = z.object({
@@ -1699,6 +1702,7 @@ export async function buildApp(
       sourceId.data,
       query.data.search,
       query.data.limit,
+      query.data.view,
     );
   });
 

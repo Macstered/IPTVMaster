@@ -1,3 +1,4 @@
+export * from './channel-name.js';
 export * from './events.js';
 export * from './m3u.js';
 export * from './output.js';

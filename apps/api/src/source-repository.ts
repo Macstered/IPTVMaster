@@ -2,6 +2,8 @@ import {
   DEFAULT_PLACEHOLDER_PATTERNS,
   decryptSecret,
   encryptSecret,
+  isSeparatorChannelName,
+  looksLikeEventTitle,
   SnapshotRejectedError,
   validateSnapshotCandidate,
   type M3uEntry,
@@ -95,6 +97,8 @@ export type SourceActivityKind =
   | 'manual-unlock'
   | 'manual-epg-map'
   | 'manual-epg-unlock'
+  | 'manual-epg-exclude'
+  | 'manual-epg-include'
   | 'snapshot-activate'
   | 'snapshot-reactivate';
 
@@ -205,6 +209,7 @@ export interface ChannelSummary {
   matchLocked: boolean;
   matchConfidence?: number;
   reconciliationStatus: ChannelReconciliationStatus;
+  epgExcluded?: boolean;
   lastSeenAt?: string;
   updatedAt: string;
 }
@@ -231,12 +236,14 @@ export interface UpdateChannelInput {
   customGroup?: string | null;
   customLogoUrl?: string | null;
   sortOrder?: number;
+  epgExcluded?: boolean;
 }
 
 export interface BulkUpdateChannelInput {
   enabled?: boolean;
   customGroup?: string | null;
   customLogoUrl?: string | null;
+  epgExcluded?: boolean;
 }
 
 export interface BulkUpdateChannelResult {
@@ -263,7 +270,9 @@ export interface ReconciliationReview {
   truncated: boolean;
 }
 
-export type EpgMappingStatus = 'matched' | 'missing' | 'ambiguous';
+export type EpgMappingStatus = 'matched' | 'missing' | 'ambiguous' | 'excluded';
+
+export type EpgMappingReviewView = 'mappable' | 'excluded';
 
 export interface EpgGuideChannelSummary {
   id: string;
@@ -282,6 +291,8 @@ export interface EpgMappingReviewItem {
   epgDisplayName?: string;
   confidence?: number;
   candidateIds: string[];
+  separatorLike?: boolean;
+  eventLike?: boolean;
 }
 
 export interface EpgMappingReview {
@@ -290,6 +301,7 @@ export interface EpgMappingReview {
   missingCount: number;
   ambiguousCount: number;
   manualCount: number;
+  excludedCount: number;
   total: number;
   truncated: boolean;
 }
@@ -434,6 +446,7 @@ export interface SourceRepository {
     sourceId: string,
     search: string | undefined,
     limit: number,
+    view?: EpgMappingReviewView,
   ): Promise<EpgMappingReview>;
   searchEpgChannels(
     sourceId: string,
@@ -516,11 +529,37 @@ interface SourceAuditHistoryRow {
 
 interface EpgMappingAuditHistoryRow {
   id: string;
-  action: 'manual-map' | 'manual-unlock';
+  action: 'manual-map' | 'manual-unlock' | 'epg-exclude' | 'epg-include';
   epg_channel_upstream_id: string | null;
   created_at: Date;
   display_name: string;
 }
+
+const EPG_AUDIT_ACTIVITY: Record<
+  EpgMappingAuditHistoryRow['action'],
+  { kind: SourceActivityKind; title: (name: string) => string; detail: string }
+> = {
+  'manual-map': {
+    kind: 'manual-epg-map',
+    title: (name) => `Mapped EPG for ${name}`,
+    detail: 'Automatic EPG matching may update this channel again.',
+  },
+  'manual-unlock': {
+    kind: 'manual-epg-unlock',
+    title: (name) => `Unlocked EPG for ${name}`,
+    detail: 'Automatic EPG matching may update this channel again.',
+  },
+  'epg-exclude': {
+    kind: 'manual-epg-exclude',
+    title: (name) => `No EPG set for ${name}`,
+    detail: 'This channel is skipped by EPG matching and coverage counts.',
+  },
+  'epg-include': {
+    kind: 'manual-epg-include',
+    title: (name) => `EPG re-enabled for ${name}`,
+    detail: 'Automatic EPG matching applies to this channel again.',
+  },
+};
 
 interface EpgStateRow {
   source_id: string;
@@ -563,6 +602,7 @@ interface ChannelRow {
   match_locked: boolean;
   match_confidence: string | number | null;
   reconciliation_status: ChannelReconciliationStatus;
+  epg_excluded: boolean;
   last_seen_at: Date | null;
   updated_at: Date;
   total_count?: string | number;
@@ -796,6 +836,7 @@ function toChannelSummary(row: ChannelRow): ChannelSummary {
       ? {}
       : { matchConfidence: Number(row.match_confidence) }),
     reconciliationStatus: row.reconciliation_status,
+    ...(row.epg_excluded ? { epgExcluded: true } : {}),
     ...(row.last_seen_at ? { lastSeenAt: row.last_seen_at.toISOString() } : {}),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -1285,23 +1326,20 @@ export class PostgresSourceRepository implements SourceRepository {
             : 'The selected retained snapshot became current.',
         status: 'succeeded' as const,
       })),
-      ...epgMappingAuditResult.rows.map((row) => ({
-        id: row.id,
-        kind:
-          row.action === 'manual-map'
-            ? ('manual-epg-map' as const)
-            : ('manual-epg-unlock' as const),
-        occurredAt: row.created_at.toISOString(),
-        title:
-          row.action === 'manual-map'
-            ? `Mapped EPG for ${row.display_name}`
-            : `Unlocked EPG for ${row.display_name}`,
-        detail:
-          row.action === 'manual-map' && row.epg_channel_upstream_id
-            ? `Linked to XMLTV channel ${row.epg_channel_upstream_id}.`
-            : 'Automatic EPG matching may update this channel again.',
-        status: 'succeeded' as const,
-      })),
+      ...epgMappingAuditResult.rows.map((row) => {
+        const activityInfo = EPG_AUDIT_ACTIVITY[row.action];
+        return {
+          id: row.id,
+          kind: activityInfo.kind,
+          occurredAt: row.created_at.toISOString(),
+          title: activityInfo.title(row.display_name),
+          detail:
+            row.action === 'manual-map' && row.epg_channel_upstream_id
+              ? `Linked to XMLTV channel ${row.epg_channel_upstream_id}.`
+              : activityInfo.detail,
+          status: 'succeeded' as const,
+        };
+      }),
     ]
       .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
       .slice(0, limit);
@@ -2241,7 +2279,8 @@ export class PostgresSourceRepository implements SourceRepository {
       `SELECT c.id, c.source_id, c.provider_name, c.provider_group, c.tvg_id,
               c.provider_logo_url, c.enabled, c.custom_name, c.custom_group,
               c.custom_logo_url, c.sort_order, c.match_locked,
-              c.match_confidence, c.reconciliation_status, c.last_seen_at,
+              c.match_confidence, c.reconciliation_status, c.epg_excluded,
+              c.last_seen_at,
               c.updated_at, COUNT(*) OVER() AS total_count
        FROM channel c
        LEFT JOIN group_policy p
@@ -2279,11 +2318,21 @@ export class PostgresSourceRepository implements SourceRepository {
     if (input.customLogoUrl !== undefined)
       addUpdate('custom_logo_url', input.customLogoUrl);
     if (input.sortOrder !== undefined) addUpdate('sort_order', input.sortOrder);
+    if (input.epgExcluded !== undefined)
+      addUpdate('epg_excluded', input.epgExcluded);
     if (updates.length === 0) return null;
 
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      if (input.epgExcluded !== undefined) {
+        await this.#recordEpgExclusionChange(
+          client,
+          sourceId,
+          [channelId],
+          input.epgExcluded,
+        );
+      }
       const result = await client.query<ChannelRow>(
         `UPDATE channel
          SET ${updates.join(', ')}, updated_at = NOW()
@@ -2291,7 +2340,7 @@ export class PostgresSourceRepository implements SourceRepository {
          RETURNING id, source_id, provider_name, provider_group, tvg_id,
                    provider_logo_url, enabled, custom_name, custom_group,
                    custom_logo_url, sort_order, match_locked, match_confidence,
-                   reconciliation_status, last_seen_at, updated_at`,
+                   reconciliation_status, epg_excluded, last_seen_at, updated_at`,
         values,
       );
       const row = result.rows[0];
@@ -2322,11 +2371,21 @@ export class PostgresSourceRepository implements SourceRepository {
       addUpdate('custom_group', input.customGroup);
     if (input.customLogoUrl !== undefined)
       addUpdate('custom_logo_url', input.customLogoUrl);
+    if (input.epgExcluded !== undefined)
+      addUpdate('epg_excluded', input.epgExcluded);
     if (updates.length === 0) return { updatedCount: 0 };
 
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      if (input.epgExcluded !== undefined) {
+        await this.#recordEpgExclusionChange(
+          client,
+          sourceId,
+          channelIds,
+          input.epgExcluded,
+        );
+      }
       const result = await client.query(
         `UPDATE channel
          SET ${updates.join(', ')}, updated_at = NOW()
@@ -2344,6 +2403,43 @@ export class PostgresSourceRepository implements SourceRepository {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * Audits an EPG exclusion flag change for every channel whose stored value
+   * actually differs, and removes any existing guide mappings (including
+   * manual locks) when channels become excluded. Runs before the flag update
+   * so the previous value can be compared inside the same transaction.
+   */
+  async #recordEpgExclusionChange(
+    client: PoolClient,
+    sourceId: string,
+    channelIds: string[],
+    excluded: boolean,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO epg_mapping_audit (source_id, channel_id, action)
+       SELECT c.source_id, c.id, $3
+       FROM channel c
+       WHERE c.source_id = $1 AND c.id = ANY($2::uuid[])
+         AND c.archived_at IS NULL
+         AND c.epg_excluded IS DISTINCT FROM $4`,
+      [
+        sourceId,
+        channelIds,
+        excluded ? 'epg-exclude' : 'epg-include',
+        excluded,
+      ],
+    );
+    if (excluded) {
+      await client.query(
+        `DELETE FROM epg_mapping mapping
+         USING channel c
+         WHERE mapping.channel_id = c.id
+           AND c.source_id = $1 AND c.id = ANY($2::uuid[])`,
+        [sourceId, channelIds],
+      );
     }
   }
 
@@ -2392,7 +2488,8 @@ export class PostgresSourceRepository implements SourceRepository {
       `SELECT c.id, c.source_id, c.provider_name, c.provider_group, c.tvg_id,
               c.provider_logo_url, c.enabled, c.custom_name, c.custom_group,
               c.custom_logo_url, c.sort_order, c.match_locked,
-              c.match_confidence, c.reconciliation_status, c.last_seen_at,
+              c.match_confidence, c.reconciliation_status, c.epg_excluded,
+              c.last_seen_at,
               c.updated_at
        FROM channel c
        LEFT JOIN group_policy p
@@ -2478,7 +2575,7 @@ export class PostgresSourceRepository implements SourceRepository {
         `SELECT id, source_id, provider_name, provider_group, tvg_id,
                 provider_logo_url, enabled, custom_name, custom_group,
                 custom_logo_url, sort_order, match_locked, match_confidence,
-                reconciliation_status, last_seen_at, updated_at
+                reconciliation_status, epg_excluded, last_seen_at, updated_at
          FROM channel
          WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
          FOR UPDATE`,
@@ -2528,7 +2625,7 @@ export class PostgresSourceRepository implements SourceRepository {
         `SELECT id, source_id, provider_name, provider_group, tvg_id,
                 provider_logo_url, enabled, custom_name, custom_group,
                 custom_logo_url, sort_order, match_locked, match_confidence,
-                reconciliation_status, last_seen_at, updated_at,
+                reconciliation_status, epg_excluded, last_seen_at, updated_at,
                 current_upstream_item_id
          FROM channel
          WHERE source_id = $1 AND current_upstream_item_id = $2
@@ -2578,7 +2675,7 @@ export class PostgresSourceRepository implements SourceRepository {
          RETURNING id, source_id, provider_name, provider_group, tvg_id,
                    provider_logo_url, enabled, custom_name, custom_group,
                    custom_logo_url, sort_order, match_locked, match_confidence,
-                   reconciliation_status, last_seen_at, updated_at`,
+                   reconciliation_status, epg_excluded, last_seen_at, updated_at`,
         [
           sourceId,
           channelId,
@@ -2636,7 +2733,7 @@ export class PostgresSourceRepository implements SourceRepository {
          RETURNING id, source_id, provider_name, provider_group, tvg_id,
                    provider_logo_url, enabled, custom_name, custom_group,
                    custom_logo_url, sort_order, match_locked, match_confidence,
-                   reconciliation_status, last_seen_at, updated_at,
+                   reconciliation_status, epg_excluded, last_seen_at, updated_at,
                    current_upstream_item_id`,
         [sourceId, channelId],
       );
@@ -2665,9 +2762,31 @@ export class PostgresSourceRepository implements SourceRepository {
     sourceId: string,
     search: string | undefined,
     limit: number,
+    view: EpgMappingReviewView = 'mappable',
   ): Promise<EpgMappingReview> {
     const { channels, guideChannels, lockedMappings, reconciliation } =
       await this.#loadEpgReconciliation(this.#pool, sourceId);
+    const excludedResult = await this.#pool.query<{
+      id: string;
+      tvg_id: string | null;
+      display_name: string;
+      provider_group: string;
+    }>(
+      `SELECT c.id, c.tvg_id,
+              COALESCE(c.custom_name, c.provider_name) AS display_name,
+              COALESCE(c.custom_group, c.provider_group) AS provider_group
+       FROM channel c
+       LEFT JOIN group_policy policy
+         ON policy.source_id = c.source_id
+        AND policy.provider_group = c.provider_group
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND c.enabled = TRUE AND c.current_upstream_item_id IS NOT NULL
+         AND c.epg_excluded = TRUE
+         AND COALESCE(policy.behavior, 'permanent') = 'permanent'
+       ORDER BY display_name, c.id`,
+      [sourceId],
+    );
+    const excludedCount = excludedResult.rows.length;
     const matchesByChannel = new Map(
       reconciliation.matches.map((match) => [match.channelId, match]),
     );
@@ -2680,35 +2799,61 @@ export class PostgresSourceRepository implements SourceRepository {
     const guideById = new Map(
       guideChannels.map((channel) => [channel.id, channel]),
     );
-    const mappings: EpgMappingReviewItem[] = channels.map((channel) => {
-      const match = matchesByChannel.get(channel.id);
-      const unresolved = unresolvedByChannel.get(channel.id);
-      const lockedId = unresolved?.lockedEpgChannelId;
-      const lockedGuide = lockedId ? guideById.get(lockedId) : undefined;
-      return {
-        channelId: channel.id,
-        channelName: channel.displayName,
-        providerGroup: channel.providerGroup,
-        ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
-        status: match ? 'matched' : (unresolved?.status ?? 'missing'),
-        manuallyLocked: lockedIds.has(channel.id),
-        ...(match
-          ? {
-              epgChannelId: match.epgChannel.id,
-              epgDisplayName: match.epgChannel.displayName,
-              confidence: match.confidence,
-            }
-          : lockedId
-            ? {
-                epgChannelId: lockedId,
-                ...(lockedGuide
-                  ? { epgDisplayName: lockedGuide.displayName }
+    const mappings: EpgMappingReviewItem[] =
+      view === 'excluded'
+        ? excludedResult.rows.map((row) => ({
+            channelId: row.id,
+            channelName: row.display_name,
+            providerGroup: row.provider_group,
+            ...(row.tvg_id ? { tvgId: row.tvg_id } : {}),
+            status: 'excluded' as const,
+            manuallyLocked: false,
+            candidateIds: [],
+            ...(isSeparatorChannelName(row.display_name)
+              ? { separatorLike: true }
+              : {}),
+          }))
+        : channels.map((channel) => {
+            const match = matchesByChannel.get(channel.id);
+            const unresolved = unresolvedByChannel.get(channel.id);
+            const lockedId = unresolved?.lockedEpgChannelId;
+            const lockedGuide = lockedId ? guideById.get(lockedId) : undefined;
+            const unresolvedFlags =
+              match === undefined
+                ? {
+                    ...(isSeparatorChannelName(channel.displayName)
+                      ? { separatorLike: true }
+                      : {}),
+                    ...(looksLikeEventTitle(channel.displayName)
+                      ? { eventLike: true }
+                      : {}),
+                  }
+                : {};
+            return {
+              channelId: channel.id,
+              channelName: channel.displayName,
+              providerGroup: channel.providerGroup,
+              ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
+              status: match ? 'matched' : (unresolved?.status ?? 'missing'),
+              manuallyLocked: lockedIds.has(channel.id),
+              ...(match
+                ? {
+                    epgChannelId: match.epgChannel.id,
+                    epgDisplayName: match.epgChannel.displayName,
+                    confidence: match.confidence,
+                  }
+                : lockedId
+                  ? {
+                      epgChannelId: lockedId,
+                      ...(lockedGuide
+                        ? { epgDisplayName: lockedGuide.displayName }
+                        : {}),
+                    }
                   : {}),
-              }
-            : {}),
-        candidateIds: unresolved?.candidateIds ?? [],
-      };
-    });
+              candidateIds: unresolved?.candidateIds ?? [],
+              ...unresolvedFlags,
+            };
+          });
     const normalizedSearch = search?.trim().toLocaleLowerCase('en-US') ?? '';
     const visible = mappings
       .filter(
@@ -2740,6 +2885,7 @@ export class PostgresSourceRepository implements SourceRepository {
         (item) => item.status === 'ambiguous',
       ).length,
       manualCount: lockedMappings.length,
+      excludedCount,
       total: channels.length,
       truncated: visible.length > limit,
     };
@@ -3299,6 +3445,7 @@ export class PostgresSourceRepository implements SourceRepository {
           AND policy.provider_group = c.provider_group
          WHERE c.source_id = $1 AND c.archived_at IS NULL
            AND c.enabled = TRUE AND c.current_upstream_item_id IS NOT NULL
+           AND c.epg_excluded = FALSE
            AND COALESCE(policy.behavior, 'permanent') = 'permanent'
          ORDER BY display_name, c.id`,
       [sourceId],
@@ -3326,6 +3473,7 @@ export class PostgresSourceRepository implements SourceRepository {
          WHERE c.source_id = $1 AND mapping.manually_locked = TRUE
            AND c.archived_at IS NULL AND c.enabled = TRUE
            AND c.current_upstream_item_id IS NOT NULL
+           AND c.epg_excluded = FALSE
            AND COALESCE(policy.behavior, 'permanent') = 'permanent'`,
       [sourceId],
     );

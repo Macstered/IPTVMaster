@@ -793,6 +793,14 @@ class MemorySourceRepository implements SourceRepository {
       if (value === null) delete updated[key];
       else updated[key] = value;
     }
+    if (input.epgExcluded !== undefined) {
+      if (input.epgExcluded) {
+        updated.epgExcluded = true;
+        this.epgMappings.delete(updated.id);
+      } else {
+        delete updated.epgExcluded;
+      }
+    }
     this.channels[index] = updated;
     return updated;
   }
@@ -818,6 +826,14 @@ class MemorySourceRepository implements SourceRepository {
         if (value === undefined) continue;
         if (value === null) delete updated[key];
         else updated[key] = value;
+      }
+      if (input.epgExcluded !== undefined) {
+        if (input.epgExcluded) {
+          updated.epgExcluded = true;
+          this.epgMappings.delete(updated.id);
+        } else {
+          delete updated.epgExcluded;
+        }
       }
       return updated;
     });
@@ -911,12 +927,38 @@ class MemorySourceRepository implements SourceRepository {
     sourceId: string,
     search: string | undefined,
     limit: number,
+    view: 'mappable' | 'excluded' = 'mappable',
   ) {
     const normalizedSearch = search?.toLocaleLowerCase() ?? '';
+    const excludedChannels = this.channels.filter(
+      (channel) => channel.sourceId === sourceId && channel.epgExcluded,
+    );
+    if (view === 'excluded') {
+      const excludedMappings = excludedChannels.map((channel) => ({
+        channelId: channel.id,
+        channelName: channel.customName ?? channel.providerName,
+        providerGroup: channel.providerGroup,
+        ...(channel.tvgId ? { tvgId: channel.tvgId } : {}),
+        status: 'excluded' as const,
+        manuallyLocked: false,
+        candidateIds: [],
+      }));
+      return {
+        mappings: excludedMappings.slice(0, limit),
+        matchedCount: 0,
+        missingCount: 0,
+        ambiguousCount: 0,
+        manualCount: 0,
+        excludedCount: excludedChannels.length,
+        total: 0,
+        truncated: excludedMappings.length > limit,
+      };
+    }
     const mappings = this.channels
       .filter(
         (channel) =>
           channel.sourceId === sourceId &&
+          !channel.epgExcluded &&
           (!normalizedSearch ||
             [channel.providerName, channel.providerGroup, channel.tvgId ?? '']
               .join(' ')
@@ -969,6 +1011,7 @@ class MemorySourceRepository implements SourceRepository {
         (mapping) => mapping.status === 'ambiguous',
       ).length,
       manualCount: mappings.filter((mapping) => mapping.manuallyLocked).length,
+      excludedCount: excludedChannels.length,
       total: mappings.length,
       truncated: mappings.length > limit,
     };
@@ -1961,6 +2004,100 @@ describe('IPTVMaster API', () => {
       }),
     );
     expect(unlockResponse.statusCode).toBe(204);
+  });
+
+  it('excludes never-mappable channels from EPG review and lists them separately', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const separatorId = '00000000-0000-4000-8000-000000000031';
+    const realId = '00000000-0000-4000-8000-000000000032';
+    repository.channels = [
+      {
+        id: separatorId,
+        sourceId: source.id,
+        providerName: '-=Finland=-',
+        providerGroup: 'Finland',
+        enabled: true,
+        sortOrder: 1,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+      {
+        id: realId,
+        sourceId: source.id,
+        providerName: 'Yle TV1',
+        providerGroup: 'Finland',
+        tvgId: 'yle1.fi',
+        enabled: true,
+        sortOrder: 2,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    ];
+    repository.latestEpg = {
+      channels: [{ id: 'yle1.fi', displayName: 'Yle TV1' }],
+      programmes: [],
+    };
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const excludeResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels`,
+      payload: { channelIds: [separatorId], update: { epgExcluded: true } },
+    });
+    const mappableReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    const excludedReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings?view=excluded`,
+    });
+    const includeResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/sources/${source.id}/channels/${separatorId}`,
+      payload: { epgExcluded: false },
+    });
+    const restoredReview = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+
+    expect(excludeResponse.statusCode).toBe(200);
+    expect(excludeResponse.json()).toEqual({ updatedCount: 1 });
+    expect(mappableReview.statusCode).toBe(200);
+    expect(mappableReview.json()).toEqual(
+      expect.objectContaining({ excludedCount: 1, total: 1, matchedCount: 1 }),
+    );
+    expect(
+      mappableReview
+        .json()
+        .mappings.some(
+          (mapping: { channelId: string }) => mapping.channelId === separatorId,
+        ),
+    ).toBe(false);
+    expect(excludedReview.statusCode).toBe(200);
+    expect(excludedReview.json().mappings).toEqual([
+      expect.objectContaining({
+        channelId: separatorId,
+        channelName: '-=Finland=-',
+        status: 'excluded',
+      }),
+    ]);
+    expect(includeResponse.statusCode).toBe(200);
+    expect(includeResponse.json().channel.epgExcluded).toBeUndefined();
+    expect(restoredReview.json()).toEqual(
+      expect.objectContaining({ excludedCount: 0, total: 2 }),
+    );
   });
 
   it('publishes a token-protected M3U with event policies applied', async () => {
