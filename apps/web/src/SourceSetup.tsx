@@ -1021,6 +1021,18 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
           candidate.id === payload.channel.id ? payload.channel : candidate,
         ),
       );
+      setOutputGroupChannels((current) =>
+        current
+          .map((candidate) =>
+            candidate.id === payload.channel.id ? payload.channel : candidate,
+          )
+          .filter(
+            (candidate) =>
+              expandedOutputGroup === null ||
+              (candidate.customGroup ?? candidate.providerGroup) ===
+                expandedOutputGroup,
+          ),
+      );
       await Promise.all([
         refreshPermanentWorkspace(source.id),
         loadEpgMappingReview(source.id, epgMappingSearch),
@@ -2749,7 +2761,9 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
                             </small>
                             {outputGroupChannels.map((channel) => (
                               <div
-                                className="output-group-channel-row"
+                                className={`output-group-channel-row ${
+                                  channel.enabled ? '' : 'disabled'
+                                }`}
                                 key={channel.id}
                                 draggable={savingChannel === null}
                                 onDragStart={(
@@ -2795,6 +2809,26 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
                                   </strong>
                                   <small>{channel.providerGroup}</small>
                                 </div>
+                                <button
+                                  className="secondary-button compact output-group-channel-visibility"
+                                  type="button"
+                                  aria-label={`${channel.enabled ? 'Hide' : 'Show'} ${
+                                    channel.customName ?? channel.providerName
+                                  }`}
+                                  disabled={savingChannel !== null}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void updateChannel(primarySource, channel, {
+                                      enabled: !channel.enabled,
+                                    });
+                                  }}
+                                >
+                                  {savingChannel === channel.id
+                                    ? 'Saving…'
+                                    : channel.enabled
+                                      ? 'Hide'
+                                      : 'Show'}
+                                </button>
                               </div>
                             ))}
                             {!loadingOutputGroupChannels &&

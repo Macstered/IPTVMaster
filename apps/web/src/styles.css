@@ -1333,7 +1333,7 @@ h2 {
 }
 .output-group-channel-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   min-height: 31px;
@@ -1342,6 +1342,9 @@ h2 {
   border-bottom: 1px solid #112a3b;
   border-radius: 0;
   background: transparent;
+}
+.output-group-channel-row.disabled {
+  opacity: 0.58;
 }
 .output-group-channel-row:last-child {
   border-bottom: 0;
@@ -1370,6 +1373,13 @@ h2 {
   margin-top: 0;
   color: #70889c;
   font-size: 10px;
+}
+.output-group-channel-row .output-group-channel-visibility {
+  grid-row: auto;
+  height: 27px;
+  min-height: 27px;
+  padding: 0 8px;
+  font-size: 9px;
 }
 .hidden-group-toggle,
 .permanent-visibility-toggle {
