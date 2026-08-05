@@ -349,6 +349,17 @@ function namespaceGuide(
   };
 }
 
+export function appendXmltvGuide(
+  target: { channels: XmltvChannel[]; programmes: XmltvProgramme[] },
+  guide: {
+    channels: readonly XmltvChannel[];
+    programmes: readonly XmltvProgramme[];
+  },
+): void {
+  for (const channel of guide.channels) target.channels.push(channel);
+  for (const programme of guide.programmes) target.programmes.push(programme);
+}
+
 function positiveEnvironmentNumber(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -1846,20 +1857,16 @@ export async function buildApp(
       return reply.code(503).send({ error: 'EPG is not ready' });
     }
     const isCombined = profile.sourceIds.length > 1;
-    const guide = readyGuides.reduce<{
+    const guide: {
       channels: XmltvChannel[];
       programmes: XmltvProgramme[];
-    }>(
-      (combined, sourceGuide) => {
-        const next = isCombined
-          ? namespaceGuide(sourceGuide.sourceId, sourceGuide.guide)
-          : sourceGuide.guide;
-        combined.channels.push(...next.channels);
-        combined.programmes.push(...next.programmes);
-        return combined;
-      },
-      { channels: [], programmes: [] },
-    );
+    } = { channels: [], programmes: [] };
+    for (const sourceGuide of readyGuides) {
+      const next = isCombined
+        ? namespaceGuide(sourceGuide.sourceId, sourceGuide.guide)
+        : sourceGuide.guide;
+      appendXmltvGuide(guide, next);
+    }
     return reply
       .type('application/xml; charset=utf-8')
       .header('cache-control', 'private, no-store')

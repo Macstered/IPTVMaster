@@ -6,9 +6,10 @@ import {
   type OutputGroupPolicy,
   type PlaylistInspection,
   type XmltvInspection,
+  type XmltvProgramme,
 } from '@iptvmaster/core';
 
-import { buildApp } from './app.js';
+import { appendXmltvGuide, buildApp } from './app.js';
 import {
   deriveXmltvUrl,
   SnapshotActivationConflictError,
@@ -882,6 +883,27 @@ afterEach(async () => {
 });
 
 describe('IPTVMaster API', () => {
+  it('appends a large XMLTV guide without spreading it onto the call stack', () => {
+    const programme: XmltvProgramme = {
+      channelId: 'guide-1',
+      start: '2026-08-05T12:00:00.000Z',
+      title: 'Synthetic programme',
+    };
+    const guide = {
+      channels: [{ id: 'guide-1', displayName: 'Guide one' }],
+      programmes: Array.from({ length: 150_000 }, () => programme),
+    };
+    const output = { channels: [], programmes: [] } as {
+      channels: typeof guide.channels;
+      programmes: XmltvProgramme[];
+    };
+
+    appendXmltvGuide(output, guide);
+
+    expect(output.channels).toHaveLength(1);
+    expect(output.programmes).toHaveLength(150_000);
+  });
+
   it('reports health', async () => {
     const app = await buildApp();
     applications.push(app);
@@ -1007,6 +1029,20 @@ describe('IPTVMaster API', () => {
     expect(repository.inputs[0]?.credentials.epgUrl).toContain(
       'password=synthetic-secret',
     );
+  });
+
+  it('removes M3U-only options when deriving an XMLTV URL', () => {
+    const derived = deriveXmltvUrl(
+      'http://provider.test/get.php?username=synthetic-user&password=synthetic-secret&type=m3u_plus&output?ts',
+    );
+
+    expect(derived).not.toBeNull();
+    const url = new URL(derived!);
+    expect(url.pathname).toBe('/xmltv.php');
+    expect([...url.searchParams.entries()]).toEqual([
+      ['username', 'synthetic-user'],
+      ['password', 'synthetic-secret'],
+    ]);
   });
 
   it('removes a provider and revokes every output that includes it', async () => {

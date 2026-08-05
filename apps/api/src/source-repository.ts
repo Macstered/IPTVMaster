@@ -608,6 +608,16 @@ export function deriveXmltvUrl(playlistUrl: string): string | null {
   const url = new URL(playlistUrl);
   if (!/\/get\.php$/i.test(url.pathname)) return null;
   url.pathname = url.pathname.replace(/get\.php$/i, 'xmltv.php');
+  for (const key of [...url.searchParams.keys()]) {
+    const normalizedKey = key.toLowerCase();
+    if (
+      normalizedKey === 'type' ||
+      normalizedKey === 'output' ||
+      normalizedKey.startsWith('output?')
+    ) {
+      url.searchParams.delete(key);
+    }
+  }
   return url.toString();
 }
 
