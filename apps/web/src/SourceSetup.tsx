@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from 'react';
+import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
 interface Capabilities {
   version: string;
@@ -142,6 +142,11 @@ interface PermanentGroupSummary {
   outputGroupName?: string;
 }
 
+interface CustomCategory {
+  name: string;
+  channelCount: number;
+}
+
 interface ChannelDraft {
   customName: string;
   customGroup: string;
@@ -272,6 +277,8 @@ function formatEventTime(value: string | undefined, timeZone: string): string {
 export function SourceSetup() {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [sources, setSources] = useState<SafeSource[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [showSourceForm, setShowSourceForm] = useState(false);
   const [name, setName] = useState('Home provider');
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [epgUrl, setEpgUrl] = useState('');
@@ -320,12 +327,23 @@ export function SourceSetup() {
   const [savingPermanentGroup, setSavingPermanentGroup] = useState<
     string | null
   >(null);
+  const [draggedPermanentGroup, setDraggedPermanentGroup] = useState<
+    string | null
+  >(null);
+  const [draggedChannelId, setDraggedChannelId] = useState<string | null>(null);
   const [permanentGroupNames, setPermanentGroupNames] = useState<
     Record<string, string>
   >({});
   const [permanentGroupOrders, setPermanentGroupOrders] = useState<
     Record<string, string>
   >({});
+  const [showHiddenPermanentGroups, setShowHiddenPermanentGroups] =
+    useState(true);
+  const [customCategories, setCustomCategories] = useState<CustomCategory[]>(
+    [],
+  );
+  const [newCustomCategory, setNewCustomCategory] = useState('');
+  const [savingCustomCategory, setSavingCustomCategory] = useState(false);
   const [review, setReview] = useState<ReconciliationReview | null>(null);
   const [reviewMatches, setReviewMatches] = useState<Record<string, string>>(
     {},
@@ -351,10 +369,15 @@ export function SourceSetup() {
     null,
   );
   const [creatingOutput, setCreatingOutput] = useState(false);
+  const [outputSourceIds, setOutputSourceIds] = useState<string[]>([]);
+  const [outputName, setOutputName] = useState('TiviMate');
   const [outputProfile, setOutputProfile] =
     useState<CreatedOutputProfile | null>(null);
   const [playlistOutputUrl, setPlaylistOutputUrl] = useState('');
   const [epgOutputUrl, setEpgOutputUrl] = useState('');
+  const [collapsedSections, setCollapsedSections] = useState<
+    Record<string, boolean>
+  >({});
 
   async function loadGroups(sourceId: string) {
     const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
@@ -365,7 +388,7 @@ export function SourceSetup() {
   async function loadChannels(sourceId: string, group?: string) {
     setLoadingChannels(true);
     try {
-      const parameters = new URLSearchParams({ limit: '100' });
+      const parameters = new URLSearchParams({ limit: '2000' });
       if (group !== undefined) parameters.set('group', group);
       const response = await fetch(
         `/api/v1/sources/${sourceId}/channels?${parameters.toString()}`,
@@ -394,8 +417,19 @@ export function SourceSetup() {
     }
   }
 
+  async function loadCustomCategories(sourceId: string) {
+    const response = await fetch(
+      `/api/v1/sources/${sourceId}/custom-categories`,
+    );
+    const payload = await readJson<{ categories: CustomCategory[] }>(response);
+    setCustomCategories(payload.categories);
+  }
+
   async function refreshPermanentWorkspace(sourceId: string) {
-    const updates: Promise<void>[] = [loadPermanentGroups(sourceId)];
+    const updates: Promise<void>[] = [
+      loadPermanentGroups(sourceId),
+      loadCustomCategories(sourceId),
+    ];
     if (expandedPermanentGroup !== null) {
       updates.push(loadChannels(sourceId, expandedPermanentGroup));
     }
@@ -484,9 +518,12 @@ export function SourceSetup() {
             setSources(payload.sources);
             const firstSource = payload.sources[0];
             if (firstSource) {
+              setSelectedSourceId(firstSource.id);
+              setOutputSourceIds([firstSource.id]);
               await Promise.all([
                 loadGroups(firstSource.id),
                 loadPermanentGroups(firstSource.id),
+                loadCustomCategories(firstSource.id),
                 loadReconciliationReview(firstSource.id),
                 loadSourceHistory(firstSource.id),
                 loadEventReview(firstSource.id),
@@ -509,6 +546,35 @@ export function SourceSetup() {
     };
   }, []);
 
+  async function selectSource(source: SafeSource) {
+    if (source.id === selectedSourceId) return;
+    setSelectedSourceId(source.id);
+    setImportSummary(null);
+    setEpgImportSummary(null);
+    setExpandedPermanentGroup(null);
+    setChannels([]);
+    setChannelTotal(0);
+    setSelectedChannelIds([]);
+    setEditingChannel(null);
+    setError(null);
+    try {
+      await Promise.all([
+        loadGroups(source.id),
+        loadPermanentGroups(source.id),
+        loadCustomCategories(source.id),
+        loadReconciliationReview(source.id),
+        loadSourceHistory(source.id),
+        loadEventReview(source.id),
+        loadEpgMappingReview(source.id),
+        loadEpgGuideChannels(source.id),
+      ]);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not load provider',
+      );
+    }
+  }
+
   async function saveSource(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -530,6 +596,11 @@ export function SourceSetup() {
       setSources((current) => [...current, payload.source]);
       setPlaylistUrl('');
       setEpgUrl('');
+      setShowSourceForm(false);
+      setOutputSourceIds((current) =>
+        current.length > 0 ? current : [payload.source.id],
+      );
+      await selectSource(payload.source);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : 'Could not save source',
@@ -831,6 +902,142 @@ export function SourceSetup() {
     }
   }
 
+  async function createCustomCategory(event: FormEvent, source: SafeSource) {
+    event.preventDefault();
+    const name = newCustomCategory.trim();
+    if (!name) return;
+    setSavingCustomCategory(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/custom-categories`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name }),
+        },
+      );
+      await readJson<{ category: CustomCategory }>(response);
+      setNewCustomCategory('');
+      await loadCustomCategories(source.id);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not create category',
+      );
+    } finally {
+      setSavingCustomCategory(false);
+    }
+  }
+
+  function reordered<T extends { id: string }>(
+    values: T[],
+    draggedId: string,
+    targetId: string,
+  ): T[] {
+    const from = values.findIndex((value) => value.id === draggedId);
+    const to = values.findIndex((value) => value.id === targetId);
+    if (from < 0 || to < 0 || from === to) return values;
+    const next = [...values];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return values;
+    next.splice(to, 0, moved);
+    return next;
+  }
+
+  async function savePermanentGroupOrder(
+    source: SafeSource,
+    draggedGroup: string,
+    targetGroup: string,
+  ) {
+    const rows = permanentGroups.map((group) => ({
+      id: group.providerGroup,
+      group,
+    }));
+    const nextRows = reordered(rows, draggedGroup, targetGroup);
+    if (nextRows === rows) return;
+    const nextGroups = nextRows.map((row) => row.group);
+    setPermanentGroups(nextGroups);
+    setSavingPermanentGroup(draggedGroup);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/permanent-groups/order`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            providerGroups: nextGroups.map((group) => group.providerGroup),
+          }),
+        },
+      );
+      if (!response.ok) await readJson<never>(response);
+      await loadPermanentGroups(source.id);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not save group order',
+      );
+      await loadPermanentGroups(source.id);
+    } finally {
+      setSavingPermanentGroup(null);
+    }
+  }
+
+  async function saveChannelOrder(
+    source: SafeSource,
+    draggedId: string,
+    targetId: string,
+  ) {
+    const next = reordered(channels, draggedId, targetId);
+    if (next === channels || expandedPermanentGroup === null) return;
+    setChannels(next);
+    setSavingChannel(draggedId);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/channels/order`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            providerGroup: expandedPermanentGroup,
+            channelIds: next.map((channel) => channel.id),
+          }),
+        },
+      );
+      if (!response.ok) await readJson<never>(response);
+      await Promise.all([
+        loadChannels(source.id, expandedPermanentGroup),
+        loadPermanentGroups(source.id),
+      ]);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save channel order',
+      );
+      await loadChannels(source.id, expandedPermanentGroup);
+    } finally {
+      setSavingChannel(null);
+    }
+  }
+
+  function toggleSection(section: string) {
+    setCollapsedSections((current) => ({
+      ...current,
+      [section]: !current[section],
+    }));
+  }
+
+  function toggleOutputSource(sourceId: string) {
+    setOutputSourceIds((current) =>
+      current.includes(sourceId)
+        ? current.length === 1
+          ? current
+          : current.filter((id) => id !== sourceId)
+        : [...current, sourceId],
+    );
+  }
+
   function toggleChannelSelection(channelId: string) {
     setSelectedChannelIds((current) =>
       current.includes(channelId)
@@ -1051,14 +1258,18 @@ export function SourceSetup() {
     }
   }
 
-  async function createOutputProfile(source: SafeSource) {
+  async function createOutputProfile() {
+    if (outputSourceIds.length === 0) return;
     setCreatingOutput(true);
     setError(null);
     try {
       const response = await fetch('/api/v1/output-profiles', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sourceId: source.id, name: 'TiviMate' }),
+        body: JSON.stringify({
+          sourceIds: outputSourceIds,
+          name: outputName.trim() || 'TiviMate',
+        }),
       });
       const payload = await readJson<{ profile: CreatedOutputProfile }>(
         response,
@@ -1113,18 +1324,22 @@ export function SourceSetup() {
         : group.behavior === 'event',
     )
     .slice(0, 50);
-  const primarySource = sources[0];
+  const primarySource =
+    sources.find((source) => source.id === selectedSourceId) ?? sources[0];
   const normalizedPermanentGroupFilter = permanentGroupFilter
     .trim()
     .toLocaleLowerCase();
-  const visiblePermanentGroups = permanentGroups.filter((group) =>
-    normalizedPermanentGroupFilter
+  const visiblePermanentGroups = permanentGroups.filter((group) => {
+    const groupMatches = normalizedPermanentGroupFilter
       ? [group.providerGroup, group.outputGroupName ?? '']
           .join(' ')
           .toLocaleLowerCase()
           .includes(normalizedPermanentGroupFilter)
-      : true,
-  );
+      : true;
+    const visibilityMatches =
+      showHiddenPermanentGroups || group.enabledCount > 0;
+    return groupMatches && visibilityMatches;
+  });
   const permanentChannelCount = permanentGroups.reduce(
     (total, group) => total + group.channelCount,
     0,
@@ -1162,7 +1377,8 @@ export function SourceSetup() {
         </p>
       ) : null}
 
-      {capabilities?.sourcePersistence && sources.length === 0 ? (
+      {capabilities?.sourcePersistence &&
+      (sources.length === 0 || showSourceForm) ? (
         <form className="source-form" onSubmit={saveSource}>
           <div>
             <label htmlFor="source-name">Source name</label>
@@ -1199,6 +1415,16 @@ export function SourceSetup() {
           <button type="submit" disabled={saving}>
             {saving ? 'Saving securely…' : 'Save encrypted source'}
           </button>
+          {sources.length > 0 ? (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={saving}
+              onClick={() => setShowSourceForm(false)}
+            >
+              Cancel
+            </button>
+          ) : null}
           <p className="secret-note">
             URLs are encrypted before database storage and never shown again.
           </p>
@@ -1208,7 +1434,12 @@ export function SourceSetup() {
       {sources.length > 0 ? (
         <div className="saved-source-list">
           {sources.map((source) => (
-            <article className="saved-source" key={source.id}>
+            <article
+              className={`saved-source ${
+                source.id === primarySource?.id ? 'selected' : ''
+              }`}
+              key={source.id}
+            >
               <div className="source-symbol">TV</div>
               <div>
                 <strong>{source.name}</strong>
@@ -1232,8 +1463,23 @@ export function SourceSetup() {
                 <button
                   className="secondary-button"
                   type="button"
+                  disabled={source.id === primarySource?.id}
+                  onClick={() => void selectSource(source)}
+                >
+                  {source.id === primarySource?.id
+                    ? 'Editing this provider'
+                    : 'Edit this provider'}
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
                   disabled={inspectingId !== null || importingEpgId !== null}
-                  onClick={() => void inspectSource(source)}
+                  onClick={() =>
+                    void (async () => {
+                      await selectSource(source);
+                      await inspectSource(source);
+                    })()
+                  }
                 >
                   {inspectingId === source.id
                     ? 'Importing…'
@@ -1244,7 +1490,12 @@ export function SourceSetup() {
                     className="secondary-button"
                     type="button"
                     disabled={inspectingId !== null || importingEpgId !== null}
-                    onClick={() => void importEpg(source)}
+                    onClick={() =>
+                      void (async () => {
+                        await selectSource(source);
+                        await importEpg(source);
+                      })()
+                    }
                   >
                     {importingEpgId === source.id
                       ? 'Importing guide…'
@@ -1255,6 +1506,18 @@ export function SourceSetup() {
             </article>
           ))}
         </div>
+      ) : null}
+
+      {capabilities?.sourcePersistence &&
+      sources.length > 0 &&
+      !showSourceForm ? (
+        <button
+          className="secondary-button add-provider-button"
+          type="button"
+          onClick={() => setShowSourceForm(true)}
+        >
+          Add another provider
+        </button>
       ) : null}
 
       {importSummary ? (
@@ -1318,90 +1581,102 @@ export function SourceSetup() {
             <span className="channel-count">
               {sourceHistory.snapshots.length} shown
             </span>
+            <button
+              className="secondary-button compact section-toggle"
+              type="button"
+              onClick={() => toggleSection('history')}
+            >
+              {collapsedSections.history ? 'Expand' : 'Collapse'}
+            </button>
           </div>
-          <p className="secret-note">
-            Restore a previously accepted playlist if a provider update is
-            wrong. Channel overrides remain yours; uncertain matches return to
-            the review queue. A later provider refresh can reactivate newer
-            retained data.
-          </p>
-          <div className="history-grid">
-            <div className="snapshot-list" aria-label="Retained snapshots">
-              {sourceHistory.snapshots.slice(0, 6).map((snapshot) => (
-                <article
-                  className={`snapshot-row ${snapshot.isCurrent ? 'current' : ''}`}
-                  key={snapshot.id}
-                >
-                  <div className="snapshot-main">
-                    <strong>{formatHistoryTime(snapshot.importedAt)}</strong>
-                    <small>
-                      {snapshot.liveCount.toLocaleString()} live ·{' '}
-                      {snapshot.issueCount.toLocaleString()} issues ·{' '}
-                      {snapshot.fingerprint.slice(0, 8)}
-                    </small>
-                  </div>
-                  {snapshot.isCurrent ? (
-                    <span className="snapshot-current">CURRENT</span>
-                  ) : (
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      disabled={restoringSnapshot !== null}
-                      onClick={() => setConfirmingSnapshot(snapshot.id)}
-                    >
-                      Restore
-                    </button>
-                  )}
-                  {confirmingSnapshot === snapshot.id ? (
-                    <div className="snapshot-confirm">
-                      <p>
-                        Publish this retained playlist now and reconcile the
-                        permanent channels against it?
-                      </p>
-                      <div>
-                        <button
-                          className="danger-button compact"
-                          type="button"
-                          disabled={restoringSnapshot !== null}
-                          onClick={() =>
-                            void restoreSnapshot(primarySource, snapshot.id)
-                          }
-                        >
-                          {restoringSnapshot === snapshot.id
-                            ? 'Restoring…'
-                            : 'Confirm restore'}
-                        </button>
-                        <button
-                          className="secondary-button compact"
-                          type="button"
-                          disabled={restoringSnapshot !== null}
-                          onClick={() => setConfirmingSnapshot(null)}
-                        >
-                          Cancel
-                        </button>
+          <div hidden={collapsedSections.history}>
+            <p className="secret-note">
+              Restore a previously accepted playlist if a provider update is
+              wrong. Channel overrides remain yours; uncertain matches return to
+              the review queue. A later provider refresh can reactivate newer
+              retained data.
+            </p>
+            <div className="history-grid">
+              <div className="snapshot-list" aria-label="Retained snapshots">
+                {sourceHistory.snapshots.slice(0, 6).map((snapshot) => (
+                  <article
+                    className={`snapshot-row ${snapshot.isCurrent ? 'current' : ''}`}
+                    key={snapshot.id}
+                  >
+                    <div className="snapshot-main">
+                      <strong>{formatHistoryTime(snapshot.importedAt)}</strong>
+                      <small>
+                        {snapshot.liveCount.toLocaleString()} live ·{' '}
+                        {snapshot.issueCount.toLocaleString()} issues ·{' '}
+                        {snapshot.fingerprint.slice(0, 8)}
+                      </small>
+                    </div>
+                    {snapshot.isCurrent ? (
+                      <span className="snapshot-current">CURRENT</span>
+                    ) : (
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        disabled={restoringSnapshot !== null}
+                        onClick={() => setConfirmingSnapshot(snapshot.id)}
+                      >
+                        Restore
+                      </button>
+                    )}
+                    {confirmingSnapshot === snapshot.id ? (
+                      <div className="snapshot-confirm">
+                        <p>
+                          Publish this retained playlist now and reconcile the
+                          permanent channels against it?
+                        </p>
+                        <div>
+                          <button
+                            className="danger-button compact"
+                            type="button"
+                            disabled={restoringSnapshot !== null}
+                            onClick={() =>
+                              void restoreSnapshot(primarySource, snapshot.id)
+                            }
+                          >
+                            {restoringSnapshot === snapshot.id
+                              ? 'Restoring…'
+                              : 'Confirm restore'}
+                          </button>
+                          <button
+                            className="secondary-button compact"
+                            type="button"
+                            disabled={restoringSnapshot !== null}
+                            onClick={() => setConfirmingSnapshot(null)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-            <div className="activity-list" aria-label="Recent source activity">
-              {sourceHistory.activity.length > 0 ? (
-                sourceHistory.activity.slice(0, 10).map((activity) => (
-                  <article className="activity-row" key={activity.id}>
-                    <span
-                      className={`activity-status ${activity.status ?? 'succeeded'}`}
-                    />
-                    <div>
-                      <strong>{activity.title}</strong>
-                      <p>{activity.detail}</p>
-                      <small>{formatHistoryTime(activity.occurredAt)}</small>
-                    </div>
+                    ) : null}
                   </article>
-                ))
-              ) : (
-                <p className="review-clear">No activity has been recorded.</p>
-              )}
+                ))}
+              </div>
+              <div
+                className="activity-list"
+                aria-label="Recent source activity"
+              >
+                {sourceHistory.activity.length > 0 ? (
+                  sourceHistory.activity.slice(0, 10).map((activity) => (
+                    <article className="activity-row" key={activity.id}>
+                      <span
+                        className={`activity-status ${activity.status ?? 'succeeded'}`}
+                      />
+                      <div>
+                        <strong>{activity.title}</strong>
+                        <p>{activity.detail}</p>
+                        <small>{formatHistoryTime(activity.occurredAt)}</small>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <p className="review-clear">No activity has been recorded.</p>
+                )}
+              </div>
             </div>
           </div>
         </section>
@@ -1414,209 +1689,222 @@ export function SourceSetup() {
               <small>GROUP RULES</small>
               <strong>Choose transient live-event groups</strong>
             </div>
-            <input
-              aria-label="Filter provider groups"
-              placeholder="Filter groups"
-              value={groupFilter}
-              onChange={(event) => setGroupFilter(event.target.value)}
-            />
+            <div className="section-heading-controls">
+              <input
+                aria-label="Filter provider groups"
+                placeholder="Filter groups"
+                value={groupFilter}
+                onChange={(event) => setGroupFilter(event.target.value)}
+              />
+              <button
+                className="secondary-button compact section-toggle"
+                type="button"
+                onClick={() => toggleSection('group-rules')}
+              >
+                {collapsedSections['group-rules'] ? 'Expand' : 'Collapse'}
+              </button>
+            </div>
           </div>
-          <p className="secret-note">
-            Event groups receive Swedish-to-Finnish time conversion and
-            placeholder filtering. Search a provider group name to make it an
-            event; permanent TV groups are managed below.
-          </p>
-          <div className="group-list">
-            {visibleGroups.map((group) => (
-              <div className="group-row" key={group.providerGroup}>
-                <div>
-                  <strong>{group.providerGroup || '(Ungrouped)'}</strong>
-                  <small>
-                    {group.channelCount.toLocaleString()} live entries
-                  </small>
-                </div>
-                <span className={`behavior-badge ${group.behavior}`}>
-                  {group.behavior === 'event' ? 'LIVE EVENT' : 'LIVE TV'}
-                </span>
-                {group.behavior === 'event' ? (
+          <div hidden={collapsedSections['group-rules']}>
+            <p className="secret-note">
+              Event groups receive Swedish-to-Finnish time conversion and
+              placeholder filtering. Search a provider group name to make it an
+              event; permanent TV groups are managed below.
+            </p>
+            <div className="group-list">
+              {visibleGroups.map((group) => (
+                <div className="group-row" key={group.providerGroup}>
+                  <div>
+                    <strong>{group.providerGroup || '(Ungrouped)'}</strong>
+                    <small>
+                      {group.channelCount.toLocaleString()} live entries
+                    </small>
+                  </div>
+                  <span className={`behavior-badge ${group.behavior}`}>
+                    {group.behavior === 'event' ? 'LIVE EVENT' : 'LIVE TV'}
+                  </span>
+                  {group.behavior === 'event' ? (
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      disabled={savingGroup !== null}
+                      onClick={() => beginEventRuleEdit(group)}
+                    >
+                      Edit rule
+                    </button>
+                  ) : (
+                    <span className="group-action-spacer" />
+                  )}
                   <button
                     className="secondary-button compact"
                     type="button"
                     disabled={savingGroup !== null}
-                    onClick={() => beginEventRuleEdit(group)}
+                    onClick={() =>
+                      void setGroupBehavior(
+                        primarySource,
+                        group,
+                        group.behavior === 'event' ? 'permanent' : 'event',
+                      )
+                    }
                   >
-                    Edit rule
+                    {savingGroup === group.providerGroup
+                      ? 'Saving…'
+                      : group.behavior === 'event'
+                        ? 'Treat as TV'
+                        : 'Mark as event'}
                   </button>
-                ) : (
-                  <span className="group-action-spacer" />
-                )}
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  disabled={savingGroup !== null}
-                  onClick={() =>
-                    void setGroupBehavior(
-                      primarySource,
-                      group,
-                      group.behavior === 'event' ? 'permanent' : 'event',
-                    )
-                  }
-                >
-                  {savingGroup === group.providerGroup
-                    ? 'Saving…'
-                    : group.behavior === 'event'
-                      ? 'Treat as TV'
-                      : 'Mark as event'}
+                </div>
+              ))}
+              {visibleGroups.length === 0 ? (
+                <p className="empty-groups">No groups match this filter.</p>
+              ) : null}
+            </div>
+
+            {editedEventGroup && eventRuleDraft ? (
+              <form
+                className="event-rule-form"
+                onSubmit={(event) =>
+                  void saveEventRule(event, primarySource, editedEventGroup)
+                }
+              >
+                <div className="event-rule-heading">
+                  <div>
+                    <small>EVENT GROUP RULE</small>
+                    <strong>{editedEventGroup.providerGroup}</strong>
+                  </div>
+                  <button
+                    className="secondary-button compact"
+                    type="button"
+                    disabled={savingGroup !== null}
+                    onClick={() => {
+                      setEditingEventGroup(null);
+                      setEventRuleDraft(null);
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
+                <label className="event-check">
+                  <input
+                    type="checkbox"
+                    checked={eventRuleDraft.enabled}
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? { ...current, enabled: event.target.checked }
+                          : current,
+                      )
+                    }
+                  />
+                  Publish this event group
+                </label>
+                <label className="event-check">
+                  <input
+                    type="checkbox"
+                    checked={eventRuleDraft.hidePlaceholders}
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              hidePlaceholders: event.target.checked,
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                  Hide matching placeholders
+                </label>
+                <label>
+                  Output group
+                  <input
+                    value={eventRuleDraft.outputGroupName}
+                    placeholder="Keep provider group"
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? { ...current, outputGroupName: event.target.value }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+                <label>
+                  Provider timezone
+                  <input
+                    value={eventRuleDraft.sourceTimeZone}
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? { ...current, sourceTimeZone: event.target.value }
+                          : current,
+                      )
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  Display timezone
+                  <input
+                    value={eventRuleDraft.displayTimeZone}
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? { ...current, displayTimeZone: event.target.value }
+                          : current,
+                      )
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  Numeric date order
+                  <select
+                    value={eventRuleDraft.numericDateOrder}
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              numericDateOrder: event.target.value as
+                                'month-day' | 'day-month',
+                            }
+                          : current,
+                      )
+                    }
+                  >
+                    <option value="month-day">Month / day</option>
+                    <option value="day-month">Day / month</option>
+                  </select>
+                </label>
+                <label className="placeholder-patterns">
+                  Placeholder patterns, one per line
+                  <textarea
+                    rows={5}
+                    value={eventRuleDraft.placeholderPatterns}
+                    placeholder={
+                      'reload your playlist\nlive during events only'
+                    }
+                    onChange={(event) =>
+                      setEventRuleDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              placeholderPatterns: event.target.value,
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+                <button type="submit" disabled={savingGroup !== null}>
+                  {savingGroup === editedEventGroup.providerGroup
+                    ? 'Saving rule...'
+                    : 'Save event rule'}
                 </button>
-              </div>
-            ))}
-            {visibleGroups.length === 0 ? (
-              <p className="empty-groups">No groups match this filter.</p>
+              </form>
             ) : null}
           </div>
-
-          {editedEventGroup && eventRuleDraft ? (
-            <form
-              className="event-rule-form"
-              onSubmit={(event) =>
-                void saveEventRule(event, primarySource, editedEventGroup)
-              }
-            >
-              <div className="event-rule-heading">
-                <div>
-                  <small>EVENT GROUP RULE</small>
-                  <strong>{editedEventGroup.providerGroup}</strong>
-                </div>
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  disabled={savingGroup !== null}
-                  onClick={() => {
-                    setEditingEventGroup(null);
-                    setEventRuleDraft(null);
-                  }}
-                >
-                  Close
-                </button>
-              </div>
-              <label className="event-check">
-                <input
-                  type="checkbox"
-                  checked={eventRuleDraft.enabled}
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? { ...current, enabled: event.target.checked }
-                        : current,
-                    )
-                  }
-                />
-                Publish this event group
-              </label>
-              <label className="event-check">
-                <input
-                  type="checkbox"
-                  checked={eventRuleDraft.hidePlaceholders}
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            hidePlaceholders: event.target.checked,
-                          }
-                        : current,
-                    )
-                  }
-                />
-                Hide matching placeholders
-              </label>
-              <label>
-                Output group
-                <input
-                  value={eventRuleDraft.outputGroupName}
-                  placeholder="Keep provider group"
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? { ...current, outputGroupName: event.target.value }
-                        : current,
-                    )
-                  }
-                />
-              </label>
-              <label>
-                Provider timezone
-                <input
-                  value={eventRuleDraft.sourceTimeZone}
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? { ...current, sourceTimeZone: event.target.value }
-                        : current,
-                    )
-                  }
-                  required
-                />
-              </label>
-              <label>
-                Display timezone
-                <input
-                  value={eventRuleDraft.displayTimeZone}
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? { ...current, displayTimeZone: event.target.value }
-                        : current,
-                    )
-                  }
-                  required
-                />
-              </label>
-              <label>
-                Numeric date order
-                <select
-                  value={eventRuleDraft.numericDateOrder}
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            numericDateOrder: event.target.value as
-                              'month-day' | 'day-month',
-                          }
-                        : current,
-                    )
-                  }
-                >
-                  <option value="month-day">Month / day</option>
-                  <option value="day-month">Day / month</option>
-                </select>
-              </label>
-              <label className="placeholder-patterns">
-                Placeholder patterns, one per line
-                <textarea
-                  rows={5}
-                  value={eventRuleDraft.placeholderPatterns}
-                  placeholder={'reload your playlist\nlive during events only'}
-                  onChange={(event) =>
-                    setEventRuleDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            placeholderPatterns: event.target.value,
-                          }
-                        : current,
-                    )
-                  }
-                />
-              </label>
-              <button type="submit" disabled={savingGroup !== null}>
-                {savingGroup === editedEventGroup.providerGroup
-                  ? 'Saving rule...'
-                  : 'Save event rule'}
-              </button>
-            </form>
-          ) : null}
 
           {eventReview && eventReview.groups.length > 0 ? (
             <section className="event-review" id="events">
@@ -1625,83 +1913,94 @@ export function SourceSetup() {
                   <small>LIVE EVENT REVIEW</small>
                   <strong>Provider and Finnish labels</strong>
                 </div>
-                <select
-                  aria-label="Review event group"
-                  value={selectedEventGroup}
-                  onChange={(event) =>
-                    setSelectedEventGroup(event.target.value)
-                  }
-                >
-                  {eventReview.groups.map((group) => (
-                    <option value={group.groupName} key={group.groupName}>
-                      {group.groupName}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <p className="secret-note">
-                Events are ordered by their calculated Finnish start time.
-                Unparseable labels remain usable and are flagged instead of
-                being renamed. Reference date: {eventReview.referenceDate}.
-              </p>
-              {activeEventReview ? (
-                <>
-                  <div className="event-review-summary">
-                    <span>{activeEventReview.totalEntries} entries</span>
-                    <span>{activeEventReview.localizedEntries} parsed</span>
-                    <span>{activeEventReview.hiddenEntries} hidden</span>
-                    <span>{activeEventReview.warningEntries} warnings</span>
-                  </div>
-                  <div className="event-entry-list">
-                    {activeEventReview.entries.map((entry) => (
-                      <article
-                        className={`event-entry ${entry.hidden ? 'hidden' : ''}`}
-                        key={entry.id}
-                      >
-                        <div className="event-name-pair">
-                          <div>
-                            <small>PROVIDER</small>
-                            <strong>{entry.originalName}</strong>
-                          </div>
-                          <span>→</span>
-                          <div>
-                            <small>TIVIMATE</small>
-                            <strong>{entry.localizedName}</strong>
-                          </div>
-                        </div>
-                        <div className="event-entry-meta">
-                          <span className={`event-status ${entry.status}`}>
-                            {entry.hidden ? 'hidden' : entry.status}
-                          </span>
-                          <small>
-                            {formatEventTime(
-                              entry.sourceDateTime,
-                              activeEventReview.timePolicy?.sourceTimeZone ??
-                                'Europe/Stockholm',
-                            )}{' '}
-                            →{' '}
-                            {formatEventTime(
-                              entry.displayDateTime,
-                              activeEventReview.timePolicy?.displayTimeZone ??
-                                'Europe/Helsinki',
-                            )}
-                          </small>
-                        </div>
-                        {entry.hideReason || entry.warning ? (
-                          <p className="event-warning">
-                            {entry.hideReason ?? entry.warning}
-                          </p>
-                        ) : null}
-                      </article>
+                <div className="section-heading-controls">
+                  <select
+                    aria-label="Review event group"
+                    value={selectedEventGroup}
+                    onChange={(event) =>
+                      setSelectedEventGroup(event.target.value)
+                    }
+                  >
+                    {eventReview.groups.map((group) => (
+                      <option value={group.groupName} key={group.groupName}>
+                        {group.groupName}
+                      </option>
                     ))}
-                  </div>
-                  {eventReview.truncated ? (
-                    <small className="channel-limit-note">
-                      Review is limited to 200 entries per event group.
-                    </small>
-                  ) : null}
-                </>
-              ) : null}
+                  </select>
+                  <button
+                    className="secondary-button compact section-toggle"
+                    type="button"
+                    onClick={() => toggleSection('events')}
+                  >
+                    {collapsedSections.events ? 'Expand' : 'Collapse'}
+                  </button>
+                </div>
+              </div>
+              <div hidden={collapsedSections.events}>
+                <p className="secret-note">
+                  Events are ordered by their calculated Finnish start time.
+                  Unparseable labels remain usable and are flagged instead of
+                  being renamed. Reference date: {eventReview.referenceDate}.
+                </p>
+                {activeEventReview ? (
+                  <>
+                    <div className="event-review-summary">
+                      <span>{activeEventReview.totalEntries} entries</span>
+                      <span>{activeEventReview.localizedEntries} parsed</span>
+                      <span>{activeEventReview.hiddenEntries} hidden</span>
+                      <span>{activeEventReview.warningEntries} warnings</span>
+                    </div>
+                    <div className="event-entry-list">
+                      {activeEventReview.entries.map((entry) => (
+                        <article
+                          className={`event-entry ${entry.hidden ? 'hidden' : ''}`}
+                          key={entry.id}
+                        >
+                          <div className="event-name-pair">
+                            <div>
+                              <small>PROVIDER</small>
+                              <strong>{entry.originalName}</strong>
+                            </div>
+                            <span>→</span>
+                            <div>
+                              <small>TIVIMATE</small>
+                              <strong>{entry.localizedName}</strong>
+                            </div>
+                          </div>
+                          <div className="event-entry-meta">
+                            <span className={`event-status ${entry.status}`}>
+                              {entry.hidden ? 'hidden' : entry.status}
+                            </span>
+                            <small>
+                              {formatEventTime(
+                                entry.sourceDateTime,
+                                activeEventReview.timePolicy?.sourceTimeZone ??
+                                  'Europe/Stockholm',
+                              )}{' '}
+                              →{' '}
+                              {formatEventTime(
+                                entry.displayDateTime,
+                                activeEventReview.timePolicy?.displayTimeZone ??
+                                  'Europe/Helsinki',
+                              )}
+                            </small>
+                          </div>
+                          {entry.hideReason || entry.warning ? (
+                            <p className="event-warning">
+                              {entry.hideReason ?? entry.warning}
+                            </p>
+                          ) : null}
+                        </article>
+                      ))}
+                    </div>
+                    {eventReview.truncated ? (
+                      <small className="channel-limit-note">
+                        Review is limited to 200 entries per event group.
+                      </small>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             </section>
           ) : null}
 
@@ -1716,165 +2015,178 @@ export function SourceSetup() {
                   {epgMappingReview.matchedCount.toLocaleString()} of{' '}
                   {epgMappingReview.total.toLocaleString()} matched
                 </span>
+                <button
+                  className="secondary-button compact section-toggle"
+                  type="button"
+                  onClick={() => toggleSection('epg')}
+                >
+                  {collapsedSections.epg ? 'Expand' : 'Collapse'}
+                </button>
               </div>
-              <p className="secret-note">
-                Exact TVG IDs and unique normalized names are paired
-                automatically. Lock a manual choice only when the provider and
-                XMLTV names do not identify the same channel reliably.
-              </p>
-              <div className="epg-mapping-summary">
-                <span>{epgMappingReview.matchedCount} matched</span>
-                <span>{epgMappingReview.missingCount} missing</span>
-                <span>{epgMappingReview.ambiguousCount} ambiguous</span>
-                <span>{epgMappingReview.manualCount} manual locks</span>
-              </div>
-              <div className="epg-search-grid">
-                <form onSubmit={(event) => void searchEpgMappings(event)}>
-                  <label htmlFor="epg-mapping-search">
-                    Filter playlist channels
-                  </label>
-                  <div>
-                    <input
-                      id="epg-mapping-search"
-                      value={epgMappingSearch}
-                      placeholder="Channel, group, or TVG ID"
-                      onChange={(event) =>
-                        setEpgMappingSearch(event.target.value)
-                      }
-                    />
-                    <button className="secondary-button" type="submit">
-                      Filter
-                    </button>
-                  </div>
-                </form>
-                <form onSubmit={(event) => void searchEpgGuide(event)}>
-                  <label htmlFor="epg-guide-search">Search XMLTV choices</label>
-                  <div>
-                    <input
-                      id="epg-guide-search"
-                      value={epgGuideSearch}
-                      placeholder="Guide name or XMLTV ID"
-                      onChange={(event) =>
-                        setEpgGuideSearch(event.target.value)
-                      }
-                    />
-                    <button className="secondary-button" type="submit">
-                      Search
-                    </button>
-                  </div>
-                </form>
-              </div>
-              {epgGuideChannels?.truncated ? (
-                <small className="channel-limit-note">
-                  XMLTV choices are limited to 200 results. Narrow the guide
-                  search to find another channel.
-                </small>
-              ) : null}
-              <div className="epg-mapping-list">
-                {epgMappingReview.mappings.map((mapping) => {
-                  const selected =
-                    epgMappingSelections[mapping.channelId] ?? '';
-                  const selectedIsVisible =
-                    epgGuideChannels?.channels.some(
-                      (channel) => channel.id === selected,
-                    ) ?? false;
-                  return (
-                    <article
-                      className="epg-mapping-row"
-                      key={mapping.channelId}
-                    >
-                      <div className="epg-playlist-channel">
-                        <small>PLAYLIST</small>
-                        <strong>{mapping.channelName}</strong>
-                        <span>
-                          {mapping.providerGroup || '(Ungrouped)'}
-                          {mapping.tvgId ? ` · ${mapping.tvgId}` : ''}
+              <div hidden={collapsedSections.epg}>
+                <p className="secret-note">
+                  Exact TVG IDs and unique normalized names are paired
+                  automatically. Lock a manual choice only when the provider and
+                  XMLTV names do not identify the same channel reliably.
+                </p>
+                <div className="epg-mapping-summary">
+                  <span>{epgMappingReview.matchedCount} matched</span>
+                  <span>{epgMappingReview.missingCount} missing</span>
+                  <span>{epgMappingReview.ambiguousCount} ambiguous</span>
+                  <span>{epgMappingReview.manualCount} manual locks</span>
+                </div>
+                <div className="epg-search-grid">
+                  <form onSubmit={(event) => void searchEpgMappings(event)}>
+                    <label htmlFor="epg-mapping-search">
+                      Filter playlist channels
+                    </label>
+                    <div>
+                      <input
+                        id="epg-mapping-search"
+                        value={epgMappingSearch}
+                        placeholder="Channel, group, or TVG ID"
+                        onChange={(event) =>
+                          setEpgMappingSearch(event.target.value)
+                        }
+                      />
+                      <button className="secondary-button" type="submit">
+                        Filter
+                      </button>
+                    </div>
+                  </form>
+                  <form onSubmit={(event) => void searchEpgGuide(event)}>
+                    <label htmlFor="epg-guide-search">
+                      Search XMLTV choices
+                    </label>
+                    <div>
+                      <input
+                        id="epg-guide-search"
+                        value={epgGuideSearch}
+                        placeholder="Guide name or XMLTV ID"
+                        onChange={(event) =>
+                          setEpgGuideSearch(event.target.value)
+                        }
+                      />
+                      <button className="secondary-button" type="submit">
+                        Search
+                      </button>
+                    </div>
+                  </form>
+                </div>
+                {epgGuideChannels?.truncated ? (
+                  <small className="channel-limit-note">
+                    XMLTV choices are limited to 200 results. Narrow the guide
+                    search to find another channel.
+                  </small>
+                ) : null}
+                <div className="epg-mapping-list">
+                  {epgMappingReview.mappings.map((mapping) => {
+                    const selected =
+                      epgMappingSelections[mapping.channelId] ?? '';
+                    const selectedIsVisible =
+                      epgGuideChannels?.channels.some(
+                        (channel) => channel.id === selected,
+                      ) ?? false;
+                    return (
+                      <article
+                        className="epg-mapping-row"
+                        key={mapping.channelId}
+                      >
+                        <div className="epg-playlist-channel">
+                          <small>PLAYLIST</small>
+                          <strong>{mapping.channelName}</strong>
+                          <span>
+                            {mapping.providerGroup || '(Ungrouped)'}
+                            {mapping.tvgId ? ` · ${mapping.tvgId}` : ''}
+                          </span>
+                        </div>
+                        <span
+                          className={`epg-mapping-status ${mapping.status}`}
+                        >
+                          {mapping.manuallyLocked
+                            ? 'manual lock'
+                            : mapping.status}
                         </span>
-                      </div>
-                      <span className={`epg-mapping-status ${mapping.status}`}>
-                        {mapping.manuallyLocked
-                          ? 'manual lock'
-                          : mapping.status}
-                      </span>
-                      <div className="epg-mapping-control">
-                        <select
-                          aria-label={`EPG channel for ${mapping.channelName}`}
-                          value={selected}
-                          onChange={(event) =>
-                            setEpgMappingSelections((current) => ({
-                              ...current,
-                              [mapping.channelId]: event.target.value,
-                            }))
-                          }
-                        >
-                          <option value="">Choose XMLTV channel</option>
-                          {selected && !selectedIsVisible ? (
-                            <option value={selected}>
-                              {mapping.epgDisplayName ?? selected} (current)
-                            </option>
-                          ) : null}
-                          {epgGuideChannels?.channels.map((channel) => (
-                            <option value={channel.id} key={channel.id}>
-                              {channel.displayName} · {channel.id}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          className="secondary-button compact"
-                          type="button"
-                          disabled={!selected || savingEpgMapping !== null}
-                          onClick={() =>
-                            void saveEpgMapping(primarySource, mapping)
-                          }
-                        >
-                          {savingEpgMapping === mapping.channelId
-                            ? 'Saving...'
-                            : 'Lock mapping'}
-                        </button>
-                        {mapping.manuallyLocked ? (
+                        <div className="epg-mapping-control">
+                          <select
+                            aria-label={`EPG channel for ${mapping.channelName}`}
+                            value={selected}
+                            onChange={(event) =>
+                              setEpgMappingSelections((current) => ({
+                                ...current,
+                                [mapping.channelId]: event.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">Choose XMLTV channel</option>
+                            {selected && !selectedIsVisible ? (
+                              <option value={selected}>
+                                {mapping.epgDisplayName ?? selected} (current)
+                              </option>
+                            ) : null}
+                            {epgGuideChannels?.channels.map((channel) => (
+                              <option value={channel.id} key={channel.id}>
+                                {channel.displayName} · {channel.id}
+                              </option>
+                            ))}
+                          </select>
                           <button
                             className="secondary-button compact"
                             type="button"
-                            disabled={savingEpgMapping !== null}
+                            disabled={!selected || savingEpgMapping !== null}
                             onClick={() =>
-                              void unlockEpgMapping(primarySource, mapping)
+                              void saveEpgMapping(primarySource, mapping)
                             }
                           >
-                            Use automatic
+                            {savingEpgMapping === mapping.channelId
+                              ? 'Saving...'
+                              : 'Lock mapping'}
                           </button>
-                        ) : null}
-                      </div>
-                      {mapping.status === 'ambiguous' ? (
-                        <small className="epg-mapping-note">
-                          Multiple guide channels share the same normalized
-                          identity. Choose the correct one manually.
-                        </small>
-                      ) : mapping.status === 'missing' ? (
-                        <small className="epg-mapping-note">
-                          No safe automatic match. Search the XMLTV choices or
-                          leave this channel without guide data.
-                        </small>
-                      ) : (
-                        <small className="epg-mapping-note matched">
-                          {mapping.epgDisplayName} · {mapping.epgChannelId}
-                        </small>
-                      )}
-                    </article>
-                  );
-                })}
-                {epgMappingReview.mappings.length === 0 ? (
-                  <p className="empty-groups">
-                    Import both the playlist and XMLTV guide, or change the
-                    channel filter.
-                  </p>
+                          {mapping.manuallyLocked ? (
+                            <button
+                              className="secondary-button compact"
+                              type="button"
+                              disabled={savingEpgMapping !== null}
+                              onClick={() =>
+                                void unlockEpgMapping(primarySource, mapping)
+                              }
+                            >
+                              Use automatic
+                            </button>
+                          ) : null}
+                        </div>
+                        {mapping.status === 'ambiguous' ? (
+                          <small className="epg-mapping-note">
+                            Multiple guide channels share the same normalized
+                            identity. Choose the correct one manually.
+                          </small>
+                        ) : mapping.status === 'missing' ? (
+                          <small className="epg-mapping-note">
+                            No safe automatic match. Search the XMLTV choices or
+                            leave this channel without guide data.
+                          </small>
+                        ) : (
+                          <small className="epg-mapping-note matched">
+                            {mapping.epgDisplayName} · {mapping.epgChannelId}
+                          </small>
+                        )}
+                      </article>
+                    );
+                  })}
+                  {epgMappingReview.mappings.length === 0 ? (
+                    <p className="empty-groups">
+                      Import both the playlist and XMLTV guide, or change the
+                      channel filter.
+                    </p>
+                  ) : null}
+                </div>
+                {epgMappingReview.truncated ? (
+                  <small className="channel-limit-note">
+                    Showing the first 100 playlist channels. Narrow the channel
+                    filter to review the rest.
+                  </small>
                 ) : null}
               </div>
-              {epgMappingReview.truncated ? (
-                <small className="channel-limit-note">
-                  Showing the first 100 playlist channels. Narrow the channel
-                  filter to review the rest.
-                </small>
-              ) : null}
             </section>
           ) : null}
 
@@ -1889,203 +2201,270 @@ export function SourceSetup() {
                 {permanentGroups.length === 1 ? 'group' : 'groups'} ·{' '}
                 {permanentChannelCount.toLocaleString()} channels
               </span>
+              <button
+                className="secondary-button compact section-toggle"
+                type="button"
+                onClick={() => toggleSection('permanent')}
+              >
+                {collapsedSections.permanent ? 'Expand' : 'Collapse'}
+              </button>
             </div>
-            <p className="secret-note">
-              Expand a provider group to manage its channels. Group-wide changes
-              affect every current channel in that group; channel edits remain
-              available inside it. Event groups keep their separate automatic
-              daily handling. Setting a group order makes its channels
-              consecutive from that number in the output.
-            </p>
-            <div className="channel-search">
-              <input
-                aria-label="Filter permanent groups"
-                placeholder="Filter provider or output groups"
-                value={permanentGroupFilter}
-                onChange={(event) =>
-                  setPermanentGroupFilter(event.target.value)
-                }
-              />
-              <small>
-                {visiblePermanentGroups.length.toLocaleString()} shown
-              </small>
-            </div>
+            <div hidden={collapsedSections.permanent}>
+              <p className="secret-note">
+                Expand a provider group to manage its channels. Group-wide
+                changes affect every current channel in that group; channel
+                edits remain available inside it. Event groups keep their
+                separate automatic daily handling. Drag groups to set their
+                output order, then drag channels inside an expanded group to
+                refine that order.
+              </p>
+              <div className="channel-search">
+                <input
+                  aria-label="Filter permanent groups"
+                  placeholder="Filter provider or output groups"
+                  value={permanentGroupFilter}
+                  onChange={(event) =>
+                    setPermanentGroupFilter(event.target.value)
+                  }
+                />
+                <label className="hidden-group-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showHiddenPermanentGroups}
+                    onChange={(event) =>
+                      setShowHiddenPermanentGroups(event.target.checked)
+                    }
+                  />
+                  Show hidden groups
+                </label>
+                <small>
+                  {visiblePermanentGroups.length.toLocaleString()} shown
+                </small>
+              </div>
 
-            <div className="permanent-group-list" aria-live="polite">
-              {visiblePermanentGroups.map((group) => {
-                const isExpanded =
-                  expandedPermanentGroup === group.providerGroup;
-                const customGroupValue =
-                  permanentGroupNames[group.providerGroup] ??
-                  (group.outputGroupStatus === 'custom'
-                    ? (group.outputGroupName ?? '')
-                    : '');
-                const orderValue =
-                  permanentGroupOrders[group.providerGroup] ??
-                  String(group.firstSortOrder);
-                const outputLabel =
-                  group.outputGroupStatus === 'mixed'
-                    ? 'Mixed output groups'
-                    : `Output: ${
-                        group.outputGroupName ??
-                        (group.providerGroup || '(Ungrouped)')
-                      }`;
-                const isSaving = savingPermanentGroup === group.providerGroup;
-                return (
-                  <article
-                    className={`permanent-group ${
-                      group.hiddenCount === group.channelCount ? 'hidden' : ''
-                    }`}
-                    key={group.providerGroup}
-                  >
-                    <button
-                      className="permanent-group-toggle"
-                      type="button"
-                      aria-expanded={isExpanded}
-                      disabled={isSaving}
-                      onClick={() =>
-                        void togglePermanentGroup(
-                          primarySource,
-                          group.providerGroup,
-                        )
-                      }
+              <form
+                className="custom-category-form"
+                onSubmit={(event) =>
+                  void createCustomCategory(event, primarySource)
+                }
+              >
+                <label htmlFor="new-custom-category">
+                  Custom categories stay available even before a channel is
+                  moved.
+                </label>
+                <input
+                  id="new-custom-category"
+                  list="custom-category-choices"
+                  placeholder="New custom category"
+                  value={newCustomCategory}
+                  onChange={(event) => setNewCustomCategory(event.target.value)}
+                />
+                <button
+                  className="secondary-button"
+                  type="submit"
+                  disabled={savingCustomCategory || !newCustomCategory.trim()}
+                >
+                  {savingCustomCategory ? 'Creating…' : 'Make custom category'}
+                </button>
+                <datalist id="custom-category-choices">
+                  {customCategories.map((category) => (
+                    <option value={category.name} key={category.name}>
+                      {category.channelCount} channels
+                    </option>
+                  ))}
+                </datalist>
+              </form>
+
+              <div className="permanent-group-list" aria-live="polite">
+                {visiblePermanentGroups.map((group) => {
+                  const isExpanded =
+                    expandedPermanentGroup === group.providerGroup;
+                  const customGroupValue =
+                    permanentGroupNames[group.providerGroup] ??
+                    (group.outputGroupStatus === 'custom'
+                      ? (group.outputGroupName ?? '')
+                      : '');
+                  const orderValue =
+                    permanentGroupOrders[group.providerGroup] ??
+                    String(group.firstSortOrder);
+                  const outputLabel =
+                    group.outputGroupStatus === 'mixed'
+                      ? 'Mixed output groups'
+                      : `Output: ${
+                          group.outputGroupName ??
+                          (group.providerGroup || '(Ungrouped)')
+                        }`;
+                  const isSaving = savingPermanentGroup === group.providerGroup;
+                  return (
+                    <article
+                      className={`permanent-group ${
+                        group.hiddenCount === group.channelCount ? 'hidden' : ''
+                      }`}
+                      key={group.providerGroup}
+                      draggable={!normalizedPermanentGroupFilter && !isSaving}
+                      onDragStart={(event) => {
+                        setDraggedPermanentGroup(group.providerGroup);
+                        event.dataTransfer.effectAllowed = 'move';
+                      }}
+                      onDragEnd={() => setDraggedPermanentGroup(null)}
+                      onDragOver={(event) => {
+                        if (draggedPermanentGroup) event.preventDefault();
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const draggedGroup = draggedPermanentGroup;
+                        setDraggedPermanentGroup(null);
+                        if (draggedGroup) {
+                          void savePermanentGroupOrder(
+                            primarySource,
+                            draggedGroup,
+                            group.providerGroup,
+                          );
+                        }
+                      }}
                     >
-                      <span className="permanent-group-title">
-                        <strong>{group.providerGroup || '(Ungrouped)'}</strong>
-                        <small>
-                          {group.enabledCount.toLocaleString()} shown ·{' '}
-                          {group.hiddenCount.toLocaleString()} hidden ·{' '}
-                          {outputLabel}
-                        </small>
-                      </span>
-                      <span className="permanent-group-expand">
-                        {isExpanded ? 'Collapse' : 'Expand'}
-                      </span>
-                    </button>
-                    <div className="permanent-group-actions">
                       <button
-                        className="secondary-button compact"
+                        className="permanent-group-toggle"
                         type="button"
-                        disabled={
-                          isSaving || group.enabledCount === group.channelCount
-                        }
+                        aria-expanded={isExpanded}
+                        disabled={isSaving}
                         onClick={() =>
-                          void updatePermanentGroup(primarySource, group, {
-                            enabled: true,
-                          })
+                          void togglePermanentGroup(
+                            primarySource,
+                            group.providerGroup,
+                          )
                         }
                       >
-                        Show all
+                        <span className="permanent-group-title">
+                          <span className="drag-handle" aria-hidden="true">
+                            ⠿
+                          </span>
+                          <strong>
+                            {group.providerGroup || '(Ungrouped)'}
+                          </strong>
+                          <small>
+                            {group.enabledCount.toLocaleString()} shown ·{' '}
+                            {group.hiddenCount.toLocaleString()} hidden ·{' '}
+                            {outputLabel}
+                          </small>
+                        </span>
+                        <span className="permanent-group-expand">
+                          {isExpanded ? 'Collapse' : 'Expand'}
+                        </span>
                       </button>
-                      <button
-                        className="secondary-button compact"
-                        type="button"
-                        disabled={
-                          isSaving || group.hiddenCount === group.channelCount
-                        }
-                        onClick={() =>
-                          void updatePermanentGroup(primarySource, group, {
-                            enabled: false,
-                          })
-                        }
-                      >
-                        Hide all
-                      </button>
-                      <form
-                        className="permanent-group-name-form"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          if (!customGroupValue.trim()) return;
-                          void updatePermanentGroup(primarySource, group, {
-                            customGroup: customGroupValue.trim(),
-                          });
-                        }}
-                      >
-                        <input
-                          aria-label={`Output group for ${group.providerGroup}`}
-                          placeholder="Move all to output group"
-                          value={customGroupValue}
-                          onChange={(event) =>
-                            setPermanentGroupNames((current) => ({
-                              ...current,
-                              [group.providerGroup]: event.target.value,
-                            }))
-                          }
-                        />
-                        <button
-                          className="secondary-button compact"
-                          type="submit"
-                          disabled={isSaving || !customGroupValue.trim()}
-                        >
-                          Move all
-                        </button>
-                        <button
-                          className="secondary-button compact"
-                          type="button"
-                          disabled={
-                            isSaving || group.outputGroupStatus === 'provider'
-                          }
-                          onClick={() => {
-                            setPermanentGroupNames((current) => ({
-                              ...current,
-                              [group.providerGroup]: '',
-                            }));
+                      <div className="permanent-group-actions">
+                        <label className="permanent-visibility-toggle">
+                          <input
+                            type="checkbox"
+                            checked={group.enabledCount === group.channelCount}
+                            disabled={isSaving}
+                            onChange={(event) =>
+                              void updatePermanentGroup(primarySource, group, {
+                                enabled: event.target.checked,
+                              })
+                            }
+                          />
+                          {group.enabledCount === group.channelCount
+                            ? 'Visible'
+                            : 'Hidden'}
+                        </label>
+                        <form
+                          className="permanent-group-name-form"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            if (!customGroupValue.trim()) return;
                             void updatePermanentGroup(primarySource, group, {
-                              customGroup: null,
+                              customGroup: customGroupValue.trim(),
                             });
                           }}
                         >
-                          Reset
-                        </button>
-                      </form>
-                      <form
-                        className="permanent-group-order-form"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          const nextOrder = Number(orderValue);
-                          if (!Number.isInteger(nextOrder) || nextOrder < 0) {
-                            setError(
-                              'Group order must be a non-negative integer',
-                            );
-                            return;
-                          }
-                          void updatePermanentGroup(primarySource, group, {
-                            startSortOrder: nextOrder,
-                          });
-                        }}
-                      >
-                        <input
-                          aria-label={`First channel order for ${group.providerGroup}`}
-                          type="number"
-                          min="0"
-                          step="1"
-                          placeholder="First order"
-                          value={orderValue}
-                          onChange={(event) =>
-                            setPermanentGroupOrders((current) => ({
-                              ...current,
-                              [group.providerGroup]: event.target.value,
-                            }))
-                          }
-                        />
-                        <button
-                          className="secondary-button compact"
-                          type="submit"
-                          disabled={isSaving}
+                          <input
+                            aria-label={`Output group for ${group.providerGroup}`}
+                            list="custom-category-choices"
+                            placeholder="Move all to output group"
+                            value={customGroupValue}
+                            onChange={(event) =>
+                              setPermanentGroupNames((current) => ({
+                                ...current,
+                                [group.providerGroup]: event.target.value,
+                              }))
+                            }
+                          />
+                          <button
+                            className="secondary-button compact"
+                            type="submit"
+                            disabled={isSaving || !customGroupValue.trim()}
+                          >
+                            Move all
+                          </button>
+                          <button
+                            className="secondary-button compact"
+                            type="button"
+                            disabled={
+                              isSaving || group.outputGroupStatus === 'provider'
+                            }
+                            onClick={() => {
+                              setPermanentGroupNames((current) => ({
+                                ...current,
+                                [group.providerGroup]: '',
+                              }));
+                              void updatePermanentGroup(primarySource, group, {
+                                customGroup: null,
+                              });
+                            }}
+                          >
+                            Reset
+                          </button>
+                        </form>
+                        <form
+                          className="permanent-group-order-form"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            const nextOrder = Number(orderValue);
+                            if (!Number.isInteger(nextOrder) || nextOrder < 0) {
+                              setError(
+                                'Group order must be a non-negative integer',
+                              );
+                              return;
+                            }
+                            void updatePermanentGroup(primarySource, group, {
+                              startSortOrder: nextOrder,
+                            });
+                          }}
                         >
-                          Set order
-                        </button>
-                      </form>
-                    </div>
-                  </article>
-                );
-              })}
-              {!loadingPermanentGroups &&
-              visiblePermanentGroups.length === 0 ? (
-                <p className="empty-groups">
-                  Import a playlist or change the group filter.
-                </p>
-              ) : null}
+                          <input
+                            aria-label={`First channel order for ${group.providerGroup}`}
+                            type="number"
+                            min="0"
+                            step="1"
+                            placeholder="First order"
+                            value={orderValue}
+                            onChange={(event) =>
+                              setPermanentGroupOrders((current) => ({
+                                ...current,
+                                [group.providerGroup]: event.target.value,
+                              }))
+                            }
+                          />
+                          <button
+                            className="secondary-button compact"
+                            type="submit"
+                            disabled={isSaving}
+                          >
+                            Set order
+                          </button>
+                        </form>
+                      </div>
+                    </article>
+                  );
+                })}
+                {!loadingPermanentGroups &&
+                visiblePermanentGroups.length === 0 ? (
+                  <p className="empty-groups">
+                    Import a playlist or change the group filter.
+                  </p>
+                ) : null}
+              </div>
             </div>
 
             {review &&
@@ -2102,89 +2481,100 @@ export function SourceSetup() {
                     <span>{review.missingCount} missing</span>
                     <span>{review.ambiguousCount} ambiguous</span>
                   </div>
+                  <button
+                    className="secondary-button compact section-toggle"
+                    type="button"
+                    onClick={() => toggleSection('provider-review')}
+                  >
+                    {collapsedSections['provider-review']
+                      ? 'Expand'
+                      : 'Collapse'}
+                  </button>
                 </div>
-                <p className="secret-note">
-                  Select a current provider entry only when it is the same
-                  channel. The match is locked and an untouched duplicate is
-                  archived with an audit record.
-                </p>
-                {review.unresolvedChannels.length > 0 ? (
-                  <div className="review-list">
-                    {review.unresolvedChannels.map((channel) => (
-                      <div className="review-row" key={channel.id}>
-                        <div className="review-channel">
-                          <strong>
-                            {channel.customName ?? channel.providerName}
-                          </strong>
-                          <small>
-                            Previous: {channel.providerName} ·{' '}
-                            {channel.providerGroup || '(Ungrouped)'}
-                          </small>
-                        </div>
-                        <span
-                          className={`reconciliation-badge ${channel.reconciliationStatus}`}
-                        >
-                          {channel.reconciliationStatus}
-                        </span>
-                        <select
-                          aria-label={`Provider match for ${channel.customName ?? channel.providerName}`}
-                          value={reviewMatches[channel.id] ?? ''}
-                          onChange={(event) =>
-                            setReviewMatches((current) => ({
-                              ...current,
-                              [channel.id]: event.target.value,
-                            }))
-                          }
-                        >
-                          <option value="">
-                            Choose current provider entry
-                          </option>
-                          {review.candidates.map((candidate) => (
-                            <option
-                              value={candidate.upstreamItemId}
-                              key={candidate.upstreamItemId}
-                            >
-                              {candidate.providerName} —{' '}
-                              {candidate.providerGroup || '(Ungrouped)'}
-                              {candidate.linkedChannelStatus === 'new'
-                                ? ' [NEW]'
-                                : ''}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          className="secondary-button compact"
-                          type="button"
-                          disabled={
-                            resolvingChannel !== null ||
-                            !reviewMatches[channel.id]
-                          }
-                          onClick={() =>
-                            void resolveChannelMatch(primarySource, channel)
-                          }
-                        >
-                          {resolvingChannel === channel.id
-                            ? 'Matching…'
-                            : 'Match and lock'}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="review-clear">
-                    No missing or ambiguous channels need a manual decision.
+                <div hidden={collapsedSections['provider-review']}>
+                  <p className="secret-note">
+                    Select a current provider entry only when it is the same
+                    channel. The match is locked and an untouched duplicate is
+                    archived with an audit record.
                   </p>
-                )}
-                {review.truncated ? (
-                  <small className="channel-limit-note">
-                    Review results are limited to 100 entries. Use channel
-                    search to narrow large updates.
-                  </small>
-                ) : null}
+                  {review.unresolvedChannels.length > 0 ? (
+                    <div className="review-list">
+                      {review.unresolvedChannels.map((channel) => (
+                        <div className="review-row" key={channel.id}>
+                          <div className="review-channel">
+                            <strong>
+                              {channel.customName ?? channel.providerName}
+                            </strong>
+                            <small>
+                              Previous: {channel.providerName} ·{' '}
+                              {channel.providerGroup || '(Ungrouped)'}
+                            </small>
+                          </div>
+                          <span
+                            className={`reconciliation-badge ${channel.reconciliationStatus}`}
+                          >
+                            {channel.reconciliationStatus}
+                          </span>
+                          <select
+                            aria-label={`Provider match for ${channel.customName ?? channel.providerName}`}
+                            value={reviewMatches[channel.id] ?? ''}
+                            onChange={(event) =>
+                              setReviewMatches((current) => ({
+                                ...current,
+                                [channel.id]: event.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">
+                              Choose current provider entry
+                            </option>
+                            {review.candidates.map((candidate) => (
+                              <option
+                                value={candidate.upstreamItemId}
+                                key={candidate.upstreamItemId}
+                              >
+                                {candidate.providerName} —{' '}
+                                {candidate.providerGroup || '(Ungrouped)'}
+                                {candidate.linkedChannelStatus === 'new'
+                                  ? ' [NEW]'
+                                  : ''}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            className="secondary-button compact"
+                            type="button"
+                            disabled={
+                              resolvingChannel !== null ||
+                              !reviewMatches[channel.id]
+                            }
+                            onClick={() =>
+                              void resolveChannelMatch(primarySource, channel)
+                            }
+                          >
+                            {resolvingChannel === channel.id
+                              ? 'Matching…'
+                              : 'Match and lock'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="review-clear">
+                      No missing or ambiguous channels need a manual decision.
+                    </p>
+                  )}
+                  {review.truncated ? (
+                    <small className="channel-limit-note">
+                      Review results are limited to 100 entries. Use channel
+                      search to narrow large updates.
+                    </small>
+                  ) : null}
+                </div>
               </section>
             ) : null}
 
-            {expandedPermanentGroup !== null ? (
+            {!collapsedSections.permanent && expandedPermanentGroup !== null ? (
               <>
                 <div className="expanded-permanent-group-heading">
                   <strong>
@@ -2241,6 +2631,7 @@ export function SourceSetup() {
                     >
                       <input
                         aria-label="Bulk output group"
+                        list="custom-category-choices"
                         placeholder="Output group"
                         value={bulkGroup}
                         onChange={(event) => setBulkGroup(event.target.value)}
@@ -2276,7 +2667,38 @@ export function SourceSetup() {
                     <article
                       className={`channel-row ${channel.enabled ? '' : 'disabled'}`}
                       key={channel.id}
+                      draggable={
+                        channelTotal === channels.length &&
+                        savingChannel === null &&
+                        !bulkSaving
+                      }
+                      onDragStart={(event: DragEvent<HTMLElement>) => {
+                        setDraggedChannelId(channel.id);
+                        event.dataTransfer.effectAllowed = 'move';
+                      }}
+                      onDragEnd={() => setDraggedChannelId(null)}
+                      onDragOver={(event: DragEvent<HTMLElement>) => {
+                        if (draggedChannelId) event.preventDefault();
+                      }}
+                      onDrop={(event: DragEvent<HTMLElement>) => {
+                        event.preventDefault();
+                        const draggedId = draggedChannelId;
+                        setDraggedChannelId(null);
+                        if (draggedId) {
+                          void saveChannelOrder(
+                            primarySource,
+                            draggedId,
+                            channel.id,
+                          );
+                        }
+                      }}
                     >
+                      <span
+                        className="drag-handle channel-drag-handle"
+                        aria-hidden="true"
+                      >
+                        ⠿
+                      </span>
                       <input
                         className="channel-select"
                         type="checkbox"
@@ -2364,6 +2786,7 @@ export function SourceSetup() {
                           <label>
                             Output group
                             <input
+                              list="custom-category-choices"
                               value={channelDraft.customGroup}
                               placeholder={
                                 channel.providerGroup || '(Ungrouped)'
@@ -2441,21 +2864,52 @@ export function SourceSetup() {
 
           <div className="output-setup">
             <div>
-              <strong>TiviMate playlist and EPG URLs</strong>
+              <strong>Combined TiviMate playlist and EPG URLs</strong>
               <small>
-                Create a private, revocable URL after your group rules are
-                ready.
+                Pick one or more providers. Their channels and guide data are
+                combined into one private, revocable URL.
               </small>
+              <div hidden={collapsedSections.output}>
+                <label className="output-name-field" htmlFor="output-name">
+                  Output name
+                  <input
+                    id="output-name"
+                    value={outputName}
+                    onChange={(event) => setOutputName(event.target.value)}
+                  />
+                </label>
+                <div className="output-provider-list">
+                  {sources.map((source) => (
+                    <label key={source.id}>
+                      <input
+                        type="checkbox"
+                        checked={outputSourceIds.includes(source.id)}
+                        onChange={() => toggleOutputSource(source.id)}
+                      />
+                      {source.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
             </div>
-            <button
-              type="button"
-              disabled={creatingOutput}
-              onClick={() => void createOutputProfile(primarySource)}
-            >
-              {creatingOutput ? 'Creating…' : 'Create TiviMate URL'}
-            </button>
+            <div className="output-actions">
+              <button
+                className="secondary-button compact section-toggle"
+                type="button"
+                onClick={() => toggleSection('output')}
+              >
+                {collapsedSections.output ? 'Expand' : 'Collapse'}
+              </button>
+              <button
+                type="button"
+                disabled={creatingOutput || outputSourceIds.length === 0}
+                onClick={() => void createOutputProfile()}
+              >
+                {creatingOutput ? 'Creating…' : 'Create TiviMate URL'}
+              </button>
+            </div>
           </div>
-          {playlistOutputUrl ? (
+          {!collapsedSections.output && playlistOutputUrl ? (
             <div className="output-url">
               <label htmlFor="playlist-output-url">M3U playlist URL</label>
               <input

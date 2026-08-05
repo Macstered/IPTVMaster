@@ -16,6 +16,7 @@ import type {
   ChannelListFilters,
   ChannelListPage,
   ChannelSummary,
+  CustomCategory,
   CreateSourceInput,
   CreatedOutputProfile,
   GroupSummary,
@@ -50,20 +51,23 @@ class MemorySourceRepository implements SourceRepository {
   readonly inputs: CreateSourceInput[] = [];
   readonly sources: SafeSource[] = [];
   latestEntries: M3uEntry[] = [];
+  readonly latestEntriesBySource = new Map<string, M3uEntry[]>();
   policies: OutputGroupPolicy[] = [];
   outputProfile: ResolvedOutputProfile | null = null;
   latestEpg: StoredEpgGuide = { channels: [], programmes: [] };
+  readonly latestEpgBySource = new Map<string, StoredEpgGuide>();
   channels: ChannelSummary[] = [];
   reviewCandidates: ReconciliationCandidate[] = [];
   snapshots: SnapshotHistoryItem[] = [];
   activity: SourceActivityEvent[] = [];
   snapshotEntries = new Map<string, M3uEntry[]>();
   epgMappings = new Map<string, string>();
+  readonly customCategories = new Map<string, Set<string>>();
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
     const source: SafeSource = {
-      id: '00000000-0000-4000-8000-000000000001',
+      id: `00000000-0000-4000-8000-${String(this.inputs.length).padStart(12, '0')}`,
       name: input.name,
       sourceType: input.sourceType,
       sourceTimezone: input.sourceTimezone,
@@ -81,8 +85,11 @@ class MemorySourceRepository implements SourceRepository {
     return this.sources;
   }
 
-  async getSourceCredentials(): Promise<SourceCredentials | null> {
-    return this.inputs[0]?.credentials ?? null;
+  async getSourceCredentials(
+    sourceId: string,
+  ): Promise<SourceCredentials | null> {
+    const index = this.sources.findIndex((source) => source.id === sourceId);
+    return index < 0 ? null : (this.inputs[index]?.credentials ?? null);
   }
 
   async savePlaylistSnapshot(
@@ -98,6 +105,7 @@ class MemorySourceRepository implements SourceRepository {
       return { ...existing, unchanged: wasCurrent };
     }
     this.latestEntries = inspection.entries;
+    this.latestEntriesBySource.set(sourceId, inspection.entries);
     this.snapshots = this.snapshots.map((snapshot) => ({
       ...snapshot,
       isCurrent: false,
@@ -172,8 +180,8 @@ class MemorySourceRepository implements SourceRepository {
     return activated;
   }
 
-  async getLatestPlaylistEntries(): Promise<M3uEntry[]> {
-    return this.latestEntries;
+  async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
+    return this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
   }
 
   async saveEpgSnapshot(
@@ -184,6 +192,7 @@ class MemorySourceRepository implements SourceRepository {
       channels: inspection.channels,
       programmes: inspection.programmes,
     };
+    this.latestEpgBySource.set(sourceId, this.latestEpg);
     return {
       sourceId,
       fingerprint: inspection.fingerprint,
@@ -195,8 +204,8 @@ class MemorySourceRepository implements SourceRepository {
     };
   }
 
-  async getLatestEpg(): Promise<StoredEpgGuide> {
-    return this.latestEpg;
+  async getLatestEpg(sourceId: string): Promise<StoredEpgGuide> {
+    return this.latestEpgBySource.get(sourceId) ?? this.latestEpg;
   }
 
   async listGroups(): Promise<GroupSummary[]> {
@@ -310,7 +319,12 @@ class MemorySourceRepository implements SourceRepository {
       byGroup.set(channel.providerGroup, current);
     }
     return [...byGroup.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(
+        ([leftName, leftChannels], [rightName, rightChannels]) =>
+          Math.min(...leftChannels.map((channel) => channel.sortOrder)) -
+            Math.min(...rightChannels.map((channel) => channel.sortOrder)) ||
+          leftName.localeCompare(rightName),
+      )
       .map(([providerGroup, channels]) => {
         const customGroups = new Set(
           channels
@@ -383,6 +397,112 @@ class MemorySourceRepository implements SourceRepository {
       return updated;
     });
     return { updatedCount: matching.length };
+  }
+
+  async reorderPermanentGroups(
+    sourceId: string,
+    providerGroups: string[],
+  ): Promise<void> {
+    const groups = new Set(
+      this.channels
+        .filter((channel) => channel.sourceId === sourceId)
+        .map((channel) => channel.providerGroup),
+    );
+    if (
+      groups.size !== providerGroups.length ||
+      providerGroups.some((group) => !groups.has(group))
+    ) {
+      throw new Error('Permanent group order no longer matches this source');
+    }
+    const rank = new Map(providerGroups.map((group, index) => [group, index]));
+    const ordered = this.channels
+      .filter((channel) => channel.sourceId === sourceId)
+      .sort(
+        (left, right) =>
+          (rank.get(left.providerGroup) ?? 0) -
+            (rank.get(right.providerGroup) ?? 0) ||
+          left.sortOrder - right.sortOrder,
+      );
+    const sortOrders = new Map(
+      ordered.map((channel, index) => [channel.id, index]),
+    );
+    this.channels = this.channels.map((channel) =>
+      sortOrders.has(channel.id)
+        ? {
+            ...channel,
+            sortOrder: sortOrders.get(channel.id) ?? channel.sortOrder,
+          }
+        : channel,
+    );
+  }
+
+  async reorderChannels(
+    sourceId: string,
+    providerGroup: string,
+    channelIds: string[],
+  ): Promise<void> {
+    const matching = this.channels
+      .filter(
+        (channel) =>
+          channel.sourceId === sourceId &&
+          channel.providerGroup === providerGroup,
+      )
+      .sort((left, right) => left.sortOrder - right.sortOrder);
+    if (
+      matching.length !== channelIds.length ||
+      matching.some((channel) => !channelIds.includes(channel.id))
+    ) {
+      throw new Error('Channel order no longer matches this provider group');
+    }
+    const slots = matching.map((channel) => channel.sortOrder);
+    const sortOrders = new Map(
+      channelIds.map((id, index) => [id, slots[index]]),
+    );
+    this.channels = this.channels.map((channel) =>
+      sortOrders.has(channel.id)
+        ? {
+            ...channel,
+            sortOrder: sortOrders.get(channel.id) ?? channel.sortOrder,
+          }
+        : channel,
+    );
+  }
+
+  async listCustomCategories(sourceId: string): Promise<CustomCategory[]> {
+    const names = new Set(this.customCategories.get(sourceId) ?? []);
+    for (const channel of this.channels) {
+      if (channel.sourceId === sourceId && channel.customGroup) {
+        names.add(channel.customGroup);
+      }
+    }
+    return [...names]
+      .sort((left, right) => left.localeCompare(right))
+      .map((name) => ({
+        name,
+        channelCount: this.channels.filter(
+          (channel) =>
+            channel.sourceId === sourceId && channel.customGroup === name,
+        ).length,
+      }));
+  }
+
+  async createCustomCategory(
+    sourceId: string,
+    name: string,
+  ): Promise<CustomCategory> {
+    if (!this.sources.some((source) => source.id === sourceId)) {
+      throw new Error('Source not found while creating category');
+    }
+    const categories = this.customCategories.get(sourceId) ?? new Set<string>();
+    categories.add(name);
+    this.customCategories.set(sourceId, categories);
+    return {
+      name,
+      channelCount: this.channels.filter(
+        (channel) =>
+          channel.sourceId === sourceId && channel.customGroup === name,
+      ).length,
+    };
   }
 
   async updateChannel(
@@ -643,14 +763,14 @@ class MemorySourceRepository implements SourceRepository {
   }
 
   async createOutputProfile(
-    sourceId: string,
+    sourceIds: string[],
     name: string,
   ): Promise<CreatedOutputProfile> {
     const accessToken = 'synthetic_output_token_1234567890';
     this.outputProfile = {
       id: '00000000-0000-4000-8000-000000000003',
       name,
-      sourceId,
+      sourceIds,
     };
     return {
       id: this.outputProfile.id,
@@ -1461,7 +1581,7 @@ describe('IPTVMaster API', () => {
     const profileResponse = await app.inject({
       method: 'POST',
       url: '/api/v1/output-profiles',
-      payload: { sourceId: source.id, name: 'Living room TiviMate' },
+      payload: { sourceIds: [source.id], name: 'Living room TiviMate' },
     });
     const playlistPath = profileResponse.json().profile.playlistPath as string;
     const epgPath = profileResponse.json().profile.epgPath as string;
@@ -1504,5 +1624,133 @@ describe('IPTVMaster API', () => {
     expect(revokeResponse.statusCode).toBe(204);
     expect(revokedPlaylistResponse.statusCode).toBe(404);
     expect(revokedEpgResponse.statusCode).toBe(404);
+  });
+
+  it('creates custom categories, persists drag ordering, and combines providers', async () => {
+    const repository = new MemorySourceRepository();
+    const firstSource = await repository.createSource({
+      name: 'Provider one',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/one' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const secondSource = await repository.createSource({
+      name: 'Provider two',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/two' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    repository.channels = [
+      {
+        id: '00000000-0000-4000-8000-000000000011',
+        sourceId: firstSource.id,
+        providerName: 'Alpha one',
+        providerGroup: 'Alpha',
+        enabled: true,
+        sortOrder: 0,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-05T00:00:00.000Z',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000012',
+        sourceId: firstSource.id,
+        providerName: 'Beta one',
+        providerGroup: 'Beta',
+        enabled: true,
+        sortOrder: 1,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ];
+    repository.latestEntriesBySource.set(firstSource.id, [
+      {
+        duration: -1,
+        attributes: { 'tvg-id': 'shared', 'group-title': 'Alpha' },
+        name: 'Provider one channel',
+        url: 'http://provider.test/one/1',
+        mediaType: 'live',
+        lineNumber: 1,
+      },
+    ]);
+    repository.latestEntriesBySource.set(secondSource.id, [
+      {
+        duration: -1,
+        attributes: { 'tvg-id': 'shared', 'group-title': 'Beta' },
+        name: 'Provider two channel',
+        url: 'http://provider.test/two/1',
+        mediaType: 'live',
+        lineNumber: 1,
+      },
+    ]);
+    repository.latestEpgBySource.set(firstSource.id, {
+      channels: [{ id: 'shared', displayName: 'Provider one guide' }],
+      programmes: [],
+    });
+    repository.latestEpgBySource.set(secondSource.id, {
+      channels: [{ id: 'shared', displayName: 'Provider two guide' }],
+      programmes: [],
+    });
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const categoryResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/sources/${firstSource.id}/custom-categories`,
+      payload: { name: 'Finnish favourites' },
+    });
+    const categoryListResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${firstSource.id}/custom-categories`,
+    });
+    const groupOrderResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${firstSource.id}/permanent-groups/order`,
+      payload: { providerGroups: ['Beta', 'Alpha'] },
+    });
+    const channelOrderResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${firstSource.id}/channels/order`,
+      payload: {
+        providerGroup: 'Alpha',
+        channelIds: ['00000000-0000-4000-8000-000000000011'],
+      },
+    });
+    const profileResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/output-profiles',
+      payload: {
+        sourceIds: [firstSource.id, secondSource.id],
+        name: 'Combined room',
+      },
+    });
+    const playlistPath = profileResponse.json().profile.playlistPath as string;
+    const epgPath = profileResponse.json().profile.epgPath as string;
+    const playlistResponse = await app.inject({
+      method: 'GET',
+      url: playlistPath,
+    });
+    const epgResponse = await app.inject({ method: 'GET', url: epgPath });
+
+    expect(categoryResponse.statusCode).toBe(201);
+    expect(categoryListResponse.json().categories).toEqual([
+      expect.objectContaining({ name: 'Finnish favourites', channelCount: 0 }),
+    ]);
+    expect(groupOrderResponse.statusCode).toBe(204);
+    expect(channelOrderResponse.statusCode).toBe(204);
+    expect(profileResponse.statusCode).toBe(201);
+    expect(playlistResponse.body).toContain(
+      `tvg-id="${firstSource.id}:shared"`,
+    );
+    expect(playlistResponse.body).toContain(
+      `tvg-id="${secondSource.id}:shared"`,
+    );
+    expect(epgResponse.body).toContain(`channel id="${firstSource.id}:shared"`);
+    expect(epgResponse.body).toContain(
+      `channel id="${secondSource.id}:shared"`,
+    );
   });
 });

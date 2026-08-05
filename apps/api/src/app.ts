@@ -14,7 +14,9 @@ import {
   type EventGroupPolicy,
   type M3uEntry,
   type PlaylistInspection,
+  type XmltvChannel,
   type XmltvInspection,
+  type XmltvProgramme,
 } from '@iptvmaster/core';
 import Fastify, {
   type FastifyInstance,
@@ -108,7 +110,7 @@ const groupPolicySchema = z.object({
 });
 
 const outputProfileSchema = z.object({
-  sourceId: z.uuid(),
+  sourceIds: z.array(z.uuid()).min(1).max(20),
   name: z.string().trim().min(1).max(120).default('TiviMate'),
 });
 
@@ -116,7 +118,7 @@ const channelListSchema = z.object({
   search: z.string().trim().max(200).optional(),
   group: z.string().max(500).optional(),
   status: z.enum(['matched', 'new', 'missing', 'ambiguous']).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(100),
+  limit: z.coerce.number().int().min(1).max(2_000).default(100),
   offset: z.coerce.number().int().min(0).default(0),
 });
 
@@ -163,6 +165,19 @@ const permanentGroupUpdateSchema = z.object({
       (value) => Object.values(value).some((item) => item !== undefined),
       { message: 'At least one permanent group field is required' },
     ),
+});
+
+const permanentGroupOrderSchema = z.object({
+  providerGroups: z.array(z.string().max(500)).min(1).max(5_000),
+});
+
+const channelOrderSchema = z.object({
+  providerGroup: z.string().max(500),
+  channelIds: z.array(z.uuid()).min(1).max(5_000),
+});
+
+const customCategorySchema = z.object({
+  name: z.string().trim().min(1).max(500),
 });
 
 const reconciliationReviewSchema = z.object({
@@ -267,6 +282,43 @@ function currentDateInZone(timeZone: string): string {
     parts.map((part) => [part.type, part.value]),
   );
   return `${value['year']}-${value['month']}-${value['day']}`;
+}
+
+function outputGuideId(sourceId: string, guideId: string): string {
+  return `${sourceId}:${guideId}`;
+}
+
+function namespaceGuideEntries(
+  sourceId: string,
+  entries: readonly M3uEntry[],
+): M3uEntry[] {
+  return entries.map((entry) => {
+    const guideId = entry.attributes['tvg-id'];
+    if (!guideId) return entry;
+    return {
+      ...entry,
+      attributes: {
+        ...entry.attributes,
+        'tvg-id': outputGuideId(sourceId, guideId),
+      },
+    };
+  });
+}
+
+function namespaceGuide(
+  sourceId: string,
+  guide: { channels: XmltvChannel[]; programmes: XmltvProgramme[] },
+): { channels: XmltvChannel[]; programmes: XmltvProgramme[] } {
+  return {
+    channels: guide.channels.map((channel) => ({
+      ...channel,
+      id: outputGuideId(sourceId, channel.id),
+    })),
+    programmes: guide.programmes.map((programme) => ({
+      ...programme,
+      channelId: outputGuideId(sourceId, programme.channelId),
+    })),
+  };
 }
 
 function positiveEnvironmentNumber(name: string, fallback: number): number {
@@ -1229,6 +1281,100 @@ export async function buildApp(
     },
   );
 
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/permanent-groups/order',
+    async (request, reply) => {
+      if (!sourceRepository?.reorderPermanentGroups) {
+        return reply
+          .code(503)
+          .send({ error: 'Permanent group ordering is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const order = permanentGroupOrderSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!order.success) {
+        return reply.code(400).send({ error: validationMessage(order.error) });
+      }
+      await sourceRepository.reorderPermanentGroups(
+        sourceId.data,
+        order.data.providerGroups,
+      );
+      return reply.code(204).send();
+    },
+  );
+
+  app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/custom-categories',
+    async (request, reply) => {
+      if (!sourceRepository?.listCustomCategories) {
+        return reply
+          .code(503)
+          .send({ error: 'Custom categories are not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      return {
+        categories: await sourceRepository.listCustomCategories(sourceId.data),
+      };
+    },
+  );
+
+  app.post<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/custom-categories',
+    async (request, reply) => {
+      if (!sourceRepository?.createCustomCategory) {
+        return reply
+          .code(503)
+          .send({ error: 'Custom categories are not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const category = customCategorySchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!category.success) {
+        return reply
+          .code(400)
+          .send({ error: validationMessage(category.error) });
+      }
+      return reply.code(201).send({
+        category: await sourceRepository.createCustomCategory(
+          sourceId.data,
+          category.data.name,
+        ),
+      });
+    },
+  );
+
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/channels/order',
+    async (request, reply) => {
+      if (!sourceRepository?.reorderChannels) {
+        return reply
+          .code(503)
+          .send({ error: 'Channel ordering is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const order = channelOrderSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!order.success) {
+        return reply.code(400).send({ error: validationMessage(order.error) });
+      }
+      await sourceRepository.reorderChannels(
+        sourceId.data,
+        order.data.providerGroup,
+        order.data.channelIds,
+      );
+      return reply.code(204).send();
+    },
+  );
+
   app.patch<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/channels',
     async (request, reply) => {
@@ -1510,7 +1656,7 @@ export async function buildApp(
       return reply.code(400).send({ error: validationMessage(parsed.error) });
     }
     const profile = await sourceRepository.createOutputProfile(
-      parsed.data.sourceId,
+      parsed.data.sourceIds,
       parsed.data.name,
     );
     return reply.code(201).send({ profile });
@@ -1551,21 +1697,38 @@ export async function buildApp(
       if (!profile)
         return reply.code(404).send({ error: 'Playlist not found' });
 
-      const entries = await sourceRepository.getLatestPlaylistEntries(
-        profile.sourceId,
+      const sourceOutputs = await Promise.all(
+        profile.sourceIds.map(async (sourceId) => {
+          const [entries, policies] = await Promise.all([
+            sourceRepository.getLatestPlaylistEntries(sourceId),
+            sourceRepository.listOutputGroupPolicies(
+              sourceId,
+              currentDateInZone('Europe/Stockholm'),
+            ),
+          ]);
+          return { sourceId, entries, policies };
+        }),
       );
-      if (entries.length === 0) {
+      const readyOutputs = sourceOutputs.filter(
+        (sourceOutput) => sourceOutput.entries.length > 0,
+      );
+      if (readyOutputs.length === 0) {
         return reply.code(503).send({ error: 'Playlist is not ready' });
       }
-      const policies = await sourceRepository.listOutputGroupPolicies(
-        profile.sourceId,
-        currentDateInZone('Europe/Stockholm'),
-      );
-      const output = applyOutputGroupPolicies(entries, policies);
+      const isCombined = profile.sourceIds.length > 1;
+      const entries = readyOutputs.flatMap((sourceOutput) => {
+        const output = applyOutputGroupPolicies(
+          sourceOutput.entries,
+          sourceOutput.policies,
+        );
+        return isCombined
+          ? namespaceGuideEntries(sourceOutput.sourceId, output.entries)
+          : output.entries;
+      });
       return reply
         .type('audio/x-mpegurl; charset=utf-8')
         .header('cache-control', 'private, no-store')
-        .send(serializeM3u(output.entries));
+        .send(serializeM3u(entries));
     },
   );
 
@@ -1582,10 +1745,33 @@ export async function buildApp(
         request.params.accessToken,
       );
       if (!profile) return reply.code(404).send({ error: 'EPG not found' });
-      const guide = await sourceRepository.getLatestEpg(profile.sourceId);
-      if (guide.channels.length === 0) {
+      const sourceGuides = await Promise.all(
+        profile.sourceIds.map(async (sourceId) => ({
+          sourceId,
+          guide: await sourceRepository.getLatestEpg(sourceId),
+        })),
+      );
+      const readyGuides = sourceGuides.filter(
+        (sourceGuide) => sourceGuide.guide.channels.length > 0,
+      );
+      if (readyGuides.length === 0) {
         return reply.code(503).send({ error: 'EPG is not ready' });
       }
+      const isCombined = profile.sourceIds.length > 1;
+      const guide = readyGuides.reduce<{
+        channels: XmltvChannel[];
+        programmes: XmltvProgramme[];
+      }>(
+        (combined, sourceGuide) => {
+          const next = isCombined
+            ? namespaceGuide(sourceGuide.sourceId, sourceGuide.guide)
+            : sourceGuide.guide;
+          combined.channels.push(...next.channels);
+          combined.programmes.push(...next.programmes);
+          return combined;
+        },
+        { channels: [], programmes: [] },
+      );
       return reply
         .type('application/xml; charset=utf-8')
         .header('cache-control', 'private, no-store')
