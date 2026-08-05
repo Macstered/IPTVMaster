@@ -1,6 +1,10 @@
 import { type FormEvent, useState } from 'react';
 
-import { SourceSetup, type WorkspaceView } from './SourceSetup.js';
+import {
+  SourceSetup,
+  type LineupView,
+  type WorkspaceView,
+} from './SourceSetup.js';
 
 interface PreviewResult {
   originalName: string;
@@ -61,6 +65,22 @@ const workspaceOrder: WorkspaceView[] = [
   'updates',
 ];
 
+const lineupDetails: Record<
+  LineupView,
+  { label: string; title: string; subtitle: string }
+> = {
+  order: {
+    label: 'Playlist order',
+    title: 'Playlist order',
+    subtitle: 'Arrange final TiviMate groups and sort their channels.',
+  },
+  channels: {
+    label: 'Group & channel editor',
+    title: 'Group & channel editor',
+    subtitle: 'Edit provider groups, custom categories, and channel details.',
+  },
+};
+
 function displayInstant(value: string | undefined, timeZone: string): string {
   if (!value) return '—';
   return new Intl.DateTimeFormat('en-FI', {
@@ -81,15 +101,28 @@ interface AppProps {
 
 export function App({ authUsername, onLogout }: AppProps) {
   const [workspace, setWorkspace] = useState<WorkspaceView>('overview');
+  const [lineupView, setLineupView] = useState<LineupView>('order');
+  const [lineupMenuOpen, setLineupMenuOpen] = useState(false);
   const [name, setName] = useState(initialEvent);
   const [referenceDate, setReferenceDate] = useState('2026-08-04');
   const [result, setResult] = useState<PreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const activeWorkspace = workspaceDetails[workspace];
+  const activeWorkspace =
+    workspace === 'lineup'
+      ? { ...workspaceDetails.lineup, ...lineupDetails[lineupView] }
+      : workspaceDetails[workspace];
 
   function openWorkspace(nextWorkspace: WorkspaceView) {
     setWorkspace(nextWorkspace);
+    if (nextWorkspace !== 'lineup') setLineupMenuOpen(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function openLineup(nextLineupView: LineupView) {
+    setLineupView(nextLineupView);
+    setLineupMenuOpen(true);
+    setWorkspace('lineup');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -143,6 +176,57 @@ export function App({ authUsername, onLogout }: AppProps) {
         <nav aria-label="Main navigation">
           {workspaceOrder.map((item) => {
             const details = workspaceDetails[item];
+            if (item === 'lineup') {
+              return (
+                <div
+                  className={`nav-section ${lineupMenuOpen ? 'open' : ''}`}
+                  key={item}
+                >
+                  <button
+                    className={`nav-link ${workspace === item ? 'active' : ''}`}
+                    type="button"
+                    aria-expanded={lineupMenuOpen}
+                    onClick={() => {
+                      if (workspace !== 'lineup') {
+                        openLineup(lineupView);
+                      } else {
+                        setLineupMenuOpen((current) => !current);
+                      }
+                    }}
+                  >
+                    <span aria-hidden="true">{details.icon}</span>
+                    {details.label}
+                    <span className="nav-chevron" aria-hidden="true">
+                      {lineupMenuOpen ? '⌃' : '⌄'}
+                    </span>
+                  </button>
+                  <div className="nav-submenu" hidden={!lineupMenuOpen}>
+                    {(Object.keys(lineupDetails) as LineupView[]).map(
+                      (subpage) => (
+                        <button
+                          className={`nav-submenu-link ${
+                            workspace === 'lineup' && lineupView === subpage
+                              ? 'active'
+                              : ''
+                          }`}
+                          type="button"
+                          aria-current={
+                            workspace === 'lineup' && lineupView === subpage
+                              ? 'page'
+                              : undefined
+                          }
+                          onClick={() => openLineup(subpage)}
+                          key={subpage}
+                        >
+                          <span aria-hidden="true">•</span>
+                          {lineupDetails[subpage].label}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </div>
+              );
+            }
             return (
               <button
                 className={`nav-link ${workspace === item ? 'active' : ''}`}
@@ -211,7 +295,7 @@ export function App({ authUsername, onLogout }: AppProps) {
           </section>
         ) : null}
 
-        <SourceSetup workspace={workspace} />
+        <SourceSetup workspace={workspace} lineupView={lineupView} />
 
         {workspace === 'events' ? (
           <section className="content-grid single-panel-grid">

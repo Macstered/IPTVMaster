@@ -2,9 +2,11 @@ import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
 export type WorkspaceView =
   'overview' | 'lineup' | 'events' | 'epg' | 'updates';
+export type LineupView = 'order' | 'channels';
 
 interface SourceSetupProps {
   workspace: WorkspaceView;
+  lineupView: LineupView;
 }
 
 interface Capabilities {
@@ -299,7 +301,7 @@ function formatEventTime(value: string | undefined, timeZone: string): string {
   }).format(new Date(value));
 }
 
-export function SourceSetup({ workspace }: SourceSetupProps) {
+export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [sources, setSources] = useState<SafeSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
@@ -2626,7 +2628,7 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
           ) : null}
 
           <div
-            className="channel-editor"
+            className={`channel-editor channel-editor-${lineupView}`}
             id="channels"
             hidden={workspace !== 'lineup'}
           >
@@ -2756,81 +2758,97 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
                         {isExpanded ? (
                           <div className="output-group-channel-list">
                             <small className="output-group-channel-note">
-                              Drag channels to set their order inside{' '}
-                              {group.name}.
+                              Drag the grip beside a channel to set its order
+                              inside {group.name}.
                             </small>
-                            {outputGroupChannels.map((channel) => (
-                              <div
-                                className={`output-group-channel-row ${
-                                  channel.enabled ? '' : 'disabled'
-                                }`}
-                                key={channel.id}
-                                draggable={savingChannel === null}
-                                onDragStart={(
-                                  event: DragEvent<HTMLElement>,
-                                ) => {
-                                  event.stopPropagation();
-                                  setDraggedOutputGroupChannelId(channel.id);
-                                  event.dataTransfer.effectAllowed = 'move';
-                                }}
-                                onDragEnd={(event: DragEvent<HTMLElement>) => {
-                                  event.stopPropagation();
-                                  setDraggedOutputGroupChannelId(null);
-                                }}
-                                onDragOver={(event: DragEvent<HTMLElement>) => {
-                                  if (draggedOutputGroupChannelId) {
+                            {outputGroupChannels.map(
+                              (channel, channelIndex) => (
+                                <div
+                                  className={`output-group-channel-row ${
+                                    channel.enabled ? '' : 'disabled'
+                                  }`}
+                                  key={channel.id}
+                                  draggable={savingChannel === null}
+                                  onDragStart={(
+                                    event: DragEvent<HTMLElement>,
+                                  ) => {
+                                    event.stopPropagation();
+                                    setDraggedOutputGroupChannelId(channel.id);
+                                    event.dataTransfer.effectAllowed = 'move';
+                                  }}
+                                  onDragEnd={(
+                                    event: DragEvent<HTMLElement>,
+                                  ) => {
+                                    event.stopPropagation();
+                                    setDraggedOutputGroupChannelId(null);
+                                  }}
+                                  onDragOver={(
+                                    event: DragEvent<HTMLElement>,
+                                  ) => {
+                                    if (draggedOutputGroupChannelId) {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                    }
+                                  }}
+                                  onDrop={(event: DragEvent<HTMLElement>) => {
                                     event.preventDefault();
                                     event.stopPropagation();
-                                  }
-                                }}
-                                onDrop={(event: DragEvent<HTMLElement>) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  const draggedId = draggedOutputGroupChannelId;
-                                  setDraggedOutputGroupChannelId(null);
-                                  if (draggedId) {
-                                    void saveOutputGroupChannelOrder(
-                                      primarySource,
-                                      draggedId,
-                                      channel.id,
-                                    );
-                                  }
-                                }}
-                              >
-                                <span
-                                  className="drag-handle"
-                                  aria-hidden="true"
-                                >
-                                  ⋮⋮
-                                </span>
-                                <div>
-                                  <strong>
-                                    {channel.customName ?? channel.providerName}
-                                  </strong>
-                                  <small>{channel.providerGroup}</small>
-                                </div>
-                                <button
-                                  className="secondary-button compact output-group-channel-visibility"
-                                  type="button"
-                                  aria-label={`${channel.enabled ? 'Hide' : 'Show'} ${
-                                    channel.customName ?? channel.providerName
-                                  }`}
-                                  disabled={savingChannel !== null}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void updateChannel(primarySource, channel, {
-                                      enabled: !channel.enabled,
-                                    });
+                                    const draggedId =
+                                      draggedOutputGroupChannelId;
+                                    setDraggedOutputGroupChannelId(null);
+                                    if (draggedId) {
+                                      void saveOutputGroupChannelOrder(
+                                        primarySource,
+                                        draggedId,
+                                        channel.id,
+                                      );
+                                    }
                                   }}
                                 >
-                                  {savingChannel === channel.id
-                                    ? 'Saving…'
-                                    : channel.enabled
-                                      ? 'Hide'
-                                      : 'Show'}
-                                </button>
-                              </div>
-                            ))}
+                                  <span
+                                    className="drag-handle"
+                                    aria-hidden="true"
+                                    title="Drag to reorder"
+                                  >
+                                    ⋮⋮
+                                  </span>
+                                  <span className="output-group-channel-position">
+                                    {channelIndex + 1}
+                                  </span>
+                                  <div>
+                                    <strong>
+                                      {channel.customName ??
+                                        channel.providerName}
+                                    </strong>
+                                    <small>{channel.providerGroup}</small>
+                                  </div>
+                                  <button
+                                    className="secondary-button compact output-group-channel-visibility"
+                                    type="button"
+                                    aria-label={`${channel.enabled ? 'Hide' : 'Show'} ${
+                                      channel.customName ?? channel.providerName
+                                    }`}
+                                    disabled={savingChannel !== null}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void updateChannel(
+                                        primarySource,
+                                        channel,
+                                        {
+                                          enabled: !channel.enabled,
+                                        },
+                                      );
+                                    }}
+                                  >
+                                    {savingChannel === channel.id
+                                      ? 'Saving…'
+                                      : channel.enabled
+                                        ? 'Hide'
+                                        : 'Show'}
+                                  </button>
+                                </div>
+                              ),
+                            )}
                             {!loadingOutputGroupChannels &&
                             outputGroupChannelTotal === 0 ? (
                               <p className="empty-groups">
