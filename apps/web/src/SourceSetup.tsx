@@ -1,5 +1,12 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
+export type WorkspaceView =
+  'overview' | 'lineup' | 'events' | 'epg' | 'updates';
+
+interface SourceSetupProps {
+  workspace: WorkspaceView;
+}
+
 interface Capabilities {
   version: string;
   revision: string;
@@ -292,7 +299,7 @@ function formatEventTime(value: string | undefined, timeZone: string): string {
   }).format(new Date(value));
 }
 
-export function SourceSetup() {
+export function SourceSetup({ workspace }: SourceSetupProps) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [sources, setSources] = useState<SafeSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
@@ -1632,7 +1639,10 @@ export function SourceSetup() {
   );
 
   return (
-    <section className="panel source-panel" id="source-setup">
+    <section
+      className={`panel source-panel source-workspace source-workspace-${workspace}`}
+      id="source-setup"
+    >
       <div className="panel-heading">
         <div>
           <p className="eyebrow">PRIVATE SOURCE</p>
@@ -1914,7 +1924,45 @@ export function SourceSetup() {
         </div>
       ) : null}
 
-      {sourceHistory && primarySource && sourceHistory.snapshots.length > 0 ? (
+      {workspace !== 'overview' && sources.length > 0 ? (
+        <div className="workspace-toolbar">
+          <div>
+            <small>EDITING PROVIDER</small>
+            <strong>{primarySource?.name}</strong>
+          </div>
+          {sources.length > 1 ? (
+            <label>
+              Provider
+              <select
+                value={primarySource?.id ?? ''}
+                onChange={(event) => {
+                  const nextSource = sources.find(
+                    (source) => source.id === event.target.value,
+                  );
+                  if (nextSource) void selectSource(nextSource);
+                }}
+              >
+                {sources.map((source) => (
+                  <option value={source.id} key={source.id}>
+                    {source.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <span className="workspace-provider-status">
+            <span className="status-dot" />{' '}
+            {primarySource?.enabled && capabilities?.playlistAutomation
+              ? 'Automatic refresh enabled'
+              : 'Provider selected'}
+          </span>
+        </div>
+      ) : null}
+
+      {workspace === 'updates' &&
+      sourceHistory &&
+      primarySource &&
+      sourceHistory.snapshots.length > 0 ? (
         <section className="history-panel" id="updates">
           <div className="subsection-heading history-heading">
             <div>
@@ -2025,9 +2073,21 @@ export function SourceSetup() {
         </section>
       ) : null}
 
-      {groups.length > 0 && primarySource ? (
+      {workspace === 'updates' &&
+      primarySource &&
+      (!sourceHistory || sourceHistory.snapshots.length === 0) ? (
+        <div className="workspace-empty">
+          <strong>No retained updates yet</strong>
+          <p>
+            Playlist and EPG refresh activity will appear here after the next
+            successful import.
+          </p>
+        </div>
+      ) : null}
+
+      {workspace !== 'updates' && groups.length > 0 && primarySource ? (
         <div className="group-policy-editor">
-          <div className="subsection-heading">
+          <div className="subsection-heading" hidden={workspace !== 'events'}>
             <div>
               <small>GROUP RULES</small>
               <strong>Choose transient live-event groups</strong>
@@ -2048,7 +2108,9 @@ export function SourceSetup() {
               </button>
             </div>
           </div>
-          <div hidden={collapsedSections['group-rules']}>
+          <div
+            hidden={workspace !== 'events' || collapsedSections['group-rules']}
+          >
             <p className="secret-note">
               Event groups receive Swedish-to-Finnish time conversion and
               placeholder filtering. Search a provider group name to make it an
@@ -2166,7 +2228,10 @@ export function SourceSetup() {
                     onChange={(event) =>
                       setEventRuleDraft((current) =>
                         current
-                          ? { ...current, outputGroupName: event.target.value }
+                          ? {
+                              ...current,
+                              outputGroupName: event.target.value,
+                            }
                           : current,
                       )
                     }
@@ -2193,7 +2258,10 @@ export function SourceSetup() {
                     onChange={(event) =>
                       setEventRuleDraft((current) =>
                         current
-                          ? { ...current, displayTimeZone: event.target.value }
+                          ? {
+                              ...current,
+                              displayTimeZone: event.target.value,
+                            }
                           : current,
                       )
                     }
@@ -2249,7 +2317,9 @@ export function SourceSetup() {
             ) : null}
           </div>
 
-          {eventReview && eventReview.groups.length > 0 ? (
+          {workspace === 'events' &&
+          eventReview &&
+          eventReview.groups.length > 0 ? (
             <section className="event-review" id="events">
               <div className="subsection-heading event-review-heading">
                 <div>
@@ -2347,7 +2417,7 @@ export function SourceSetup() {
             </section>
           ) : null}
 
-          {epgMappingReview ? (
+          {workspace === 'epg' && epgMappingReview ? (
             <section className="epg-mapping-review" id="epg-mappings">
               <div className="subsection-heading epg-mapping-heading">
                 <div>
@@ -2533,12 +2603,26 @@ export function SourceSetup() {
             </section>
           ) : null}
 
-          <div className="channel-editor" id="channels">
+          {workspace === 'epg' && !epgMappingReview ? (
+            <div className="workspace-empty">
+              <strong>No XMLTV guide imported</strong>
+              <p>
+                Import the provider XMLTV guide from Overview to review EPG
+                coverage and manual mappings here.
+              </p>
+            </div>
+          ) : null}
+
+          <div
+            className="channel-editor"
+            id="channels"
+            hidden={workspace !== 'lineup'}
+          >
             <section className="output-group-order" aria-live="polite">
               <div className="subsection-heading output-group-order-heading">
                 <div>
-                  <small>OUTPUT GROUP ORDER</small>
-                  <strong>Arrange TV and event groups together</strong>
+                  <small>PLAYLIST ORDER</small>
+                  <strong>TiviMate groups</strong>
                 </div>
                 <span className="channel-count">
                   {outputGroups.length.toLocaleString()}{' '}
@@ -2556,9 +2640,8 @@ export function SourceSetup() {
               </div>
               <div hidden={collapsedSections['output-group-order']}>
                 <p className="secret-note">
-                  Drag any final TiviMate group to its output position. Custom
-                  groups are listed once even when they combine channels from
-                  several provider groups; expand one to order its channels.
+                  Drag groups into their final TiviMate order. TV, live-event,
+                  and custom groups all share this list.
                 </p>
                 <div className="channel-search output-group-search">
                   <input
@@ -2650,7 +2733,7 @@ export function SourceSetup() {
                             )
                           }
                         >
-                          {isExpanded ? 'Hide channels' : 'Order channels'}
+                          {isExpanded ? 'Close channels' : 'Order channels'}
                         </button>
                         <span className="output-group-position">
                           {isSaving ? 'Saving…' : index + 1}
@@ -2735,8 +2818,8 @@ export function SourceSetup() {
 
             <div className="subsection-heading channel-heading">
               <div>
-                <small>PERMANENT GROUPS</small>
-                <strong>Build the TiviMate lineup by group</strong>
+                <small>GROUP &amp; CHANNEL EDITOR</small>
+                <strong>Edit provider groups</strong>
               </div>
               <span className="channel-count">
                 {permanentGroups.length.toLocaleString()}{' '}
@@ -2753,12 +2836,9 @@ export function SourceSetup() {
             </div>
             <div hidden={collapsedSections.permanent}>
               <p className="secret-note">
-                Expand a provider group to manage its channels. Group-wide
-                changes affect every current channel in that group; channel
-                edits remain available inside it. Event groups keep their
-                separate automatic daily handling. Use Output group order to
-                arrange TV and event groups together, then drag channels inside
-                an expanded group to refine its channel order.
+                Choose a provider group to hide it, move all of its channels to
+                a custom group, or edit individual channels. Live-event rules
+                are managed in their own workspace.
               </p>
               <div className="channel-search">
                 <input
@@ -3381,7 +3461,7 @@ export function SourceSetup() {
             )}
           </div>
 
-          <div className="output-setup">
+          <div className="output-setup" hidden={workspace !== 'overview'}>
             <div>
               <strong>Combined TiviMate playlist and EPG URLs</strong>
               <small>
@@ -3428,7 +3508,9 @@ export function SourceSetup() {
               </button>
             </div>
           </div>
-          {!collapsedSections.output && outputProfiles.length > 0 ? (
+          {workspace === 'overview' &&
+          !collapsedSections.output &&
+          outputProfiles.length > 0 ? (
             <div className="output-profile-list">
               {outputProfiles.map((profile) => {
                 const sourceNames = profile.sourceIds
@@ -3495,6 +3577,18 @@ export function SourceSetup() {
               })}
             </div>
           ) : null}
+        </div>
+      ) : null}
+
+      {workspace !== 'overview' &&
+      workspace !== 'updates' &&
+      groups.length === 0 ? (
+        <div className="workspace-empty">
+          <strong>No imported live playlist</strong>
+          <p>
+            Open Overview and import a provider playlist before editing this
+            workspace.
+          </p>
         </div>
       ) : null}
 

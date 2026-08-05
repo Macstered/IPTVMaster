@@ -1,6 +1,6 @@
 import { type FormEvent, useState } from 'react';
 
-import { SourceSetup } from './SourceSetup.js';
+import { SourceSetup, type WorkspaceView } from './SourceSetup.js';
 
 interface PreviewResult {
   originalName: string;
@@ -14,6 +14,52 @@ interface PreviewResult {
 }
 
 const initialEvent = '17:00 Montreal ATP Tennis 8/4';
+
+const workspaceDetails: Record<
+  WorkspaceView,
+  { label: string; title: string; subtitle: string; icon: string }
+> = {
+  overview: {
+    label: 'Overview',
+    title: 'Playlist overview',
+    subtitle: 'Manage providers, refresh sources, and copy your TiviMate URLs.',
+    icon: '⌂',
+  },
+  lineup: {
+    label: 'Lineup',
+    title: 'Lineup editor',
+    subtitle: 'Arrange groups and edit the channels that appear in TiviMate.',
+    icon: '▤',
+  },
+  events: {
+    label: 'Live events',
+    title: 'Live event rules',
+    subtitle: 'Control daily event groups and preview Finnish event times.',
+    icon: '◷',
+  },
+  epg: {
+    label: 'EPG mappings',
+    title: 'EPG mapping',
+    subtitle:
+      'Review guide coverage and resolve channels that need a manual match.',
+    icon: '▦',
+  },
+  updates: {
+    label: 'Updates',
+    title: 'Update history',
+    subtitle:
+      'Review automatic refreshes and restore a retained playlist snapshot.',
+    icon: '↻',
+  },
+};
+
+const workspaceOrder: WorkspaceView[] = [
+  'overview',
+  'lineup',
+  'events',
+  'epg',
+  'updates',
+];
 
 function displayInstant(value: string | undefined, timeZone: string): string {
   if (!value) return '—';
@@ -34,11 +80,18 @@ interface AppProps {
 }
 
 export function App({ authUsername, onLogout }: AppProps) {
+  const [workspace, setWorkspace] = useState<WorkspaceView>('overview');
   const [name, setName] = useState(initialEvent);
   const [referenceDate, setReferenceDate] = useState('2026-08-04');
   const [result, setResult] = useState<PreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const activeWorkspace = workspaceDetails[workspace];
+
+  function openWorkspace(nextWorkspace: WorkspaceView) {
+    setWorkspace(nextWorkspace);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
 
   async function preview(event: FormEvent) {
     event.preventDefault();
@@ -74,30 +127,35 @@ export function App({ authUsername, onLogout }: AppProps) {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <a className="brand" href="#top" aria-label="IPTVMaster home">
+        <button
+          className="brand"
+          type="button"
+          aria-label="Open IPTVMaster overview"
+          onClick={() => openWorkspace('overview')}
+        >
           <span className="brand-mark">IM</span>
           <span>
             <strong>IPTVMaster</strong>
             <small>Local playlist control</small>
           </span>
-        </a>
+        </button>
 
         <nav aria-label="Main navigation">
-          <a className="nav-link active" href="#dashboard">
-            <span>⌂</span> Dashboard
-          </a>
-          <a className="nav-link" href="#channels">
-            <span>▤</span> Channels <em>ready</em>
-          </a>
-          <a className="nav-link" href="#updates">
-            <span>↻</span> Updates <em>ready</em>
-          </a>
-          <a className="nav-link" href="#events">
-            <span>◷</span> Live events <em>ready</em>
-          </a>
-          <a className="nav-link" href="#epg-mappings">
-            <span>▦</span> EPG mappings <em>ready</em>
-          </a>
+          {workspaceOrder.map((item) => {
+            const details = workspaceDetails[item];
+            return (
+              <button
+                className={`nav-link ${workspace === item ? 'active' : ''}`}
+                type="button"
+                aria-current={workspace === item ? 'page' : undefined}
+                onClick={() => openWorkspace(item)}
+                key={item}
+              >
+                <span aria-hidden="true">{details.icon}</span>
+                {details.label}
+              </button>
+            );
+          })}
         </nav>
 
         <div className="status-card">
@@ -114,191 +172,126 @@ export function App({ authUsername, onLogout }: AppProps) {
         </div>
       </aside>
 
-      <main id="top">
+      <main id="top" className={`workspace workspace-${workspace}`}>
         <header>
           <div>
-            <p className="eyebrow">MVP FOUNDATION</p>
-            <h1>Good evening</h1>
-            <p className="subtitle">
-              Build and verify your local TiviMate lineup.
-            </p>
+            <p className="eyebrow">LOCAL PLAYLIST CONTROL</p>
+            <h1>{activeWorkspace.title}</h1>
+            <p className="subtitle">{activeWorkspace.subtitle}</p>
           </div>
           <span className="environment">LOCAL</span>
         </header>
 
-        <section
-          className="metric-grid"
-          id="dashboard"
-          aria-label="Project status"
-        >
-          <article className="metric">
-            <span className="metric-icon blue">↻</span>
-            <div>
-              <small>SOURCE SYNC</small>
-              <strong>Not configured</strong>
-              <p>Credentials stay local</p>
-            </div>
-          </article>
-          <article className="metric">
-            <span className="metric-icon green">✓</span>
-            <div>
-              <small>TIMEZONE RULE</small>
-              <strong>Stockholm → Helsinki</strong>
-              <p>Event groups only</p>
-            </div>
-          </article>
-          <article className="metric">
-            <span className="metric-icon amber">◌</span>
-            <div>
-              <small>OUTPUT</small>
-              <strong>Awaiting setup</strong>
-              <p>M3U + XMLTV for TiviMate</p>
-            </div>
-          </article>
-        </section>
-
-        <SourceSetup />
-
-        <section className="content-grid">
-          <article className="panel preview-panel">
-            <div className="panel-heading">
+        {workspace === 'overview' ? (
+          <section className="metric-grid" aria-label="IPTVMaster workflow">
+            <article className="metric">
+              <span className="metric-icon blue">↻</span>
               <div>
-                <p className="eyebrow">FIRST WORKING SLICE</p>
-                <h2>Event time preview</h2>
+                <small>SOURCES</small>
+                <strong>Automatic refresh</strong>
+                <p>Encrypted provider connections</p>
               </div>
-              <span className="pill">Europe/Helsinki</span>
-            </div>
-
-            <p className="panel-copy">
-              Test how an event label from the provider will appear in TiviMate.
-              This rule never changes ordinary live-TV channels.
-            </p>
-
-            <form onSubmit={preview}>
-              <label htmlFor="event-name">Provider event name</label>
-              <input
-                id="event-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                autoComplete="off"
-              />
-
-              <label htmlFor="reference-date">Provider schedule date</label>
-              <input
-                id="reference-date"
-                type="date"
-                value={referenceDate}
-                onChange={(event) => setReferenceDate(event.target.value)}
-              />
-
-              <button type="submit" disabled={loading}>
-                {loading ? 'Converting…' : 'Preview Finnish time'}
-              </button>
-            </form>
-
-            {error ? <p className="message error">{error}</p> : null}
-
-            {result ? (
-              <div className="result" aria-live="polite">
-                <div>
-                  <small>PROVIDER LABEL</small>
-                  <p>{result.originalName}</p>
-                </div>
-                <span className="result-arrow">→</span>
-                <div>
-                  <small>TIVIMATE LABEL</small>
-                  <p>{result.localizedName}</p>
-                </div>
-                <dl>
-                  <div>
-                    <dt>Source instant</dt>
-                    <dd>
-                      {displayInstant(
-                        result.sourceDateTime,
-                        'Europe/Stockholm',
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Finnish instant</dt>
-                    <dd>
-                      {displayInstant(
-                        result.displayDateTime,
-                        'Europe/Helsinki',
-                      )}
-                    </dd>
-                  </div>
-                </dl>
-                {result.warning ? (
-                  <p className="message warning">{result.warning}</p>
-                ) : null}
+            </article>
+            <article className="metric">
+              <span className="metric-icon green">+1</span>
+              <div>
+                <small>TIMEZONE RULE</small>
+                <strong>Stockholm → Helsinki</strong>
+                <p>Applied only to live-event groups</p>
               </div>
-            ) : null}
-          </article>
+            </article>
+            <article className="metric">
+              <span className="metric-icon amber">TV</span>
+              <div>
+                <small>OUTPUT</small>
+                <strong>M3U + XMLTV</strong>
+                <p>Private URLs for TiviMate</p>
+              </div>
+            </article>
+          </section>
+        ) : null}
 
-          <aside className="panel roadmap-card">
-            <p className="eyebrow">BUILD PROGRESS</p>
-            <h2>Foundation</h2>
-            <ol>
-              <li className="done">
-                <span>1</span>
+        <SourceSetup workspace={workspace} />
+
+        {workspace === 'events' ? (
+          <section className="content-grid single-panel-grid">
+            <article className="panel preview-panel">
+              <div className="panel-heading">
                 <div>
-                  <strong>Repository safety</strong>
-                  <small>Secrets and provider data excluded</small>
+                  <p className="eyebrow">QUICK PREVIEW</p>
+                  <h2>Event time preview</h2>
                 </div>
-              </li>
-              <li className="done">
-                <span>2</span>
-                <div>
-                  <strong>Streaming parser</strong>
-                  <small>Live and VOD classification</small>
+                <span className="pill">Europe/Helsinki</span>
+              </div>
+
+              <p className="panel-copy">
+                Test how an event label from the provider will appear in
+                TiviMate. This rule never changes ordinary live-TV channels.
+              </p>
+
+              <form onSubmit={preview}>
+                <label htmlFor="event-name">Provider event name</label>
+                <input
+                  id="event-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  autoComplete="off"
+                />
+
+                <label htmlFor="reference-date">Provider schedule date</label>
+                <input
+                  id="reference-date"
+                  type="date"
+                  value={referenceDate}
+                  onChange={(event) => setReferenceDate(event.target.value)}
+                />
+
+                <button type="submit" disabled={loading}>
+                  {loading ? 'Converting…' : 'Preview Finnish time'}
+                </button>
+              </form>
+
+              {error ? <p className="message error">{error}</p> : null}
+
+              {result ? (
+                <div className="result" aria-live="polite">
+                  <div>
+                    <small>PROVIDER LABEL</small>
+                    <p>{result.originalName}</p>
+                  </div>
+                  <span className="result-arrow">→</span>
+                  <div>
+                    <small>TIVIMATE LABEL</small>
+                    <p>{result.localizedName}</p>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Source instant</dt>
+                      <dd>
+                        {displayInstant(
+                          result.sourceDateTime,
+                          'Europe/Stockholm',
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Finnish instant</dt>
+                      <dd>
+                        {displayInstant(
+                          result.displayDateTime,
+                          'Europe/Helsinki',
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                  {result.warning ? (
+                    <p className="message warning">{result.warning}</p>
+                  ) : null}
                 </div>
-              </li>
-              <li className="done">
-                <span>3</span>
-                <div>
-                  <strong>Event policies</strong>
-                  <small>Timezone and placeholder rules</small>
-                </div>
-              </li>
-              <li className="done">
-                <span>4</span>
-                <div>
-                  <strong>Persistent editor</strong>
-                  <small>Database and channel overrides</small>
-                </div>
-              </li>
-              <li className="done">
-                <span>5</span>
-                <div>
-                  <strong>TiviMate output</strong>
-                  <small>Stable M3U and XMLTV endpoints</small>
-                </div>
-              </li>
-              <li className="done">
-                <span>6</span>
-                <div>
-                  <strong>EPG reconciliation</strong>
-                  <small>Coverage review and persistent locks</small>
-                </div>
-              </li>
-              <li className="done">
-                <span>7</span>
-                <div>
-                  <strong>Recovery tooling</strong>
-                  <small>Verified database backup and restore</small>
-                </div>
-              </li>
-              <li className="active">
-                <span>8</span>
-                <div>
-                  <strong>Administrator access</strong>
-                  <small>Sessions, CSRF, and login protection</small>
-                </div>
-              </li>
-            </ol>
-          </aside>
-        </section>
+              ) : null}
+            </article>
+          </section>
+        ) : null}
       </main>
     </div>
   );
