@@ -2638,7 +2638,10 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
                     : 'Collapse'}
                 </button>
               </div>
-              <div hidden={collapsedSections['output-group-order']}>
+              <div
+                className="output-group-order-body"
+                hidden={collapsedSections['output-group-order']}
+              >
                 <p className="secret-note">
                   Drag groups into their final TiviMate order. TV, live-event,
                   and custom groups all share this list.
@@ -2733,7 +2736,7 @@ export function SourceSetup({ workspace }: SourceSetupProps) {
                             )
                           }
                         >
-                          {isExpanded ? 'Close channels' : 'Order channels'}
+                          {isExpanded ? 'Close' : 'Channels'}
                         </button>
                         <span className="output-group-position">
                           {isSaving ? 'Saving…' : index + 1}

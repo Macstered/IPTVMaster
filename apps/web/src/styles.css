@@ -16,6 +16,9 @@
 * {
   box-sizing: border-box;
 }
+[hidden] {
+  display: none !important;
+}
 body {
   margin: 0;
   min-width: 320px;
@@ -1150,7 +1153,7 @@ h2 {
 }
 .source-workspace-lineup .channel-editor {
   display: grid;
-  grid-template-columns: minmax(310px, 0.72fr) minmax(560px, 1.55fr);
+  grid-template-columns: minmax(430px, 0.9fr) minmax(520px, 1.25fr);
   gap: 14px;
   align-items: start;
   margin-top: 0;
@@ -1163,7 +1166,8 @@ h2 {
   display: flex;
   grid-column: 1;
   grid-row: 1 / span 20;
-  max-height: calc(100vh - 36px);
+  height: calc(100vh - 36px);
+  min-height: 560px;
   margin: 0;
   flex-direction: column;
 }
@@ -1179,19 +1183,7 @@ h2 {
   flex: 1;
 }
 .source-workspace-lineup .output-group-order-row {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-}
-.source-workspace-lineup .output-group-order-row .behavior-badge {
-  grid-column: 2;
-  justify-self: start;
-}
-.source-workspace-lineup .output-group-channels-button {
-  grid-column: 2 / -1;
-  width: 100%;
-}
-.source-workspace-lineup .output-group-position {
-  grid-column: 3;
-  grid-row: 1;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
 }
 .source-workspace-lineup .channel-editor > :not(.output-group-order) {
   grid-column: 2;
@@ -1241,6 +1233,12 @@ h2 {
 .output-group-order-heading {
   align-items: center;
 }
+.output-group-order-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
 .output-group-order .secret-note {
   margin-bottom: 0;
 }
@@ -1249,30 +1247,36 @@ h2 {
 }
 .output-group-order-list {
   display: grid;
-  gap: 8px;
+  gap: 0;
   max-height: 560px;
   margin-top: 12px;
-  padding-right: 4px;
-  overflow-y: auto;
-}
-.output-group-order-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
-  gap: 10px;
-  align-items: center;
-  min-height: 54px;
-  padding: 10px 11px;
+  overflow: hidden auto;
   border: 1px solid #18364b;
   border-radius: 8px;
   background: #071722;
 }
+.output-group-order-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  gap: 7px;
+  align-items: center;
+  min-height: 39px;
+  padding: 5px 7px;
+  border: 0;
+  border-bottom: 1px solid #142d40;
+  border-radius: 0;
+  background: transparent;
+}
+.output-group-order-row:last-child {
+  border-bottom: 0;
+}
 .output-group-order-row.event {
-  border-color: #28664d;
-  background: #081a18;
+  border-bottom-color: #1e4a39;
+  background: #071b18;
 }
 .output-group-order-row.mixed {
-  border-color: #5a5a37;
-  background: #17170e;
+  border-bottom-color: #46462c;
+  background: #13150e;
 }
 .output-group-order-row[draggable='true'] {
   cursor: grab;
@@ -1295,7 +1299,7 @@ h2 {
   font-size: 12px;
 }
 .output-group-order-row small {
-  margin-top: 4px;
+  margin-top: 1px;
   color: #70889c;
   font-size: 10px;
 }
@@ -1307,14 +1311,20 @@ h2 {
   text-align: right;
 }
 .output-group-channels-button {
+  grid-row: auto;
+  min-height: 27px;
+  padding: 4px 7px;
+  font-size: 9px;
   white-space: nowrap;
 }
 .output-group-channel-list {
   display: grid;
   grid-column: 1 / -1;
-  gap: 6px;
-  padding: 9px 0 0 25px;
+  gap: 0;
+  margin: 3px -7px -5px;
+  padding: 5px 7px 3px 25px;
   border-top: 1px solid #173247;
+  background: #05131c;
 }
 .output-group-channel-note {
   color: #7890a5;
@@ -1325,11 +1335,15 @@ h2 {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 8px;
   align-items: center;
-  min-height: 39px;
-  padding: 7px 9px;
-  border: 1px solid #18364b;
-  border-radius: 6px;
-  background: #06131d;
+  min-height: 31px;
+  padding: 3px 6px;
+  border: 0;
+  border-bottom: 1px solid #112a3b;
+  border-radius: 0;
+  background: transparent;
+}
+.output-group-channel-row:last-child {
+  border-bottom: 0;
 }
 .output-group-channel-row[draggable='true'] {
   cursor: grab;
@@ -1352,7 +1366,7 @@ h2 {
   font-size: 11px;
 }
 .output-group-channel-row small {
-  margin-top: 2px;
+  margin-top: 0;
   color: #70889c;
   font-size: 10px;
 }
@@ -1467,8 +1481,8 @@ h2 {
 }
 .permanent-group-list {
   display: grid;
-  gap: 9px;
-  max-height: 720px;
+  gap: 6px;
+  max-height: min(76vh, 980px);
   margin-top: 13px;
   padding-right: 4px;
   overflow-y: auto;
@@ -1492,8 +1506,8 @@ h2 {
 .permanent-group-toggle {
   display: flex;
   width: 100%;
-  min-height: 59px;
-  padding: 11px;
+  min-height: 45px;
+  padding: 7px 9px;
   color: inherit;
   border: 0;
   border-radius: 8px 8px 0 0;
@@ -1528,7 +1542,7 @@ h2 {
   font-size: 12px;
 }
 .permanent-group-title small {
-  margin-top: 4px;
+  margin-top: 1px;
   color: #70889c;
   font-size: 10px;
 }
@@ -1544,7 +1558,7 @@ h2 {
   grid-template-columns: auto minmax(260px, 1fr) auto;
   gap: 7px;
   align-items: center;
-  padding: 9px 11px 11px;
+  padding: 6px 9px 8px;
   border-top: 1px solid #173247;
 }
 .permanent-group-actions > button,
@@ -1724,8 +1738,8 @@ h2 {
 }
 .channel-list {
   display: grid;
-  gap: 8px;
-  max-height: 620px;
+  gap: 3px;
+  max-height: min(76vh, 980px);
   margin-top: 12px;
   padding-right: 4px;
   overflow-y: auto;
@@ -1733,9 +1747,10 @@ h2 {
 .channel-row {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) auto auto;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
-  padding: 11px;
+  min-height: 39px;
+  padding: 5px 7px;
   border: 1px solid #18364b;
   border-radius: 8px;
   background: #081722;
@@ -1761,7 +1776,7 @@ h2 {
   font-size: 12px;
 }
 .channel-summary small {
-  margin-top: 3px;
+  margin-top: 1px;
   color: #627b92;
   font-size: 10px;
 }
@@ -2194,6 +2209,8 @@ button:disabled {
   .source-workspace-lineup .output-group-order {
     position: static;
     grid-row: auto;
+    height: auto;
+    min-height: 0;
     max-height: none;
   }
   .source-workspace-lineup .channel-editor > :not(.output-group-order) {
@@ -2365,11 +2382,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
   .output-group-order-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   }
   .output-group-channels-button {
-    grid-column: 2 / -1;
-    width: 100%;
+    grid-column: auto;
+    width: auto;
   }
   .output-group-channel-list {
     padding-left: 0;
