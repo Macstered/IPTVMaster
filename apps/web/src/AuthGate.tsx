@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
 import { App } from './App.js';
+import { IconPlay } from './icons.js';
 
 interface AuthStatus {
   enabled: boolean;
@@ -116,7 +117,9 @@ export function AuthGate() {
     <main className="auth-shell">
       <section className="auth-card" aria-busy={status === null || submitting}>
         <div className="auth-brand">
-          <span className="brand-mark">IM</span>
+          <span className="brand-mark">
+            <IconPlay width={18} height={18} />
+          </span>
           <div>
             <strong>IPTVMaster</strong>
             <small>Local playlist control</small>

@@ -1,4 +1,17 @@
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, type ReactNode, useState } from 'react';
+
+import {
+  IconChevronDown,
+  IconChevronUp,
+  IconClock,
+  IconGuide,
+  IconHistory,
+  IconHome,
+  IconPlay,
+  IconRefresh,
+  IconRows,
+  IconTv,
+} from './icons.js';
 
 import {
   SourceSetup,
@@ -21,39 +34,39 @@ const initialEvent = '17:00 Montreal ATP Tennis 8/4';
 
 const workspaceDetails: Record<
   WorkspaceView,
-  { label: string; title: string; subtitle: string; icon: string }
+  { label: string; title: string; subtitle: string; icon: ReactNode }
 > = {
   overview: {
     label: 'Overview',
     title: 'Playlist overview',
     subtitle: 'Manage providers, refresh sources, and copy your TiviMate URLs.',
-    icon: '⌂',
+    icon: <IconHome />,
   },
   lineup: {
     label: 'Lineup',
     title: 'Lineup editor',
     subtitle: 'Arrange groups and edit the channels that appear in TiviMate.',
-    icon: '▤',
+    icon: <IconRows />,
   },
   events: {
     label: 'Live events',
     title: 'Live event rules',
     subtitle: 'Control daily event groups and preview Finnish event times.',
-    icon: '◷',
+    icon: <IconClock />,
   },
   epg: {
     label: 'EPG mappings',
     title: 'EPG mapping',
     subtitle:
       'Review guide coverage and resolve channels that need a manual match.',
-    icon: '▦',
+    icon: <IconGuide />,
   },
   updates: {
     label: 'Updates',
     title: 'Update history',
     subtitle:
       'Review automatic refreshes and restore a retained playlist snapshot.',
-    icon: '↻',
+    icon: <IconHistory />,
   },
 };
 
@@ -166,7 +179,9 @@ export function App({ authUsername, onLogout }: AppProps) {
           aria-label="Open IPTVMaster overview"
           onClick={() => openWorkspace('overview')}
         >
-          <span className="brand-mark">IM</span>
+          <span className="brand-mark">
+            <IconPlay width={18} height={18} />
+          </span>
           <span>
             <strong>IPTVMaster</strong>
             <small>Local playlist control</small>
@@ -197,7 +212,7 @@ export function App({ authUsername, onLogout }: AppProps) {
                     <span aria-hidden="true">{details.icon}</span>
                     {details.label}
                     <span className="nav-chevron" aria-hidden="true">
-                      {lineupMenuOpen ? '⌃' : '⌄'}
+                      {lineupMenuOpen ? <IconChevronUp /> : <IconChevronDown />}
                     </span>
                   </button>
                   <div className="nav-submenu" hidden={!lineupMenuOpen}>
@@ -269,7 +284,9 @@ export function App({ authUsername, onLogout }: AppProps) {
         {workspace === 'overview' ? (
           <section className="metric-grid" aria-label="IPTVMaster workflow">
             <article className="metric">
-              <span className="metric-icon blue">↻</span>
+              <span className="metric-icon blue">
+                <IconRefresh />
+              </span>
               <div>
                 <small>SOURCES</small>
                 <strong>Automatic refresh</strong>
@@ -285,7 +302,9 @@ export function App({ authUsername, onLogout }: AppProps) {
               </div>
             </article>
             <article className="metric">
-              <span className="metric-icon amber">TV</span>
+              <span className="metric-icon amber">
+                <IconTv />
+              </span>
               <div>
                 <small>OUTPUT</small>
                 <strong>M3U + XMLTV</strong>

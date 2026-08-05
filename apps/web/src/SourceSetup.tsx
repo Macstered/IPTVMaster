@@ -1,5 +1,6 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
+import { IconGrip, IconTv } from './icons.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
 
 export type WorkspaceView =
@@ -1622,7 +1623,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               }`}
               key={source.id}
             >
-              <div className="source-symbol">TV</div>
+              <div className="source-symbol">
+                <IconTv />
+              </div>
               <div>
                 <strong>{source.name}</strong>
                 <p>
@@ -2363,7 +2366,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         }}
                       >
                         <span className="drag-handle" aria-hidden="true">
-                          ⋮⋮
+                          <IconGrip />
                         </span>
                         <div>
                           <strong>{group.name || '(Ungrouped)'}</strong>
@@ -2454,7 +2457,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                                     aria-hidden="true"
                                     title="Drag to reorder"
                                   >
-                                    ⋮⋮
+                                    <IconGrip />
                                   </span>
                                   <span className="output-group-channel-position">
                                     {channelIndex + 1}
@@ -2995,7 +2998,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         className="drag-handle channel-drag-handle"
                         aria-hidden="true"
                       >
-                        ⠿
+                        <IconGrip />
                       </span>
                       <input
                         className="channel-select"
