@@ -2615,6 +2615,48 @@ export function SourceSetup() {
                 </datalist>
               </form>
 
+              <section
+                className="custom-category-directory"
+                aria-label="Custom output groups"
+              >
+                <div className="custom-category-directory-heading">
+                  <div>
+                    <small>CUSTOM OUTPUT GROUPS</small>
+                    <strong>
+                      Available in the generated TiviMate playlist
+                    </strong>
+                  </div>
+                  <span>
+                    {customCategories.length.toLocaleString()}{' '}
+                    {customCategories.length === 1 ? 'group' : 'groups'}
+                  </span>
+                </div>
+                {customCategories.length > 0 ? (
+                  <div className="custom-category-list">
+                    {customCategories.map((category) => (
+                      <button
+                        className="custom-category-card"
+                        key={category.name}
+                        type="button"
+                        onClick={() => setPermanentGroupFilter(category.name)}
+                        title={`Show provider groups assigned to ${category.name}`}
+                      >
+                        <strong>{category.name}</strong>
+                        <small>
+                          {category.channelCount.toLocaleString()}{' '}
+                          {category.channelCount === 1 ? 'channel' : 'channels'}
+                        </small>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty-custom-categories">
+                    Make a custom category, then move a provider group or
+                    individual channels into it.
+                  </p>
+                )}
+              </section>
+
               <div className="permanent-group-list" aria-live="polite">
                 {visiblePermanentGroups.map((group) => {
                   const isExpanded =
