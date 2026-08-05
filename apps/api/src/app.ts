@@ -199,6 +199,10 @@ const permanentGroupOrderSchema = z.object({
   providerGroups: z.array(z.string().max(500)).min(1).max(5_000),
 });
 
+const outputGroupOrderSchema = z.object({
+  providerGroups: z.array(z.string().max(500)).min(1).max(5_000),
+});
+
 const channelOrderSchema = z.object({
   providerGroup: z.string().max(500),
   channelIds: z.array(z.uuid()).min(1).max(5_000),
@@ -1404,6 +1408,30 @@ export async function buildApp(
         return reply.code(400).send({ error: validationMessage(order.error) });
       }
       await sourceRepository.reorderPermanentGroups(
+        sourceId.data,
+        order.data.providerGroups,
+      );
+      return reply.code(204).send();
+    },
+  );
+
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/output-groups/order',
+    async (request, reply) => {
+      if (!sourceRepository?.reorderOutputGroups) {
+        return reply
+          .code(503)
+          .send({ error: 'Output group ordering is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const order = outputGroupOrderSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!order.success) {
+        return reply.code(400).send({ error: validationMessage(order.error) });
+      }
+      await sourceRepository.reorderOutputGroups(
         sourceId.data,
         order.data.providerGroups,
       );

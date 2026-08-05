@@ -20,7 +20,7 @@ The project is in its first implementation phase. The initial vertical slice pro
 - Persistent EPG reconciliation that pairs exact TVG IDs and unique normalized names automatically, reports missing/ambiguous coverage, and supports audited manual XMLTV locks that survive guide refreshes.
 - First-run single-administrator setup with scrypt password hashing, revocable database-backed sessions, CSRF checks, login throttling, and a dedicated sign-in screen.
 - Persistent permanent-channel reconciliation using provider IDs, TVG IDs, and normalized name/group fallbacks, with ambiguous matches left unresolved.
-- An expandable permanent-group editor with direct visibility toggles, hidden-group filtering, reusable custom categories, and drag-and-drop group/channel ordering, plus per-channel rename, regroup, logo, and ordering overrides.
+- A mixed output-group ordering workspace that drag-sorts regular TV and live-event groups together, plus an expandable permanent-group editor with direct visibility toggles, hidden-group filtering, reusable custom categories, and per-channel rename, regroup, logo, and ordering overrides.
 - A provider-change review queue for missing or ambiguous permanent channels, with conservative manual matching, match locks, and an audit trail.
 - Token-protected, revocable M3U/XMLTV output URLs for TiviMate, including one combined output assembled from multiple providers.
 - Non-overlapping automatic playlist refreshes, enabled every 120 minutes by default.
@@ -77,7 +77,7 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again. Use **Manage connection** later to replace either URL, derive a conventional `xmltv.php` URL from a saved `get.php` playlist URL, or remove a provider. Removing a provider deletes its data and revokes every output URL that includes it.
 3. Import the live playlist and XMLTV guide. VOD and series entries are skipped.
 4. Filter the provider groups and mark only daily live-event groups as events. Edit their output group, placeholder patterns, timezones, and numeric date order, then review provider and Finnish labels side by side. Ordinary live TV stays unchanged.
-5. Filter and expand permanent provider groups. Use the visibility toggle, make reusable custom categories, and drag groups or their fully loaded channels into the desired order; then use the expanded channel list for individual overrides. These edits are retained when a later provider snapshot can be matched safely.
+5. Use Output group order to place regular TV and daily event groups together, then filter and expand permanent provider groups. Use the visibility toggle, make reusable custom categories, and drag fully loaded channels into the desired order; then use the expanded channel list for individual overrides. These edits are retained when a later provider snapshot can be matched safely.
 6. If a refresh reports missing or ambiguous channels, use the provider-change review to choose a current provider entry. The original channel identity and edits are preserved and the manual match is locked until explicitly unlocked.
 7. Review update history after imports. If an accepted provider playlist is bad, restore a retained snapshot; current channel overrides are reconciled against it and the action is audited.
 8. Review EPG mappings. Safe exact-ID/name matches are automatic; search the XMLTV channel list and lock a manual choice only for missing or ambiguous channels.

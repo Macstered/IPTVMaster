@@ -40,6 +40,7 @@ interface EpgImportSummary {
 interface GroupSummary {
   providerGroup: string;
   channelCount: number;
+  sortOrder: number;
   configured: boolean;
   behavior: 'permanent' | 'event';
   enabled: boolean;
@@ -340,16 +341,17 @@ export function SourceSetup() {
   const [savingPermanentGroup, setSavingPermanentGroup] = useState<
     string | null
   >(null);
-  const [draggedPermanentGroup, setDraggedPermanentGroup] = useState<
-    string | null
-  >(null);
   const [draggedChannelId, setDraggedChannelId] = useState<string | null>(null);
   const [permanentGroupNames, setPermanentGroupNames] = useState<
     Record<string, string>
   >({});
-  const [permanentGroupOrders, setPermanentGroupOrders] = useState<
-    Record<string, string>
-  >({});
+  const [outputGroupFilter, setOutputGroupFilter] = useState('');
+  const [draggedOutputGroup, setDraggedOutputGroup] = useState<string | null>(
+    null,
+  );
+  const [savingOutputGroupOrder, setSavingOutputGroupOrder] = useState<
+    string | null
+  >(null);
   const [showHiddenPermanentGroups, setShowHiddenPermanentGroups] =
     useState(true);
   const [customCategories, setCustomCategories] = useState<CustomCategory[]>(
@@ -1081,24 +1083,30 @@ export function SourceSetup() {
     return next;
   }
 
-  async function savePermanentGroupOrder(
+  async function saveOutputGroupOrder(
     source: SafeSource,
     draggedGroup: string,
     targetGroup: string,
   ) {
-    const rows = permanentGroups.map((group) => ({
-      id: group.providerGroup,
-      group,
-    }));
+    const rows = [...groups]
+      .sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.providerGroup.localeCompare(right.providerGroup),
+      )
+      .map((group) => ({ id: group.providerGroup, group }));
     const nextRows = reordered(rows, draggedGroup, targetGroup);
     if (nextRows === rows) return;
-    const nextGroups = nextRows.map((row) => row.group);
-    setPermanentGroups(nextGroups);
-    setSavingPermanentGroup(draggedGroup);
+    const nextGroups = nextRows.map((row, sortOrder) => ({
+      ...row.group,
+      sortOrder,
+    }));
+    setGroups(nextGroups);
+    setSavingOutputGroupOrder(draggedGroup);
     setError(null);
     try {
       const response = await fetch(
-        `/api/v1/sources/${source.id}/permanent-groups/order`,
+        `/api/v1/sources/${source.id}/output-groups/order`,
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
@@ -1108,14 +1116,16 @@ export function SourceSetup() {
         },
       );
       if (!response.ok) await readJson<never>(response);
-      await loadPermanentGroups(source.id);
+      await loadGroups(source.id);
     } catch (caught) {
       setError(
-        caught instanceof Error ? caught.message : 'Could not save group order',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not save output group order',
       );
-      await loadPermanentGroups(source.id);
+      await loadGroups(source.id);
     } finally {
-      setSavingPermanentGroup(null);
+      setSavingOutputGroupOrder(null);
     }
   }
 
@@ -1470,6 +1480,22 @@ export function SourceSetup() {
   const permanentChannelCount = permanentGroups.reduce(
     (total, group) => total + group.channelCount,
     0,
+  );
+  const normalizedOutputGroupFilter = outputGroupFilter
+    .trim()
+    .toLocaleLowerCase();
+  const outputGroups = [...groups].sort(
+    (left, right) =>
+      left.sortOrder - right.sortOrder ||
+      left.providerGroup.localeCompare(right.providerGroup),
+  );
+  const visibleOutputGroups = outputGroups.filter((group) =>
+    normalizedOutputGroupFilter
+      ? [group.providerGroup, group.outputGroupName ?? '']
+          .join(' ')
+          .toLocaleLowerCase()
+          .includes(normalizedOutputGroupFilter)
+      : true,
   );
   const activeEventReview = eventReview?.groups.find(
     (group) => group.groupName === selectedEventGroup,
@@ -2381,6 +2407,110 @@ export function SourceSetup() {
           ) : null}
 
           <div className="channel-editor" id="channels">
+            <section className="output-group-order" aria-live="polite">
+              <div className="subsection-heading output-group-order-heading">
+                <div>
+                  <small>OUTPUT GROUP ORDER</small>
+                  <strong>Arrange TV and event groups together</strong>
+                </div>
+                <span className="channel-count">
+                  {outputGroups.length.toLocaleString()}{' '}
+                  {outputGroups.length === 1 ? 'group' : 'groups'}
+                </span>
+                <button
+                  className="secondary-button compact section-toggle"
+                  type="button"
+                  onClick={() => toggleSection('output-group-order')}
+                >
+                  {collapsedSections['output-group-order']
+                    ? 'Expand'
+                    : 'Collapse'}
+                </button>
+              </div>
+              <div hidden={collapsedSections['output-group-order']}>
+                <p className="secret-note">
+                  Drag any group to its output position. This includes regular
+                  TV and daily event groups, so Finland can be followed by its
+                  event groups.
+                </p>
+                <div className="channel-search output-group-search">
+                  <input
+                    aria-label="Filter output groups"
+                    placeholder="Filter TV or event groups"
+                    value={outputGroupFilter}
+                    onChange={(event) =>
+                      setOutputGroupFilter(event.target.value)
+                    }
+                  />
+                  <small>
+                    {visibleOutputGroups.length.toLocaleString()} shown
+                  </small>
+                </div>
+                <div className="output-group-order-list">
+                  {visibleOutputGroups.map((group, index) => {
+                    const isSaving =
+                      savingOutputGroupOrder === group.providerGroup;
+                    return (
+                      <article
+                        className={`output-group-order-row ${group.behavior}`}
+                        key={group.providerGroup}
+                        draggable={
+                          !normalizedOutputGroupFilter &&
+                          savingOutputGroupOrder === null
+                        }
+                        onDragStart={(event: DragEvent<HTMLElement>) => {
+                          setDraggedOutputGroup(group.providerGroup);
+                          event.dataTransfer.effectAllowed = 'move';
+                        }}
+                        onDragEnd={() => setDraggedOutputGroup(null)}
+                        onDragOver={(event: DragEvent<HTMLElement>) => {
+                          if (draggedOutputGroup) event.preventDefault();
+                        }}
+                        onDrop={(event: DragEvent<HTMLElement>) => {
+                          event.preventDefault();
+                          const draggedGroup = draggedOutputGroup;
+                          setDraggedOutputGroup(null);
+                          if (draggedGroup) {
+                            void saveOutputGroupOrder(
+                              primarySource,
+                              draggedGroup,
+                              group.providerGroup,
+                            );
+                          }
+                        }}
+                      >
+                        <span className="drag-handle" aria-hidden="true">
+                          ⋮⋮
+                        </span>
+                        <div>
+                          <strong>
+                            {group.providerGroup || '(Ungrouped)'}
+                          </strong>
+                          <small>
+                            {group.channelCount.toLocaleString()} live entries
+                            {group.outputGroupName
+                              ? ` · Output: ${group.outputGroupName}`
+                              : ''}
+                          </small>
+                        </div>
+                        <span className={`behavior-badge ${group.behavior}`}>
+                          {group.behavior === 'event' ? 'Live event' : 'TV'}
+                        </span>
+                        <span className="output-group-position">
+                          {isSaving ? 'Saving…' : index + 1}
+                        </span>
+                      </article>
+                    );
+                  })}
+                  {visibleOutputGroups.length === 0 ? (
+                    <p className="empty-groups">
+                      Import a playlist or change the group filter.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </section>
+
             <div className="subsection-heading channel-heading">
               <div>
                 <small>PERMANENT GROUPS</small>
@@ -2404,9 +2534,9 @@ export function SourceSetup() {
                 Expand a provider group to manage its channels. Group-wide
                 changes affect every current channel in that group; channel
                 edits remain available inside it. Event groups keep their
-                separate automatic daily handling. Drag groups to set their
-                output order, then drag channels inside an expanded group to
-                refine that order.
+                separate automatic daily handling. Use Output group order to
+                arrange TV and event groups together, then drag channels inside
+                an expanded group to refine its channel order.
               </p>
               <div className="channel-search">
                 <input
@@ -2474,9 +2604,6 @@ export function SourceSetup() {
                     (group.outputGroupStatus === 'custom'
                       ? (group.outputGroupName ?? '')
                       : '');
-                  const orderValue =
-                    permanentGroupOrders[group.providerGroup] ??
-                    String(group.firstSortOrder);
                   const outputLabel =
                     group.outputGroupStatus === 'mixed'
                       ? 'Mixed output groups'
@@ -2491,27 +2618,6 @@ export function SourceSetup() {
                         group.hiddenCount === group.channelCount ? 'hidden' : ''
                       }`}
                       key={group.providerGroup}
-                      draggable={!normalizedPermanentGroupFilter && !isSaving}
-                      onDragStart={(event) => {
-                        setDraggedPermanentGroup(group.providerGroup);
-                        event.dataTransfer.effectAllowed = 'move';
-                      }}
-                      onDragEnd={() => setDraggedPermanentGroup(null)}
-                      onDragOver={(event) => {
-                        if (draggedPermanentGroup) event.preventDefault();
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        const draggedGroup = draggedPermanentGroup;
-                        setDraggedPermanentGroup(null);
-                        if (draggedGroup) {
-                          void savePermanentGroupOrder(
-                            primarySource,
-                            draggedGroup,
-                            group.providerGroup,
-                          );
-                        }
-                      }}
                     >
                       <button
                         className="permanent-group-toggle"
@@ -2526,9 +2632,6 @@ export function SourceSetup() {
                         }
                       >
                         <span className="permanent-group-title">
-                          <span className="drag-handle" aria-hidden="true">
-                            ⠿
-                          </span>
                           <strong>
                             {group.providerGroup || '(Ungrouped)'}
                           </strong>
@@ -2604,44 +2707,6 @@ export function SourceSetup() {
                             }}
                           >
                             Reset
-                          </button>
-                        </form>
-                        <form
-                          className="permanent-group-order-form"
-                          onSubmit={(event) => {
-                            event.preventDefault();
-                            const nextOrder = Number(orderValue);
-                            if (!Number.isInteger(nextOrder) || nextOrder < 0) {
-                              setError(
-                                'Group order must be a non-negative integer',
-                              );
-                              return;
-                            }
-                            void updatePermanentGroup(primarySource, group, {
-                              startSortOrder: nextOrder,
-                            });
-                          }}
-                        >
-                          <input
-                            aria-label={`First channel order for ${group.providerGroup}`}
-                            type="number"
-                            min="0"
-                            step="1"
-                            placeholder="First order"
-                            value={orderValue}
-                            onChange={(event) =>
-                              setPermanentGroupOrders((current) => ({
-                                ...current,
-                                [group.providerGroup]: event.target.value,
-                              }))
-                            }
-                          />
-                          <button
-                            className="secondary-button compact"
-                            type="submit"
-                            disabled={isSaving}
-                          >
-                            Set order
                           </button>
                         </form>
                       </div>

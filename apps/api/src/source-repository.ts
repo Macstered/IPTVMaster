@@ -130,6 +130,7 @@ export interface StoredEpgGuide {
 export interface GroupSummary {
   providerGroup: string;
   channelCount: number;
+  sortOrder: number;
   configured: boolean;
   behavior: 'permanent' | 'event';
   enabled: boolean;
@@ -377,6 +378,10 @@ export interface SourceRepository {
     sourceId: string,
     providerGroups: string[],
   ): Promise<void>;
+  reorderOutputGroups?(
+    sourceId: string,
+    providerGroups: string[],
+  ): Promise<void>;
   reorderChannels?(
     sourceId: string,
     providerGroup: string,
@@ -526,6 +531,7 @@ interface StoredEntryRow {
   custom_logo_url: string | null;
   sort_order: number | null;
   epg_channel_upstream_id: string | null;
+  group_sort_order: number | null;
 }
 
 interface ChannelRow {
@@ -551,6 +557,7 @@ interface ChannelRow {
 interface GroupRow {
   provider_group: string;
   channel_count: string | number;
+  sort_order: string | number;
   configured: boolean;
   behavior: 'permanent' | 'event';
   enabled: boolean;
@@ -687,6 +694,7 @@ function toGroupSummary(row: GroupRow): GroupSummary {
   return {
     providerGroup: row.provider_group,
     channelCount: Number(row.channel_count),
+    sortOrder: Number(row.sort_order),
     configured: row.configured,
     behavior: row.behavior,
     enabled: row.enabled,
@@ -1318,15 +1326,26 @@ export class PostgresSourceRepository implements SourceRepository {
     const result = await this.#pool.query<StoredEntryRow>(
       `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata,
               c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order,
-              mapping.epg_channel_upstream_id
+              mapping.epg_channel_upstream_id,
+              group_order.sort_order AS group_sort_order
        FROM source_snapshot s
        JOIN upstream_item i ON i.snapshot_id = s.id
        LEFT JOIN channel c
          ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN epg_mapping mapping ON mapping.channel_id = c.id
+       LEFT JOIN output_group_order group_order
+         ON group_order.source_id = s.source_id
+        AND group_order.provider_group = i.provider_group
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
          AND (c.id IS NULL OR c.enabled = TRUE)
-       ORDER BY COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
+       ORDER BY COALESCE(
+                  group_order.sort_order,
+                  c.sort_order,
+                  (i.metadata->>'lineNumber')::int,
+                  0
+                ),
+                i.provider_group,
+                COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
                 COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
       [sourceId],
     );
@@ -1582,6 +1601,10 @@ export class PostgresSourceRepository implements SourceRepository {
     const result = await this.#pool.query<GroupRow>(
       `SELECT i.provider_group,
               COUNT(*) AS channel_count,
+              COALESCE(
+                group_order.sort_order,
+                MIN(COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0))
+              ) AS sort_order,
               (p.id IS NOT NULL) AS configured,
               COALESCE(p.behavior, 'permanent') AS behavior,
               COALESCE(p.enabled, TRUE) AS enabled,
@@ -1594,11 +1617,21 @@ export class PostgresSourceRepository implements SourceRepository {
        FROM source_snapshot s
        JOIN source src ON src.id = s.source_id
        JOIN upstream_item i ON i.snapshot_id = s.id
+       LEFT JOIN channel c
+         ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN group_policy p
          ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+       LEFT JOIN output_group_order group_order
+         ON group_order.source_id = s.source_id
+        AND group_order.provider_group = i.provider_group
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
-       GROUP BY i.provider_group, p.id, src.source_timezone, src.display_timezone
-       ORDER BY i.provider_group ASC`,
+       GROUP BY i.provider_group, p.id, group_order.sort_order,
+                src.source_timezone, src.display_timezone
+       ORDER BY COALESCE(
+                  group_order.sort_order,
+                  MIN(COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0))
+                ),
+                i.provider_group ASC`,
       [sourceId],
     );
     return result.rows.map(toGroupSummary);
@@ -1810,6 +1843,62 @@ export class PostgresSourceRepository implements SourceRepository {
           ],
         );
       }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async reorderOutputGroups(
+    sourceId: string,
+    providerGroups: string[],
+  ): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const source = await client.query<{ id: string }>(
+        `SELECT id FROM source WHERE id = $1 FOR UPDATE`,
+        [sourceId],
+      );
+      if (!source.rows[0]) throw new Error('Source was not found');
+      const result = await client.query<{ provider_group: string }>(
+        `SELECT DISTINCT i.provider_group
+         FROM source_snapshot s
+         JOIN upstream_item i ON i.snapshot_id = s.id
+         WHERE s.source_id = $1 AND s.is_last_known_good = TRUE`,
+        [sourceId],
+      );
+      const knownGroups = new Set(result.rows.map((row) => row.provider_group));
+      const submittedGroups = new Set(providerGroups);
+      if (
+        providerGroups.length !== knownGroups.size ||
+        submittedGroups.size !== knownGroups.size ||
+        [...knownGroups].some((group) => !submittedGroups.has(group))
+      ) {
+        throw new Error('Output group order no longer matches this source');
+      }
+      await client.query(
+        `DELETE FROM output_group_order WHERE source_id = $1`,
+        [sourceId],
+      );
+      await client.query(
+        `INSERT INTO output_group_order (source_id, provider_group, sort_order)
+         SELECT $1, change.provider_group, change.sort_order
+         FROM jsonb_to_recordset($2::jsonb)
+           AS change(provider_group TEXT, sort_order INTEGER)`,
+        [
+          sourceId,
+          JSON.stringify(
+            providerGroups.map((providerGroup, sortOrder) => ({
+              provider_group: providerGroup,
+              sort_order: sortOrder,
+            })),
+          ),
+        ],
+      );
       await client.query('COMMIT');
     } catch (error) {
       await this.#safeRollback(client);

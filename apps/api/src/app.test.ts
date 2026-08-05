@@ -69,6 +69,7 @@ class MemorySourceRepository implements SourceRepository {
   snapshotEntries = new Map<string, M3uEntry[]>();
   epgMappings = new Map<string, string>();
   readonly customCategories = new Map<string, Set<string>>();
+  readonly outputGroupOrders = new Map<string, string[]>();
 
   async createSource(input: CreateSourceInput): Promise<SafeSource> {
     this.inputs.push(input);
@@ -244,7 +245,24 @@ class MemorySourceRepository implements SourceRepository {
   }
 
   async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
-    return this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const entries =
+      this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const ranks = new Map(
+      (this.outputGroupOrders.get(sourceId) ?? []).map((group, index) => [
+        group,
+        index,
+      ]),
+    );
+    return entries
+      .map((entry, index) => ({ entry, index }))
+      .sort(
+        (left, right) =>
+          (ranks.get(left.entry.attributes['group-title'] ?? '') ??
+            Number.MAX_SAFE_INTEGER) -
+            (ranks.get(right.entry.attributes['group-title'] ?? '') ??
+              Number.MAX_SAFE_INTEGER) || left.index - right.index,
+      )
+      .map(({ entry }) => entry);
   }
 
   async saveEpgSnapshot(
@@ -271,30 +289,53 @@ class MemorySourceRepository implements SourceRepository {
     return this.latestEpgBySource.get(sourceId) ?? this.latestEpg;
   }
 
-  async listGroups(): Promise<GroupSummary[]> {
+  async listGroups(sourceId: string): Promise<GroupSummary[]> {
     const counts = new Map<string, number>();
-    for (const entry of this.latestEntries) {
+    const entries =
+      this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    for (const entry of entries) {
       const group = entry.attributes['group-title'] ?? '';
       counts.set(group, (counts.get(group) ?? 0) + 1);
     }
-    return [...counts].map(([providerGroup, channelCount]) => ({
-      providerGroup,
-      channelCount,
-      configured: false,
-      behavior: 'permanent',
-      enabled: true,
-      hidePlaceholders: true,
-      sourceTimeZone: 'Europe/Stockholm',
-      displayTimeZone: 'Europe/Helsinki',
-      numericDateOrder: 'month-day',
-    }));
+    const policiesByGroup = new Map(
+      this.policies.map((policy) => [policy.groupName, policy]),
+    );
+    const ranks = new Map(
+      (this.outputGroupOrders.get(sourceId) ?? []).map((group, index) => [
+        group,
+        index,
+      ]),
+    );
+    return [...counts]
+      .map(([providerGroup, channelCount], index) => {
+        const policy = policiesByGroup.get(providerGroup);
+        return {
+          providerGroup,
+          channelCount,
+          sortOrder: ranks.get(providerGroup) ?? index,
+          configured: policy !== undefined,
+          behavior: policy?.behavior ?? 'permanent',
+          enabled: policy?.enabled ?? true,
+          ...(policy?.outputGroupName
+            ? { outputGroupName: policy.outputGroupName }
+            : {}),
+          hidePlaceholders: policy?.hidePlaceholders ?? true,
+          sourceTimeZone: 'Europe/Stockholm',
+          displayTimeZone: 'Europe/Helsinki',
+          numericDateOrder: 'month-day' as const,
+        };
+      })
+      .sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.providerGroup.localeCompare(right.providerGroup),
+      );
   }
 
   async saveGroupPolicy(
     sourceId: string,
     input: SaveGroupPolicyInput,
   ): Promise<GroupSummary> {
-    void sourceId;
     this.policies = [
       {
         behavior: input.behavior,
@@ -321,9 +362,14 @@ class MemorySourceRepository implements SourceRepository {
     ];
     return {
       providerGroup: input.groupName,
-      channelCount: this.latestEntries.filter(
-        (entry) => entry.attributes['group-title'] === input.groupName,
-      ).length,
+      channelCount: (
+        this.latestEntriesBySource.get(sourceId) ?? this.latestEntries
+      ).filter((entry) => entry.attributes['group-title'] === input.groupName)
+        .length,
+      sortOrder: Math.max(
+        this.outputGroupOrders.get(sourceId)?.indexOf(input.groupName) ?? 0,
+        0,
+      ),
       configured: true,
       behavior: input.behavior,
       enabled: input.enabled,
@@ -497,6 +543,24 @@ class MemorySourceRepository implements SourceRepository {
           }
         : channel,
     );
+  }
+
+  async reorderOutputGroups(
+    sourceId: string,
+    providerGroups: string[],
+  ): Promise<void> {
+    const entries =
+      this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const groups = new Set(
+      entries.map((entry) => entry.attributes['group-title'] ?? ''),
+    );
+    if (
+      groups.size !== providerGroups.length ||
+      providerGroups.some((group) => !groups.has(group))
+    ) {
+      throw new Error('Output group order no longer matches this source');
+    }
+    this.outputGroupOrders.set(sourceId, [...providerGroups]);
   }
 
   async reorderChannels(
@@ -1716,6 +1780,31 @@ describe('IPTVMaster API', () => {
     });
     expect(policyResponse.statusCode).toBe(200);
 
+    const outputGroupOrderResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/output-groups/order`,
+      payload: {
+        providerGroups: ['MTV Urheilu Events FI', 'Finland'],
+      },
+    });
+    const groupsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/groups`,
+    });
+    expect(outputGroupOrderResponse.statusCode).toBe(204);
+    expect(groupsResponse.json().groups).toEqual([
+      expect.objectContaining({
+        providerGroup: 'MTV Urheilu Events FI',
+        behavior: 'event',
+        sortOrder: 0,
+      }),
+      expect.objectContaining({
+        providerGroup: 'Finland',
+        behavior: 'permanent',
+        sortOrder: 1,
+      }),
+    ]);
+
     const eventReviewResponse = await app.inject({
       method: 'GET',
       url: `/api/v1/sources/${source.id}/events?referenceDate=2026-08-04`,
@@ -1798,6 +1887,9 @@ describe('IPTVMaster API', () => {
     expect(playlistResponse.body).toContain('18:00 Tennis 8/4');
     expect(playlistResponse.body).toContain(
       'group-title="Today\'s Finnish Sports"',
+    );
+    expect(playlistResponse.body.indexOf('18:00 Tennis 8/4')).toBeLessThan(
+      playlistResponse.body.indexOf('Yle TV1'),
     );
     expect(playlistResponse.body).not.toContain('Reload your playlist');
     expect(epgResponse.statusCode).toBe(200);
