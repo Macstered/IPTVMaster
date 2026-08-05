@@ -38,6 +38,8 @@ function repository(): SourceRepository {
   };
   return {
     createSource: vi.fn(),
+    updateSource: vi.fn(async () => null),
+    deleteSource: vi.fn(async () => null),
     listSources: vi.fn(async (): Promise<SafeSource[]> => [
       {
         id: summary.sourceId,

@@ -74,7 +74,7 @@ Replace `IPTVMASTER_MASTER_KEY` with the output of `openssl rand -base64 32` bef
 ## First-use workflow
 
 1. Open the web UI from a LAN address that the Nvidia Shield can reach and create the one local administrator account. The password must be at least 12 characters.
-2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again. Add further providers from the same screen whenever needed.
+2. Save the provider M3U URL and optional XMLTV URL. They are encrypted before database storage and are not displayed again. Use **Manage connection** later to replace either URL, derive a conventional `xmltv.php` URL from a saved `get.php` playlist URL, or remove a provider. Removing a provider deletes its data and revokes every output URL that includes it.
 3. Import the live playlist and XMLTV guide. VOD and series entries are skipped.
 4. Filter the provider groups and mark only daily live-event groups as events. Edit their output group, placeholder patterns, timezones, and numeric date order, then review provider and Finnish labels side by side. Ordinary live TV stays unchanged.
 5. Filter and expand permanent provider groups. Use the visibility toggle, make reusable custom categories, and drag groups or their fully loaded channels into the desired order; then use the expanded channel list for individual overrides. These edits are retained when a later provider snapshot can be matched safely.

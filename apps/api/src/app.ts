@@ -31,6 +31,7 @@ import {
   ManualMatchConflictError,
   PostgresSourceRepository,
   SnapshotActivationConflictError,
+  XmltvDerivationError,
   type SourceRepository,
 } from './source-repository.js';
 import {
@@ -93,6 +94,33 @@ const createSourceSchema = z.object({
   sourceTimezone: z.string().min(1).default('Europe/Stockholm'),
   displayTimezone: z.string().min(1).default('Europe/Helsinki'),
 });
+
+const updateSourceSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    playlistUrl: z.url().max(4_000).optional(),
+    epgUrl: z.url().max(4_000).optional(),
+    deriveEpgUrl: z.boolean().default(false),
+    clearEpgUrl: z.boolean().default(false),
+    sourceTimezone: z.string().min(1).default('Europe/Stockholm'),
+    displayTimezone: z.string().min(1).default('Europe/Helsinki'),
+  })
+  .superRefine((value, context) => {
+    if (value.epgUrl && value.deriveEpgUrl) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Provide an XMLTV URL or derive one, not both',
+        path: ['epgUrl'],
+      });
+    }
+    if (value.clearEpgUrl && (value.epgUrl || value.deriveEpgUrl)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Clear XMLTV cannot be combined with an XMLTV update',
+        path: ['clearEpgUrl'],
+      });
+    }
+  });
 
 const groupPolicySchema = z.object({
   groupName: z.string().min(1).max(500),
@@ -874,6 +902,73 @@ export async function buildApp(
     });
     return reply.code(201).send({ source });
   });
+
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const parsed = updateSourceSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!parsed.success) {
+        return reply.code(400).send({ error: validationMessage(parsed.error) });
+      }
+      for (const [label, value] of [
+        ['playlistUrl', parsed.data.playlistUrl],
+        ['epgUrl', parsed.data.epgUrl],
+      ] as const) {
+        if (value && !['http:', 'https:'].includes(new URL(value).protocol)) {
+          return reply
+            .code(400)
+            .send({ error: `${label} must use HTTP or HTTPS` });
+        }
+      }
+      try {
+        const source = await sourceRepository.updateSource(sourceId.data, {
+          name: parsed.data.name,
+          ...(parsed.data.playlistUrl
+            ? { playlistUrl: parsed.data.playlistUrl }
+            : {}),
+          ...(parsed.data.epgUrl ? { epgUrl: parsed.data.epgUrl } : {}),
+          ...(parsed.data.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
+          ...(parsed.data.clearEpgUrl ? { clearEpgUrl: true } : {}),
+          sourceTimezone: parsed.data.sourceTimezone,
+          displayTimezone: parsed.data.displayTimezone,
+        });
+        if (!source) return reply.code(404).send({ error: 'Source not found' });
+        return { source };
+      } catch (error) {
+        if (error instanceof XmltvDerivationError) {
+          return reply.code(422).send({ error: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      const result = await sourceRepository.deleteSource(sourceId.data);
+      if (!result) return reply.code(404).send({ error: 'Source not found' });
+      return result;
+    },
+  );
 
   app.post<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/preview-import',

@@ -40,6 +40,20 @@ export interface CreateSourceInput {
   displayTimezone: string;
 }
 
+export interface UpdateSourceInput {
+  name: string;
+  playlistUrl?: string;
+  epgUrl?: string;
+  deriveEpgUrl?: boolean;
+  clearEpgUrl?: boolean;
+  sourceTimezone: string;
+  displayTimezone: string;
+}
+
+export interface DeleteSourceResult {
+  revokedOutputProfiles: number;
+}
+
 export interface SafeSource {
   id: string;
   name: string;
@@ -288,6 +302,15 @@ export class SnapshotActivationConflictError extends Error {
   }
 }
 
+export class XmltvDerivationError extends Error {
+  constructor() {
+    super(
+      'The saved playlist URL does not end in get.php, so an XMLTV URL cannot be derived automatically',
+    );
+    this.name = 'XmltvDerivationError';
+  }
+}
+
 export interface CreatedOutputProfile {
   id: string;
   name: string;
@@ -304,6 +327,11 @@ export interface ResolvedOutputProfile {
 
 export interface SourceRepository {
   createSource(input: CreateSourceInput): Promise<SafeSource>;
+  updateSource(
+    sourceId: string,
+    input: UpdateSourceInput,
+  ): Promise<SafeSource | null>;
+  deleteSource(sourceId: string): Promise<DeleteSourceResult | null>;
   listSources(): Promise<SafeSource[]>;
   getSourceCredentials(sourceId: string): Promise<SourceCredentials | null>;
   savePlaylistSnapshot(
@@ -409,6 +437,7 @@ interface SourceRow {
   id: string;
   name: string;
   source_type: 'm3u' | 'xtream';
+  credential_ref: string;
   source_timezone: string;
   display_timezone: string;
   enabled: boolean;
@@ -561,6 +590,13 @@ function outputProfileSourceIds(configuration: unknown): string[] {
   }
   const legacySourceId = record['sourceId'];
   return typeof legacySourceId === 'string' ? [legacySourceId] : [];
+}
+
+export function deriveXmltvUrl(playlistUrl: string): string | null {
+  const url = new URL(playlistUrl);
+  if (!/\/get\.php$/i.test(url.pathname)) return null;
+  url.pathname = url.pathname.replace(/get\.php$/i, 'xmltv.php');
+  return url.toString();
 }
 
 function toSafeSource(row: SourceRow, hasEpgUrl: boolean): SafeSource {
@@ -757,6 +793,119 @@ export class PostgresSourceRepository implements SourceRepository {
       if (!source) throw new Error('Source insert did not return a row');
       await client.query('COMMIT');
       return toSafeSource(source, input.credentials.epgUrl !== undefined);
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateSource(
+    sourceId: string,
+    input: UpdateSourceInput,
+  ): Promise<SafeSource | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sourceResult = await client.query<SourceRow>(
+        `SELECT s.id, s.name, s.source_type, s.source_timezone,
+                s.display_timezone, s.enabled, s.created_at, s.updated_at,
+                s.credential_ref, v.encrypted_value
+           FROM source s
+           JOIN secret_value v ON v.id = s.credential_ref
+          WHERE s.id = $1
+          FOR UPDATE OF s, v`,
+        [sourceId],
+      );
+      const existing = sourceResult.rows[0];
+      if (!existing) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      const existingCredentials = this.#decryptCredentials(
+        existing.encrypted_value ?? '',
+      );
+      const playlistUrl = input.playlistUrl ?? existingCredentials.playlistUrl;
+      const derivedEpgUrl = input.deriveEpgUrl
+        ? deriveXmltvUrl(playlistUrl)
+        : undefined;
+      if (input.deriveEpgUrl && !derivedEpgUrl) {
+        throw new XmltvDerivationError();
+      }
+      const credentials: SourceCredentials = {
+        playlistUrl,
+        ...(input.clearEpgUrl
+          ? {}
+          : input.epgUrl
+            ? { epgUrl: input.epgUrl }
+            : derivedEpgUrl
+              ? { epgUrl: derivedEpgUrl }
+              : existingCredentials.epgUrl
+                ? { epgUrl: existingCredentials.epgUrl }
+                : {}),
+      };
+      const encrypted = encryptSecret(
+        JSON.stringify(credentials),
+        this.#masterKey,
+      );
+      await client.query(
+        `UPDATE secret_value
+            SET encrypted_value = $2
+          WHERE id = $1`,
+        [existing.credential_ref, encrypted],
+      );
+      const updatedResult = await client.query<SourceRow>(
+        `UPDATE source
+            SET name = $2, source_timezone = $3, display_timezone = $4,
+                updated_at = NOW()
+          WHERE id = $1
+          RETURNING id, name, source_type, source_timezone, display_timezone,
+                    enabled, created_at, updated_at`,
+        [sourceId, input.name, input.sourceTimezone, input.displayTimezone],
+      );
+      const updated = updatedResult.rows[0];
+      if (!updated) throw new Error('Source update did not return a row');
+      await client.query('COMMIT');
+      return toSafeSource(updated, credentials.epgUrl !== undefined);
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deleteSource(sourceId: string): Promise<DeleteSourceResult | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sourceResult = await client.query<{ credential_ref: string }>(
+        `SELECT credential_ref FROM source WHERE id = $1 FOR UPDATE`,
+        [sourceId],
+      );
+      const source = sourceResult.rows[0];
+      if (!source) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const profiles = await client.query(
+        `UPDATE output_profile
+            SET enabled = FALSE
+          WHERE enabled = TRUE
+            AND (
+              configuration -> 'sourceIds' ? $1
+              OR configuration ->> 'sourceId' = $1
+            )`,
+        [sourceId],
+      );
+      await client.query('DELETE FROM source WHERE id = $1', [sourceId]);
+      await client.query('DELETE FROM secret_value WHERE id = $1', [
+        source.credential_ref,
+      ]);
+      await client.query('COMMIT');
+      return { revokedOutputProfiles: profiles.rowCount ?? 0 };
     } catch (error) {
       await this.#safeRollback(client);
       throw error;

@@ -279,10 +279,14 @@ export function SourceSetup() {
   const [sources, setSources] = useState<SafeSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [showSourceForm, setShowSourceForm] = useState(false);
+  const [editingConnection, setEditingConnection] = useState<SafeSource | null>(
+    null,
+  );
   const [name, setName] = useState('Home provider');
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [epgUrl, setEpgUrl] = useState('');
   const [saving, setSaving] = useState(false);
+  const [removingSourceId, setRemovingSourceId] = useState<string | null>(null);
   const [inspectingId, setInspectingId] = useState<string | null>(null);
   const [importingEpgId, setImportingEpgId] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(
@@ -575,8 +579,73 @@ export function SourceSetup() {
     }
   }
 
+  function clearSourceForm() {
+    setEditingConnection(null);
+    setName('Home provider');
+    setPlaylistUrl('');
+    setEpgUrl('');
+    setShowSourceForm(false);
+  }
+
+  async function beginConnectionEdit(source: SafeSource) {
+    setEditingConnection(source);
+    setShowSourceForm(false);
+    setName(source.name);
+    setPlaylistUrl('');
+    setEpgUrl('');
+    setError(null);
+    await selectSource(source);
+  }
+
+  async function updateSourceConnection(
+    source: SafeSource,
+    options: { deriveEpgUrl?: boolean; clearEpgUrl?: boolean } = {},
+  ) {
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/sources/${source.id}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          ...(playlistUrl.trim() ? { playlistUrl: playlistUrl.trim() } : {}),
+          ...(!options.deriveEpgUrl && !options.clearEpgUrl && epgUrl.trim()
+            ? { epgUrl: epgUrl.trim() }
+            : {}),
+          ...(options.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
+          ...(options.clearEpgUrl ? { clearEpgUrl: true } : {}),
+          sourceTimezone: source.sourceTimezone,
+          displayTimezone: source.displayTimezone,
+        }),
+      });
+      const payload = await readJson<{ source: SafeSource }>(response);
+      setSources((current) =>
+        current.map((candidate) =>
+          candidate.id === source.id ? payload.source : candidate,
+        ),
+      );
+      if (options.deriveEpgUrl || epgUrl.trim()) {
+        await importEpg(payload.source);
+      }
+      clearSourceForm();
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not update provider connection',
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function saveSource(event: FormEvent) {
     event.preventDefault();
+    if (editingConnection) {
+      await updateSourceConnection(editingConnection);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -594,9 +663,7 @@ export function SourceSetup() {
       });
       const payload = await readJson<{ source: SafeSource }>(response);
       setSources((current) => [...current, payload.source]);
-      setPlaylistUrl('');
-      setEpgUrl('');
-      setShowSourceForm(false);
+      clearSourceForm();
       setOutputSourceIds((current) =>
         current.length > 0 ? current : [payload.source.id],
       );
@@ -607,6 +674,60 @@ export function SourceSetup() {
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function removeSource(source: SafeSource) {
+    const confirmed = window.confirm(
+      `Remove ${source.name}? This permanently deletes its imported playlists, guide data, edits, and revokes any output URLs that include it.`,
+    );
+    if (!confirmed) return;
+    setRemovingSourceId(source.id);
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/sources/${source.id}`, {
+        method: 'DELETE',
+      });
+      const payload = await readJson<{ revokedOutputProfiles: number }>(
+        response,
+      );
+      const remaining = sources.filter(
+        (candidate) => candidate.id !== source.id,
+      );
+      setSources(remaining);
+      setOutputSourceIds((current) =>
+        current.filter((sourceId) => sourceId !== source.id),
+      );
+      setOutputProfile(null);
+      setPlaylistOutputUrl('');
+      setEpgOutputUrl('');
+      clearSourceForm();
+      if (selectedSourceId === source.id) {
+        const nextSource = remaining[0] ?? null;
+        setSelectedSourceId(nextSource?.id ?? null);
+        setGroups([]);
+        setPermanentGroups([]);
+        setChannels([]);
+        setChannelTotal(0);
+        setEventReview(null);
+        setEpgMappingReview(null);
+        setEpgGuideChannels(null);
+        setSourceHistory(null);
+        if (nextSource) await selectSource(nextSource);
+      }
+      if (payload.revokedOutputProfiles > 0) {
+        setError(
+          `${payload.revokedOutputProfiles} generated output URL${
+            payload.revokedOutputProfiles === 1 ? ' was' : 's were'
+          } revoked because it included this provider.`,
+        );
+      }
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : 'Could not remove provider',
+      );
+    } finally {
+      setRemovingSourceId(null);
     }
   }
 
@@ -1378,7 +1499,7 @@ export function SourceSetup() {
       ) : null}
 
       {capabilities?.sourcePersistence &&
-      (sources.length === 0 || showSourceForm) ? (
+      (sources.length === 0 || showSourceForm || editingConnection !== null) ? (
         <form className="source-form" onSubmit={saveSource}>
           <div>
             <label htmlFor="source-name">Source name</label>
@@ -1390,7 +1511,9 @@ export function SourceSetup() {
             />
           </div>
           <div>
-            <label htmlFor="playlist-url">M3U playlist URL</label>
+            <label htmlFor="playlist-url">
+              M3U playlist URL{editingConnection ? ' (optional)' : ''}
+            </label>
             <input
               id="playlist-url"
               type="password"
@@ -1398,7 +1521,12 @@ export function SourceSetup() {
               onChange={(event) => setPlaylistUrl(event.target.value)}
               autoComplete="off"
               spellCheck={false}
-              required
+              placeholder={
+                editingConnection
+                  ? 'Leave blank to keep the saved playlist URL'
+                  : undefined
+              }
+              required={!editingConnection}
             />
           </div>
           <div>
@@ -1410,23 +1538,62 @@ export function SourceSetup() {
               onChange={(event) => setEpgUrl(event.target.value)}
               autoComplete="off"
               spellCheck={false}
+              placeholder={
+                editingConnection
+                  ? 'Leave blank to keep the saved XMLTV URL'
+                  : undefined
+              }
             />
           </div>
           <button type="submit" disabled={saving}>
-            {saving ? 'Saving securely…' : 'Save encrypted source'}
+            {saving
+              ? 'Saving securely…'
+              : editingConnection
+                ? 'Save connection'
+                : 'Save encrypted source'}
           </button>
+          {editingConnection ? (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={saving}
+              onClick={() =>
+                void updateSourceConnection(editingConnection, {
+                  deriveEpgUrl: true,
+                })
+              }
+            >
+              Use matching XMLTV URL
+            </button>
+          ) : null}
+          {editingConnection?.hasEpgUrl ? (
+            <button
+              className="danger-button"
+              type="button"
+              disabled={saving}
+              onClick={() =>
+                void updateSourceConnection(editingConnection, {
+                  clearEpgUrl: true,
+                })
+              }
+            >
+              Remove XMLTV URL
+            </button>
+          ) : null}
           {sources.length > 0 ? (
             <button
               className="secondary-button"
               type="button"
               disabled={saving}
-              onClick={() => setShowSourceForm(false)}
+              onClick={clearSourceForm}
             >
               Cancel
             </button>
           ) : null}
           <p className="secret-note">
-            URLs are encrypted before database storage and never shown again.
+            {editingConnection
+              ? 'URL fields are intentionally blank. Enter only values you want to replace; saved URLs remain encrypted and are never shown again.'
+              : 'URLs are encrypted before database storage and never shown again.'}
           </p>
         </form>
       ) : null}
@@ -1463,12 +1630,10 @@ export function SourceSetup() {
                 <button
                   className="secondary-button"
                   type="button"
-                  disabled={source.id === primarySource?.id}
-                  onClick={() => void selectSource(source)}
+                  disabled={saving || removingSourceId !== null}
+                  onClick={() => void beginConnectionEdit(source)}
                 >
-                  {source.id === primarySource?.id
-                    ? 'Editing this provider'
-                    : 'Edit this provider'}
+                  Manage connection
                 </button>
                 <button
                   className="secondary-button"
@@ -1502,6 +1667,21 @@ export function SourceSetup() {
                       : 'Import XMLTV guide'}
                   </button>
                 ) : null}
+                <button
+                  className="danger-button compact"
+                  type="button"
+                  disabled={
+                    saving ||
+                    removingSourceId !== null ||
+                    inspectingId !== null ||
+                    importingEpgId !== null
+                  }
+                  onClick={() => void removeSource(source)}
+                >
+                  {removingSourceId === source.id
+                    ? 'Removing…'
+                    : 'Remove provider'}
+                </button>
               </div>
             </article>
           ))}
@@ -1510,11 +1690,15 @@ export function SourceSetup() {
 
       {capabilities?.sourcePersistence &&
       sources.length > 0 &&
-      !showSourceForm ? (
+      !showSourceForm &&
+      editingConnection === null ? (
         <button
           className="secondary-button add-provider-button"
           type="button"
-          onClick={() => setShowSourceForm(true)}
+          onClick={() => {
+            clearSourceForm();
+            setShowSourceForm(true);
+          }}
         >
           Add another provider
         </button>

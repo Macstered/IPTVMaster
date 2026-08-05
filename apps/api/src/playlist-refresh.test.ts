@@ -44,6 +44,8 @@ function repository(
 ): SourceRepository {
   const base: SourceRepository = {
     createSource: vi.fn(),
+    updateSource: vi.fn(async () => null),
+    deleteSource: vi.fn(async () => null),
     listSources: vi.fn(async () => [source()]),
     getSourceCredentials: vi.fn(async (): Promise<SourceCredentials> => ({
       playlistUrl: 'http://provider.test/synthetic',

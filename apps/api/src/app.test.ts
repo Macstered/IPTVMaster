@@ -9,7 +9,10 @@ import {
 } from '@iptvmaster/core';
 
 import { buildApp } from './app.js';
-import { SnapshotActivationConflictError } from './source-repository.js';
+import {
+  deriveXmltvUrl,
+  SnapshotActivationConflictError,
+} from './source-repository.js';
 import type {
   BulkUpdateChannelInput,
   BulkUpdateChannelResult,
@@ -36,6 +39,7 @@ import type {
   StoredSnapshotSummary,
   UpdateChannelInput,
   UpdatePermanentGroupInput,
+  UpdateSourceInput,
 } from './source-repository.js';
 
 const applications: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -79,6 +83,63 @@ class MemorySourceRepository implements SourceRepository {
     };
     this.sources.push(source);
     return source;
+  }
+
+  async updateSource(
+    sourceId: string,
+    input: UpdateSourceInput,
+  ): Promise<SafeSource | null> {
+    const index = this.sources.findIndex((source) => source.id === sourceId);
+    const current = this.sources[index];
+    const currentInput = this.inputs[index];
+    if (!current || !currentInput) return null;
+    const derivedEpgUrl = input.deriveEpgUrl
+      ? deriveXmltvUrl(
+          input.playlistUrl ?? currentInput.credentials.playlistUrl,
+        )
+      : undefined;
+    if (input.deriveEpgUrl && !derivedEpgUrl) {
+      throw new Error('Could not derive XMLTV URL');
+    }
+    const credentials: SourceCredentials = {
+      playlistUrl: input.playlistUrl ?? currentInput.credentials.playlistUrl,
+      ...(input.clearEpgUrl
+        ? {}
+        : input.epgUrl
+          ? { epgUrl: input.epgUrl }
+          : derivedEpgUrl
+            ? { epgUrl: derivedEpgUrl }
+            : currentInput.credentials.epgUrl
+              ? { epgUrl: currentInput.credentials.epgUrl }
+              : {}),
+    };
+    this.inputs[index] = { ...currentInput, credentials };
+    const updated: SafeSource = {
+      ...current,
+      name: input.name,
+      sourceTimezone: input.sourceTimezone,
+      displayTimezone: input.displayTimezone,
+      hasEpgUrl: credentials.epgUrl !== undefined,
+      updatedAt: '2026-08-05T00:00:00.000Z',
+    };
+    this.sources[index] = updated;
+    return updated;
+  }
+
+  async deleteSource(sourceId: string) {
+    const index = this.sources.findIndex((source) => source.id === sourceId);
+    if (index < 0) return null;
+    const revokedOutputProfiles = this.outputProfile?.sourceIds.includes(
+      sourceId,
+    )
+      ? 1
+      : 0;
+    if (revokedOutputProfiles > 0) this.outputProfile = null;
+    this.sources.splice(index, 1);
+    this.inputs.splice(index, 1);
+    this.latestEntriesBySource.delete(sourceId);
+    this.latestEpgBySource.delete(sourceId);
+    return { revokedOutputProfiles };
   }
 
   async listSources(): Promise<SafeSource[]> {
@@ -897,6 +958,67 @@ describe('IPTVMaster API', () => {
     expect(repository.inputs[0]?.credentials.playlistUrl).toContain(
       'username=synthetic-user',
     );
+  });
+
+  it('derives and securely saves an XMLTV URL for an existing provider', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: syntheticProviderUrl('/get.php') },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}`,
+      payload: {
+        name: 'Home provider',
+        deriveEpgUrl: true,
+        sourceTimezone: 'Europe/Stockholm',
+        displayTimezone: 'Europe/Helsinki',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain('provider.test');
+    expect(response.body).not.toContain('synthetic-secret');
+    expect(response.json().source).toEqual(
+      expect.objectContaining({ hasEpgUrl: true }),
+    );
+    expect(repository.inputs[0]?.credentials.epgUrl).toContain('/xmltv.php');
+    expect(repository.inputs[0]?.credentials.epgUrl).toContain(
+      'password=synthetic-secret',
+    );
+  });
+
+  it('removes a provider and revokes every output that includes it', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: syntheticProviderUrl('/get.php') },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    await repository.createOutputProfile([source.id], 'TiviMate');
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/sources/${source.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ revokedOutputProfiles: 1 });
+    await expect(repository.listSources()).resolves.toEqual([]);
+    await expect(
+      repository.resolveOutputProfile('synthetic_output_token_1234567890'),
+    ).resolves.toBeNull();
   });
 
   it('previews a saved source import without exposing its URL', async () => {
