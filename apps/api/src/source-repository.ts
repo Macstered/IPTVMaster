@@ -157,6 +157,11 @@ export interface UpdatePermanentGroupInput {
   startSortOrder?: number;
 }
 
+export interface CustomCategory {
+  name: string;
+  channelCount: number;
+}
+
 export type ChannelReconciliationStatus =
   'matched' | 'new' | 'missing' | 'ambiguous';
 
@@ -294,7 +299,7 @@ export interface CreatedOutputProfile {
 export interface ResolvedOutputProfile {
   id: string;
   name: string;
-  sourceId: string;
+  sourceIds: string[];
 }
 
 export interface SourceRepository {
@@ -331,6 +336,20 @@ export interface SourceRepository {
     providerGroup: string,
     input: UpdatePermanentGroupInput,
   ): Promise<BulkUpdateChannelResult>;
+  reorderPermanentGroups?(
+    sourceId: string,
+    providerGroups: string[],
+  ): Promise<void>;
+  reorderChannels?(
+    sourceId: string,
+    providerGroup: string,
+    channelIds: string[],
+  ): Promise<void>;
+  listCustomCategories?(sourceId: string): Promise<CustomCategory[]>;
+  createCustomCategory?(
+    sourceId: string,
+    name: string,
+  ): Promise<CustomCategory>;
   updateChannel(
     sourceId: string,
     channelId: string,
@@ -376,7 +395,7 @@ export interface SourceRepository {
     referenceDate: string,
   ): Promise<OutputGroupPolicy[]>;
   createOutputProfile(
-    sourceId: string,
+    sourceIds: string[],
     name: string,
   ): Promise<CreatedOutputProfile>;
   resolveOutputProfile(
@@ -517,7 +536,7 @@ interface PermanentGroupRow {
 interface OutputProfileRow {
   id: string;
   name: string;
-  source_id: string;
+  configuration: unknown;
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -527,6 +546,21 @@ function isStringRecord(value: unknown): value is Record<string, string> {
     !Array.isArray(value) &&
     Object.values(value).every((item) => typeof item === 'string')
   );
+}
+
+function outputProfileSourceIds(configuration: unknown): string[] {
+  if (typeof configuration !== 'object' || configuration === null) return [];
+  const record = configuration as Record<string, unknown>;
+  const sourceIds = record['sourceIds'];
+  if (
+    Array.isArray(sourceIds) &&
+    sourceIds.length > 0 &&
+    sourceIds.every((value): value is string => typeof value === 'string')
+  ) {
+    return [...new Set(sourceIds)];
+  }
+  const legacySourceId = record['sourceId'];
+  return typeof legacySourceId === 'string' ? [legacySourceId] : [];
 }
 
 function toSafeSource(row: SourceRow, hasEpgUrl: boolean): SafeSource {
@@ -1478,7 +1512,7 @@ export class PostgresSourceRepository implements SourceRepository {
          AND c.current_upstream_item_id IS NOT NULL
          AND COALESCE(p.behavior, 'permanent') = 'permanent'
        GROUP BY c.provider_group
-       ORDER BY c.provider_group ASC`,
+       ORDER BY MIN(c.sort_order) ASC, c.provider_group ASC`,
       [sourceId],
     );
     return result.rows.map(toPermanentGroupSummary);
@@ -1542,6 +1576,191 @@ export class PostgresSourceRepository implements SourceRepository {
     } finally {
       client.release();
     }
+  }
+
+  async reorderPermanentGroups(
+    sourceId: string,
+    providerGroups: string[],
+  ): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{
+        id: string;
+        provider_group: string;
+        sort_order: number;
+        provider_name: string;
+      }>(
+        `SELECT c.id, c.provider_group, c.sort_order, c.provider_name
+         FROM channel c
+         LEFT JOIN group_policy p
+           ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+         WHERE c.source_id = $1 AND c.archived_at IS NULL
+           AND c.current_upstream_item_id IS NOT NULL
+           AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         ORDER BY c.provider_group, c.sort_order, c.provider_name, c.id
+         FOR UPDATE OF c`,
+        [sourceId],
+      );
+      const knownGroups = new Set(result.rows.map((row) => row.provider_group));
+      const submittedGroups = new Set(providerGroups);
+      if (
+        providerGroups.length !== knownGroups.size ||
+        submittedGroups.size !== knownGroups.size ||
+        [...knownGroups].some((group) => !submittedGroups.has(group))
+      ) {
+        throw new Error('Permanent group order no longer matches this source');
+      }
+      const rank = new Map(
+        providerGroups.map((group, index) => [group, index]),
+      );
+      const orderedChannels = [...result.rows].sort(
+        (left, right) =>
+          (rank.get(left.provider_group) ?? 0) -
+            (rank.get(right.provider_group) ?? 0) ||
+          left.sort_order - right.sort_order ||
+          left.provider_name.localeCompare(right.provider_name) ||
+          left.id.localeCompare(right.id),
+      );
+      if (orderedChannels.length > 0) {
+        await client.query(
+          `UPDATE channel c
+           SET sort_order = change.sort_order, updated_at = NOW()
+           FROM jsonb_to_recordset($1::jsonb)
+             AS change(id UUID, sort_order INTEGER)
+           WHERE c.id = change.id`,
+          [
+            JSON.stringify(
+              orderedChannels.map((channel, index) => ({
+                id: channel.id,
+                sort_order: index,
+              })),
+            ),
+          ],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async reorderChannels(
+    sourceId: string,
+    providerGroup: string,
+    channelIds: string[],
+  ): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{
+        id: string;
+        sort_order: number;
+      }>(
+        `SELECT c.id, c.sort_order
+         FROM channel c
+         WHERE c.source_id = $1 AND c.provider_group = $2
+           AND c.archived_at IS NULL AND c.current_upstream_item_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM group_policy p
+             WHERE p.source_id = c.source_id
+               AND p.provider_group = c.provider_group
+               AND p.behavior = 'event'
+           )
+         ORDER BY c.sort_order, c.provider_name, c.id
+         FOR UPDATE`,
+        [sourceId, providerGroup],
+      );
+      const submittedIds = new Set(channelIds);
+      if (
+        channelIds.length !== result.rows.length ||
+        submittedIds.size !== result.rows.length ||
+        result.rows.some((row) => !submittedIds.has(row.id))
+      ) {
+        throw new Error('Channel order no longer matches this provider group');
+      }
+      if (channelIds.length > 0) {
+        const slots = result.rows.map((row) => row.sort_order);
+        await client.query(
+          `UPDATE channel c
+           SET sort_order = change.sort_order, updated_at = NOW()
+           FROM jsonb_to_recordset($1::jsonb)
+             AS change(id UUID, sort_order INTEGER)
+           WHERE c.id = change.id`,
+          [
+            JSON.stringify(
+              channelIds.map((id, index) => ({
+                id,
+                sort_order: slots[index],
+              })),
+            ),
+          ],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listCustomCategories(sourceId: string): Promise<CustomCategory[]> {
+    const result = await this.#pool.query<{
+      name: string;
+      channel_count: string | number;
+      sort_order: string | number | null;
+    }>(
+      `WITH names AS (
+         SELECT category.name, category.sort_order
+         FROM custom_output_category category
+         WHERE category.source_id = $1
+         UNION
+         SELECT DISTINCT c.custom_group AS name, NULL::INTEGER AS sort_order
+         FROM channel c
+         WHERE c.source_id = $1 AND c.archived_at IS NULL
+           AND c.custom_group IS NOT NULL
+       )
+       SELECT names.name, COUNT(c.id) AS channel_count,
+              MIN(names.sort_order) AS sort_order
+       FROM names
+       LEFT JOIN channel c
+         ON c.source_id = $1 AND c.archived_at IS NULL
+        AND c.custom_group = names.name
+       GROUP BY names.name
+       ORDER BY MIN(names.sort_order) NULLS LAST, names.name`,
+      [sourceId],
+    );
+    return result.rows.map((row) => ({
+      name: row.name,
+      channelCount: Number(row.channel_count),
+    }));
+  }
+
+  async createCustomCategory(
+    sourceId: string,
+    name: string,
+  ): Promise<CustomCategory> {
+    await this.#pool.query(
+      `INSERT INTO custom_output_category (source_id, name, sort_order)
+       SELECT $1, $2,
+              COALESCE(
+                (SELECT MAX(sort_order) + 1
+                 FROM custom_output_category WHERE source_id = $1),
+                0
+              )
+       WHERE EXISTS (SELECT 1 FROM source WHERE id = $1)
+       ON CONFLICT (source_id, name) DO NOTHING`,
+      [sourceId, name],
+    );
+    const categories = await this.listCustomCategories(sourceId);
+    const category = categories.find((candidate) => candidate.name === name);
+    if (!category) throw new Error('Source not found while creating category');
+    return category;
   }
 
   async listChannels(
@@ -2264,21 +2483,40 @@ export class PostgresSourceRepository implements SourceRepository {
   }
 
   async createOutputProfile(
-    sourceId: string,
+    sourceIds: string[],
     name: string,
   ): Promise<CreatedOutputProfile> {
+    const uniqueSourceIds = [...new Set(sourceIds)];
+    if (uniqueSourceIds.length === 0) {
+      throw new Error('At least one provider is required for an output');
+    }
     const accessToken = randomBytes(24).toString('base64url');
-    const result = await this.#pool.query<{ id: string; name: string }>(
-      `INSERT INTO output_profile (name, access_token_hash, configuration)
-       SELECT $2, $3, jsonb_build_object('sourceId', s.id)
-       FROM source s
-       WHERE s.id = $1
-       RETURNING id, name`,
-      [sourceId, name, accessTokenHash(accessToken)],
-    );
-    const profile = result.rows[0];
-    if (!profile)
-      throw new Error('Source not found while creating output profile');
+    const client = await this.#pool.connect();
+    let profile: { id: string; name: string } | undefined;
+    try {
+      await client.query('BEGIN');
+      const sourceResult = await client.query<{ id: string }>(
+        `SELECT id FROM source WHERE id = ANY($1::uuid[])`,
+        [uniqueSourceIds],
+      );
+      if (sourceResult.rows.length !== uniqueSourceIds.length) {
+        throw new Error('One or more selected providers were not found');
+      }
+      const result = await client.query<{ id: string; name: string }>(
+        `INSERT INTO output_profile (name, access_token_hash, configuration)
+         VALUES ($1, $2, jsonb_build_object('sourceIds', $3::jsonb))
+         RETURNING id, name`,
+        [name, accessTokenHash(accessToken), JSON.stringify(uniqueSourceIds)],
+      );
+      profile = result.rows[0];
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (!profile) throw new Error('Output profile insert did not return a row');
     return {
       id: profile.id,
       name: profile.name,
@@ -2292,13 +2530,17 @@ export class PostgresSourceRepository implements SourceRepository {
     accessToken: string,
   ): Promise<ResolvedOutputProfile | null> {
     const result = await this.#pool.query<OutputProfileRow>(
-      `SELECT id, name, configuration->>'sourceId' AS source_id
+      `SELECT id, name, configuration
        FROM output_profile
        WHERE access_token_hash = $1 AND enabled = TRUE`,
       [accessTokenHash(accessToken)],
     );
     const row = result.rows[0];
-    return row ? { id: row.id, name: row.name, sourceId: row.source_id } : null;
+    if (!row) return null;
+    const sourceIds = outputProfileSourceIds(row.configuration);
+    return sourceIds.length > 0
+      ? { id: row.id, name: row.name, sourceIds }
+      : null;
   }
 
   async revokeOutputProfile(profileId: string): Promise<boolean> {
