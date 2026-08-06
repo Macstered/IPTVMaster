@@ -1,6 +1,6 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 
-import { ChannelLogo } from './components/ChannelLogo.js';
+import { channelLogoSource, ChannelLogo } from './components/ChannelLogo.js';
 import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
 import { showToast } from './toast.js';
 import { EpgSourcesPanel } from './workspaces/EpgSourcesPanel.js';
@@ -3052,10 +3052,14 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                                     {channelIndex + 1}
                                   </span>
                                   <ChannelLogo
-                                    url={
-                                      channel.customLogoUrl ??
-                                      channel.providerLogoUrl
-                                    }
+                                    src={channelLogoSource(
+                                      primarySource?.id,
+                                      channel.id,
+                                      Boolean(
+                                        channel.customLogoUrl ??
+                                        channel.providerLogoUrl,
+                                      ),
+                                    )}
                                     name={
                                       channel.customName ?? channel.providerName
                                     }
@@ -3731,7 +3735,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         onChange={() => toggleChannelSelection(channel.id)}
                       />
                       <ChannelLogo
-                        url={channel.customLogoUrl ?? channel.providerLogoUrl}
+                        src={channelLogoSource(
+                          primarySource?.id,
+                          channel.id,
+                          Boolean(
+                            channel.customLogoUrl ?? channel.providerLogoUrl,
+                          ),
+                        )}
                         name={channel.customName ?? channel.providerName}
                       />
                       <div className="channel-summary">

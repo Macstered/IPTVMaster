@@ -11,6 +11,7 @@ import {
   serializeM3u,
   serializeXmltv,
   SnapshotRejectedError,
+  fetchImage,
   findBlockedAddressError,
   type EventGroupPolicy,
   type M3uEntry,
@@ -271,6 +272,10 @@ const epgChannelSearchSchema = z.object({
 const manualEpgMappingSchema = z.object({
   epgChannelId: z.string().trim().min(1).max(500),
   epgSourceId: z.uuid().optional(),
+});
+
+const epgChannelLogoSchema = z.object({
+  channelId: z.string().trim().min(1).max(500),
 });
 
 const epgSourceCreateSchema = z.object({
@@ -664,7 +669,7 @@ export async function buildApp(
     reply.header('cross-origin-resource-policy', 'same-origin');
     reply.header(
       'content-security-policy',
-      "default-src 'self'; base-uri 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: http: https:; object-src 'none'; script-src 'self'; style-src 'self'",
+      "default-src 'self'; base-uri 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
     );
     if (secureCookies) {
       reply.header(
@@ -672,7 +677,9 @@ export async function buildApp(
         'max-age=31536000; includeSubDomains',
       );
     }
-    if (request.url.startsWith('/api/')) {
+    if (request.url.startsWith('/api/') && !reply.hasHeader('cache-control')) {
+      // API responses are private by default; a route that has already chosen
+      // its own policy (logo images) keeps it.
       reply.header('cache-control', 'no-store');
     }
     return payload;
@@ -1217,6 +1224,78 @@ export async function buildApp(
       }
     },
   );
+
+  /**
+   * Serves a channel logo through the server. The browser sends only an
+   * identifier: the destination is looked up here, so a feed cannot steer the
+   * request, and the download runs through the same address policy as feeds.
+   */
+  async function sendLogo(
+    reply: FastifyReply,
+    logoUrl: string | null,
+  ): Promise<FastifyReply> {
+    if (!logoUrl) return reply.code(404).send({ error: 'No logo' });
+    try {
+      const image = await fetchImage(logoUrl);
+      return reply
+        .type(image.contentType)
+        .header('cache-control', 'private, max-age=86400')
+        .header('cross-origin-resource-policy', 'same-origin')
+        .send(Buffer.from(image.bytes));
+    } catch {
+      // A broken or hostile logo must not break the page; the browser falls
+      // back to the letter tile on a 404.
+      return reply.code(404).send({ error: 'Logo unavailable' });
+    }
+  }
+
+  app.get<{ Params: { sourceId: string; channelId: string } }>(
+    '/api/v1/sources/:sourceId/channels/:channelId/logo',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const channelId = z.uuid().safeParse(request.params.channelId);
+      if (!sourceId.success || !channelId.success) {
+        return reply
+          .code(400)
+          .send({ error: 'sourceId and channelId must be UUIDs' });
+      }
+      return sendLogo(
+        reply,
+        await sourceRepository.getChannelLogoUrl(sourceId.data, channelId.data),
+      );
+    },
+  );
+
+  app.get<{
+    Params: { epgSourceId: string };
+    Querystring: Record<string, string | undefined>;
+  }>('/api/v1/epg-sources/:epgSourceId/logo', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const epgSourceId = z.uuid().safeParse(request.params.epgSourceId);
+    const query = epgChannelLogoSchema.safeParse(request.query);
+    if (!epgSourceId.success) {
+      return reply.code(400).send({ error: 'epgSourceId must be a UUID' });
+    }
+    if (!query.success) {
+      return reply.code(400).send({ error: validationMessage(query.error) });
+    }
+    return sendLogo(
+      reply,
+      await sourceRepository.getEpgChannelIconUrl(
+        epgSourceId.data,
+        query.data.channelId,
+      ),
+    );
+  });
 
   app.get('/api/v1/epg-sources', async (_request, reply) => {
     if (!sourceRepository) {

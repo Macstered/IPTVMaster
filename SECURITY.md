@@ -42,7 +42,17 @@ or XMLTV generator on your own network, name its network in
 `IPTVMASTER_ALLOWED_SOURCE_CIDRS` (for example `192.168.1.0/24`). Loopback,
 link-local — which carries the cloud metadata address — multicast, and reserved
 ranges are refused even when a CIDR list is configured, because nothing
-legitimate serves a feed from them. Downloads are size- and
+legitimate serves a feed from them.
+
+Channel logos are served from this application rather than linked directly.
+The browser sends only a channel identifier; the server looks up the stored
+address, downloads it under the same address policy with a short timeout and a
+size ceiling, and accepts a response only if its leading bytes are a real
+raster image. SVG is refused because it can carry script, and the content
+security policy consequently limits images to this origin. A feed therefore
+cannot use a logo address to make the administrator's browser reach an
+arbitrary host, and a channel with an unusable logo falls back to a letter
+tile. Downloads are size- and
 time-bounded, parsing is linear in input size, and channel logo URLs supplied
 by a feed are only rendered when they point at public hosts.
 

@@ -1024,6 +1024,22 @@ class MemorySourceRepository implements SourceRepository {
     return { updatedCount };
   }
 
+  async getChannelLogoUrl(sourceId: string, channelId: string) {
+    const channel = this.channels.find(
+      (candidate) =>
+        candidate.sourceId === sourceId && candidate.id === channelId,
+    );
+    return channel?.customLogoUrl ?? channel?.providerLogoUrl ?? null;
+  }
+
+  async getEpgChannelIconUrl(epgSourceId: string, upstreamId: string) {
+    void epgSourceId;
+    const guide = this.latestEpg.channels.find(
+      (channel) => channel.id === upstreamId,
+    );
+    return guide?.iconUrl ?? null;
+  }
+
   async getSystemStatus() {
     return {
       sources: this.sources.map((source) => {

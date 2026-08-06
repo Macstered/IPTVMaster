@@ -6,7 +6,11 @@ import {
   type KeyboardEvent,
 } from 'react';
 
-import { ChannelLogo } from '../components/ChannelLogo.js';
+import {
+  channelLogoSource,
+  guideLogoSource,
+  ChannelLogo,
+} from '../components/ChannelLogo.js';
 import { showToast } from '../toast.js';
 
 interface EpgSource {
@@ -191,7 +195,14 @@ function EpgChannelPicker({
               }}
               onMouseEnter={() => setHighlighted(index)}
             >
-              <ChannelLogo url={option.iconUrl} name={option.displayName} />
+              <ChannelLogo
+                src={guideLogoSource(
+                  option.epgSourceId,
+                  option.id,
+                  Boolean(option.iconUrl),
+                )}
+                name={option.displayName}
+              />
               <div>
                 <strong>{option.displayName}</strong>
                 <small>
@@ -446,7 +457,14 @@ export function EpgWorkspace({
               className={`epg-mapping-row ${isMatched && !isChanging ? 'compact' : ''}`}
               key={mapping.channelId}
             >
-              <ChannelLogo url={mapping.logoUrl} name={mapping.channelName} />
+              <ChannelLogo
+                src={channelLogoSource(
+                  sourceId ?? undefined,
+                  mapping.channelId,
+                  Boolean(mapping.logoUrl),
+                )}
+                name={mapping.channelName}
+              />
               <div className="epg-playlist-channel">
                 <strong>{mapping.channelName}</strong>
                 <span>

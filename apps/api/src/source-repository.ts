@@ -515,6 +515,14 @@ export interface SourceRepository {
     view?: EpgMappingReviewView,
   ): Promise<EpgMappingReview>;
   getSystemStatus(): Promise<SystemStatusSummary>;
+  getChannelLogoUrl(
+    sourceId: string,
+    channelId: string,
+  ): Promise<string | null>;
+  getEpgChannelIconUrl(
+    epgSourceId: string,
+    upstreamId: string,
+  ): Promise<string | null>;
   searchEpgChannels(
     sourceId: string,
     search: string | undefined,
@@ -3184,6 +3192,34 @@ export class PostgresSourceRepository implements SourceRepository {
       total: channels.length,
       truncated: visible.length > limit,
     };
+  }
+
+  async getChannelLogoUrl(
+    sourceId: string,
+    channelId: string,
+  ): Promise<string | null> {
+    const result = await this.#pool.query<{ logo_url: string | null }>(
+      `SELECT COALESCE(c.custom_logo_url, c.provider_logo_url) AS logo_url
+       FROM channel c
+       WHERE c.source_id = $1 AND c.id = $2 AND c.archived_at IS NULL`,
+      [sourceId, channelId],
+    );
+    return result.rows[0]?.logo_url ?? null;
+  }
+
+  async getEpgChannelIconUrl(
+    epgSourceId: string,
+    upstreamId: string,
+  ): Promise<string | null> {
+    const result = await this.#pool.query<{ icon_url: string | null }>(
+      `SELECT ec.icon_url
+       FROM epg_channel ec
+       JOIN epg_source es ON es.id = ec.epg_source_id AND es.enabled = TRUE
+       WHERE ec.epg_source_id = $1 AND ec.upstream_id = $2
+       LIMIT 1`,
+      [epgSourceId, upstreamId],
+    );
+    return result.rows[0]?.icon_url ?? null;
   }
 
   async listEpgSources(): Promise<EpgSourceSummary[]> {

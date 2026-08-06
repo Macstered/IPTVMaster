@@ -1,26 +1,14 @@
 import { useEffect, useState } from 'react';
 
 interface ChannelLogoProps {
-  url: string | undefined;
+  /**
+   * Same-origin logo endpoint for this channel, or undefined when the channel
+   * has no logo. Provider URLs are never used directly: the server resolves
+   * and fetches them so the browser cannot be steered at an arbitrary host by
+   * a provider feed.
+   */
+  src?: string;
   name: string;
-}
-
-const PRIVATE_HOST =
-  /^localhost$|^127\.|^10\.|^192\.168\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\.|^\[?::1\]?$|^\[?f[cde]|\.local$/i;
-
-/**
- * Provider feeds supply logo URLs, so the browser would otherwise issue a
- * request to any address the provider chooses — including devices on the
- * operator's own network. Only public HTTP(S) URLs are rendered.
- */
-function isDisplayableLogoUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol)) return false;
-    return !PRIVATE_HOST.test(url.hostname);
-  } catch {
-    return false;
-  }
 }
 
 function fallbackLetter(name: string): string {
@@ -28,16 +16,34 @@ function fallbackLetter(name: string): string {
   return (cleaned[0] ?? '?').toLocaleUpperCase();
 }
 
+export function channelLogoSource(
+  sourceId: string | undefined,
+  channelId: string,
+  hasLogo: boolean,
+): string | undefined {
+  if (!sourceId || !hasLogo) return undefined;
+  return `/api/v1/sources/${sourceId}/channels/${channelId}/logo`;
+}
+
+export function guideLogoSource(
+  epgSourceId: string | undefined,
+  channelId: string,
+  hasLogo: boolean,
+): string | undefined {
+  if (!epgSourceId || !hasLogo) return undefined;
+  return `/api/v1/epg-sources/${epgSourceId}/logo?channelId=${encodeURIComponent(channelId)}`;
+}
+
 /**
- * Small channel logo thumbnail with a letter fallback when the provider ships
- * no logo or the image fails to load.
+ * Small channel logo thumbnail with a letter fallback when the channel has no
+ * logo or the server could not retrieve a usable image.
  */
-export function ChannelLogo({ url, name }: ChannelLogoProps) {
+export function ChannelLogo({ src, name }: ChannelLogoProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     setFailed(false);
-  }, [url]);
-  if (!url || failed || !isDisplayableLogoUrl(url)) {
+  }, [src]);
+  if (!src || failed) {
     return (
       <span className="channel-logo fallback" aria-hidden="true">
         {fallbackLetter(name)}
@@ -46,13 +52,7 @@ export function ChannelLogo({ url, name }: ChannelLogoProps) {
   }
   return (
     <span className="channel-logo" aria-hidden="true">
-      <img
-        src={url}
-        alt=""
-        loading="lazy"
-        referrerPolicy="no-referrer"
-        onError={() => setFailed(true)}
-      />
+      <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} />
     </span>
   );
 }

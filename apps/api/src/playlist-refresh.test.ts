@@ -91,6 +91,8 @@ function repository(
       outputProfileCount: 0,
     })),
     bulkUpdateGroupPolicies: vi.fn(async () => ({ updatedCount: 0 })),
+    getChannelLogoUrl: vi.fn(async () => null),
+    getEpgChannelIconUrl: vi.fn(async () => null),
     listEpgSources: vi.fn(async () => []),
     createCustomEpgSource: vi.fn(async () => ({
       id: 'epg-custom-1',
