@@ -59,9 +59,10 @@ URLs, so playback traffic never passes through IPTVMaster.
   never displayed again.
 - Output URLs are long random tokens, individually revocable; only their
   hashes are stored for verification.
-- Designed for trusted LAN use. Keep it off the public internet — see
-  [SECURITY.md](./SECURITY.md). An optional reverse-proxy overlay serves the
-  editor over HTTPS; see [docs/HTTPS.md](./docs/HTTPS.md).
+- Designed for trusted LAN use over a stable local address: no DNS entry,
+  domain, or certificate required. Keep it off the public internet — see
+  [SECURITY.md](./SECURITY.md). If your network is shared more widely, an
+  optional overlay adds HTTPS; see [docs/HTTPS.md](./docs/HTTPS.md).
 
 ## Requirements
 
@@ -98,7 +99,7 @@ npm run check    # format, lint, versions, typecheck, tests, build
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — how the pieces fit together
 - [docs/PROXMOX_INSTALL.md](./docs/PROXMOX_INSTALL.md) — production VM runbook
   (backups, upgrades, rollback)
-- [docs/HTTPS.md](./docs/HTTPS.md) — serving the editor over TLS
+- [docs/HTTPS.md](./docs/HTTPS.md) — optional TLS deployment
 - [docs/DEPLOY.md](./docs/DEPLOY.md) — pushing a build to a LAN host over SSH
 - [docs/RELEASES.md](./docs/RELEASES.md) — versioned images and GHCR releases
 - [SECURITY.md](./SECURITY.md) — threat model and reporting

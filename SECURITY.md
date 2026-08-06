@@ -16,7 +16,9 @@ Database backups contain encrypted provider URLs and should be stored with restr
 
 IPTVMaster is intended for trusted-LAN access only. Do not expose the application, database, or generated playlist endpoints directly to the public internet.
 
-Plain HTTP exposes the administrator password, the session cookie, provider URLs, and the output tokens to anyone observing the network. The application warns when it is reached that way, and `docs/HTTPS.md` describes an optional reverse-proxy overlay that terminates TLS, redirects HTTP, and marks session cookies `Secure`.
+The supported default is plain HTTP on a stable LAN address. On a trusted home network that is a deliberate trade-off, not an oversight: it keeps installation free of DNS entries, domains, and certificates. It does mean the administrator password, the session cookie, provider URLs, and the output tokens are readable to anything else on that network, so treat access to the network as equivalent to access to the application.
+
+If the network is shared with devices or people you do not control, `docs/HTTPS.md` describes an optional reverse-proxy overlay that terminates TLS, redirects HTTP, and marks session cookies `Secure`. The application shows a dismissible informational note when it is reached over plain HTTP.
 
 The editor API requires the single local administrator session after first-run setup. Passwords are hashed with scrypt and a random salt. Session and CSRF tokens are stored only as SHA-256 hashes; the browser session cookie is `HttpOnly` and both cookies use `SameSite=Strict`. Enable `IPTVMASTER_SECURE_COOKIES=true` only when the browser always reaches the app through HTTPS. State-changing editor requests also require a same-origin CSRF header, and repeated failed logins are throttled.
 

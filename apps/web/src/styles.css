@@ -3040,19 +3040,28 @@ strong {
 .permanent-group-actions.collapsed .permanent-group-name-form {
   grid-column: auto;
 }
-.transport-warning {
+.transport-notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 14px;
-  padding: 12px 14px;
-  border: 1px solid var(--warn-border);
+  padding: 11px 13px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-panel);
-  background: var(--warn-bg);
+  background: var(--surface);
 }
-.transport-warning strong {
-  color: var(--warn);
+.transport-notice > div {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.transport-notice strong {
+  color: var(--text);
   font-size: 13px;
 }
-.transport-warning p {
-  margin: 5px 0 0;
+.transport-notice p {
+  margin: 4px 0 0;
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.5;

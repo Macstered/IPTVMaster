@@ -268,6 +268,8 @@ async function readJson<T>(response: Response): Promise<T> {
 const BROWSER_TIME_ZONE =
   Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
+const TRANSPORT_NOTICE_KEY = 'iptvmaster:transport-notice';
+
 const TIMEZONE_CHOICES: string[] =
   (
     Intl as { supportedValuesOf?: (key: string) => string[] }
@@ -411,9 +413,27 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [outputProfiles, setOutputProfiles] = useState<ActiveOutputProfile[]>(
     [],
   );
+  const [transportNoticeDismissed, setTransportNoticeDismissed] = useState(
+    () => {
+      try {
+        return localStorage.getItem(TRANSPORT_NOTICE_KEY) === 'dismissed';
+      } catch {
+        return false;
+      }
+    },
+  );
   const [collapsedSections, setCollapsedSections] = useState<
     Record<string, boolean>
   >({});
+
+  function dismissTransportNotice() {
+    setTransportNoticeDismissed(true);
+    try {
+      localStorage.setItem(TRANSPORT_NOTICE_KEY, 'dismissed');
+    } catch {
+      // Private browsing modes can refuse storage; the notice simply returns.
+    }
+  }
 
   async function loadGroups(sourceId: string) {
     const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
@@ -1769,15 +1789,25 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
 
       {workspace === 'overview' &&
       capabilities &&
-      capabilities.secureTransport === false ? (
-        <div className="transport-warning" role="status">
-          <strong>This session is not encrypted</strong>
-          <p>
-            You are signed in over plain HTTP, so your password, provider URLs,
-            and output addresses cross the network in the clear. That is
-            tolerable on a trusted home network, but see docs/HTTPS.md to put a
-            certificate in front of IPTVMaster.
-          </p>
+      capabilities.secureTransport === false &&
+      !transportNoticeDismissed ? (
+        <div className="transport-notice" role="status">
+          <div>
+            <strong>Running over plain HTTP</strong>
+            <p>
+              This is the normal setup for a trusted home network. Sign-in,
+              provider URLs, and output addresses are readable to anything else
+              on the network, so if that matters to you, docs/HTTPS.md explains
+              the optional TLS deployment.
+            </p>
+          </div>
+          <button
+            className="secondary-button compact"
+            type="button"
+            onClick={dismissTransportNotice}
+          >
+            Got it
+          </button>
         </div>
       ) : null}
 

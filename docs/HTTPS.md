@@ -1,13 +1,17 @@
-# Serving IPTVMaster over HTTPS
+# Serving IPTVMaster over HTTPS (optional)
 
-Over plain HTTP, everything that matters travels in the clear on your network:
-the administrator password at sign-in, the session cookie on every request,
-provider URLs — which contain your subscription credentials — while you manage
-a source, and the output URLs, which are bearer tokens that grant the full
-playlist to anyone holding them. Anyone able to observe the network, including
-a compromised device on the same Wi-Fi, can collect all of it.
+**This is an advanced, optional deployment.** The supported default is plain
+HTTP on a stable LAN address, which needs no DNS entry, no domain, and no
+certificate — see the main [README](../README.md). Nothing here is required to
+run IPTVMaster.
 
-The application warns on its overview page when it is reached over plain HTTP.
+Consider it if your network is shared with people or devices you do not
+control. Over plain HTTP the administrator password, the session cookie,
+provider URLs — which contain your subscription credentials — and the output
+tokens are all readable to anything else on the network.
+
+The application shows a dismissible note on its overview page when it is
+reached over plain HTTP. It is informational: nothing is blocked or degraded.
 
 ## What the overlay does
 
@@ -99,6 +103,9 @@ skip this overlay.
 - Verify HSTS is present: `curl -sI https://<hostname> | grep -i strict`.
 - Keep the service off the public internet regardless. TLS protects the
   connection; it is not an argument for exposing the application.
+
+Everything here is reversible. If the certificate becomes inconvenient, revert
+to the default deployment below and nothing is lost.
 
 ## Reverting
 
