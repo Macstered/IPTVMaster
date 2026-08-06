@@ -66,6 +66,11 @@ rather than hand-formatting. Beyond that:
 - New UI belongs in a focused component under `apps/web/src/workspaces/` or
   `apps/web/src/components/` rather than growing existing large files.
 
+## License of contributions
+
+IPTVMaster is licensed under the AGPL-3.0. By contributing you agree that your
+contribution is licensed under the same terms.
+
 ## Reporting security issues
 
 Please do not open a public issue for a vulnerability. Follow the process in

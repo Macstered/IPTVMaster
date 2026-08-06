@@ -103,4 +103,8 @@ npm run check    # format, lint, versions, typecheck, tests, build
 
 ## License
 
-No license has been selected yet; all rights reserved until one is added.
+Licensed under the [GNU Affero General Public License v3.0](./LICENSE).
+
+In short: you may use, modify, and redistribute IPTVMaster, but modified
+versions must remain open source under the same license — including versions
+you run as a network service for others.
