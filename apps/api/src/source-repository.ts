@@ -4127,10 +4127,23 @@ export class PostgresSourceRepository implements SourceRepository {
         `INSERT INTO channel
           (source_id, current_upstream_item_id, provider_stream_id, tvg_id,
            provider_name, provider_group, provider_logo_url, sort_order,
-           reconciliation_status, last_seen_at)
+           reconciliation_status, last_seen_at, enabled)
          SELECT $1, item.item_id::uuid, item.provider_stream_id, item.tvg_id,
                 item.provider_name, item.provider_group, item.provider_logo_url,
-                item.sort_order, 'new', NOW()
+                item.sort_order, 'new', NOW(),
+                -- A channel arriving into a group the operator has hidden
+                -- stays hidden. Providers rotate channel identifiers, so
+                -- without this a hidden group reappears on every refresh.
+                -- A group that does not exist yet is visible, so genuinely
+                -- new content is noticed.
+                COALESCE(
+                  (SELECT BOOL_OR(existing.enabled)
+                   FROM channel existing
+                   WHERE existing.source_id = $1
+                     AND existing.provider_group = item.provider_group
+                     AND existing.archived_at IS NULL),
+                  TRUE
+                )
          FROM jsonb_to_recordset($2::jsonb) AS item(
            item_id TEXT,
            provider_stream_id TEXT,
