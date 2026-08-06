@@ -270,16 +270,15 @@ const TIMEZONE_CHOICES: string[] =
   ).supportedValuesOf?.('timeZone') ?? [];
 
 function formatHistoryTime(value: string): string {
-  return new Intl.DateTimeFormat('en-FI', {
+  return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
-    timeZone: 'Europe/Helsinki',
   }).format(new Date(value));
 }
 
 function formatEventTime(value: string | undefined, timeZone: string): string {
   if (!value) return 'Time not parsed';
-  return new Intl.DateTimeFormat('en-FI', {
+  return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
     timeZone,

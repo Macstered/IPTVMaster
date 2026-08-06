@@ -127,7 +127,7 @@ const lineupDetails: Record<
 
 function displayInstant(value: string | undefined, timeZone: string): string {
   if (!value) return '—';
-  return new Intl.DateTimeFormat('en-FI', {
+  return new Intl.DateTimeFormat(undefined, {
     year: 'numeric',
     month: 'short',
     day: '2-digit',
