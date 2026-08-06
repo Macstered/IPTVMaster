@@ -813,7 +813,7 @@ h2 {
 }
 .group-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   gap: 12px;
   align-items: center;
   min-height: 55px;
@@ -2486,7 +2486,7 @@ button:disabled {
     width: 100%;
   }
   .group-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
   .group-row .secondary-button,
   .group-action-spacer {
@@ -3046,8 +3046,44 @@ strong {
   margin-top: 0;
 }
 .group-bulk-toolbar {
-  grid-template-columns: auto auto auto auto auto auto;
+  grid-template-columns: auto auto auto auto auto auto auto;
   justify-content: start;
+}
+.group-select-label {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  min-width: 0;
+  margin: -9px -6px -9px -11px;
+  padding: 9px 6px 9px 11px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.group-select-label:hover {
+  background: var(--surface-raised);
+}
+.group-select-label input {
+  flex: 0 0 auto;
+}
+.group-select-text {
+  min-width: 0;
+}
+.group-select-text strong,
+.group-select-text small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.show-more-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  align-items: center;
+  margin-top: 10px;
+}
+.show-more-row .channel-limit-note {
+  margin-top: 0;
 }
 @media (max-width: 650px) {
   .group-bulk-toolbar {

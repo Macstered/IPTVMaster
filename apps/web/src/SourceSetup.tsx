@@ -314,6 +314,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   );
   const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([]);
   const [bulkGroupSaving, setBulkGroupSaving] = useState(false);
+  const [groupListLimit, setGroupListLimit] = useState(50);
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [eventReview, setEventReview] = useState<EventReview | null>(null);
   const [selectedEventGroup, setSelectedEventGroup] = useState('');
@@ -586,6 +587,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   async function selectSource(source: SafeSource) {
     if (source.id === selectedSourceId) return;
     setSelectedSourceId(source.id);
+    setSelectedGroupNames([]);
+    setGroupListLimit(50);
     setImportSummary(null);
     setEpgImportSummary(null);
     setExpandedPermanentGroup(null);
@@ -1423,7 +1426,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           payload.updatedCount === 1 ? '' : 's'
         } ${action}`,
       );
-      setSelectedGroupNames([]);
       await Promise.all([
         loadGroups(source.id),
         loadEventReview(source.id),
@@ -1681,7 +1683,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         ? group.providerGroup.toLocaleLowerCase().includes(normalizedFilter)
         : true),
   );
-  const visibleGroups = matchingGroups.slice(0, 50);
+  const visibleGroups = matchingGroups.slice(0, groupListLimit);
   const eventGroupCount = groups.filter(
     (group) => group.behavior === 'event',
   ).length;
@@ -2226,14 +2228,20 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 <button
                   type="button"
                   className={`epg-chip ${eventGroupView === 'events' ? 'active' : ''}`}
-                  onClick={() => setEventGroupView('events')}
+                  onClick={() => {
+                    setEventGroupView('events');
+                    setGroupListLimit(50);
+                  }}
                 >
                   Event groups ({eventGroupCount})
                 </button>
                 <button
                   type="button"
                   className={`epg-chip ${eventGroupView === 'all' ? 'active' : ''}`}
-                  onClick={() => setEventGroupView('all')}
+                  onClick={() => {
+                    setEventGroupView('all');
+                    setGroupListLimit(50);
+                  }}
                 >
                   All groups ({groups.length})
                 </button>
@@ -2242,7 +2250,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 aria-label="Filter provider groups"
                 placeholder="Search groups"
                 value={groupFilter}
-                onChange={(event) => setGroupFilter(event.target.value)}
+                onChange={(event) => {
+                  setGroupFilter(event.target.value);
+                  setGroupListLimit(50);
+                }}
               />
               <button
                 className="secondary-button compact section-toggle"
@@ -2277,6 +2288,16 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   Select shown
                 </label>
                 <strong>{selectedGroupNames.length} selected</strong>
+                {selectedGroupNames.length > 0 ? (
+                  <button
+                    className="secondary-button compact"
+                    type="button"
+                    disabled={bulkGroupSaving}
+                    onClick={() => setSelectedGroupNames([])}
+                  >
+                    Clear
+                  </button>
+                ) : null}
                 <button
                   className="secondary-button compact"
                   type="button"
@@ -2338,19 +2359,20 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             <div className="group-list">
               {visibleGroups.map((group) => (
                 <div className="group-row" key={group.providerGroup}>
-                  <input
-                    className="channel-select"
-                    type="checkbox"
-                    aria-label={`Select ${group.providerGroup || '(Ungrouped)'}`}
-                    checked={selectedGroupNames.includes(group.providerGroup)}
-                    onChange={() => toggleGroupSelection(group.providerGroup)}
-                  />
-                  <div>
-                    <strong>{group.providerGroup || '(Ungrouped)'}</strong>
-                    <small>
-                      {group.channelCount.toLocaleString()} live entries
-                    </small>
-                  </div>
+                  <label className="group-select-label">
+                    <input
+                      className="channel-select"
+                      type="checkbox"
+                      checked={selectedGroupNames.includes(group.providerGroup)}
+                      onChange={() => toggleGroupSelection(group.providerGroup)}
+                    />
+                    <span className="group-select-text">
+                      <strong>{group.providerGroup || '(Ungrouped)'}</strong>
+                      <small>
+                        {group.channelCount.toLocaleString()} live entries
+                      </small>
+                    </span>
+                  </label>
                   <span className={`behavior-badge ${group.behavior}`}>
                     {group.behavior === 'event' ? 'LIVE EVENT' : 'LIVE TV'}
                   </span>
@@ -2413,11 +2435,26 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               ) : null}
             </div>
             {matchingGroups.length > visibleGroups.length ? (
-              <small className="channel-limit-note">
-                Showing {visibleGroups.length.toLocaleString()} of{' '}
-                {matchingGroups.length.toLocaleString()} groups. Narrow the
-                search to see the rest.
-              </small>
+              <div className="show-more-row">
+                <small className="channel-limit-note">
+                  Showing {visibleGroups.length.toLocaleString()} of{' '}
+                  {matchingGroups.length.toLocaleString()} groups.
+                </small>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  onClick={() => setGroupListLimit((current) => current + 150)}
+                >
+                  Show 150 more
+                </button>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  onClick={() => setGroupListLimit(matchingGroups.length)}
+                >
+                  Show all {matchingGroups.length.toLocaleString()}
+                </button>
+              </div>
             ) : null}
 
             {editedEventGroup && eventRuleDraft ? (
