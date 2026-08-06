@@ -368,6 +368,13 @@ export interface SourceStatus {
   lastEpgSync?: SourceSyncStatus;
 }
 
+export interface AutomationOverrides {
+  playlistIntervalMinutes?: number | null;
+  playlistEnabled?: boolean | null;
+  epgIntervalMinutes?: number | null;
+  epgEnabled?: boolean | null;
+}
+
 export interface SystemStatusSummary {
   sources: SourceStatus[];
   outputProfileCount: number;
@@ -515,6 +522,10 @@ export interface SourceRepository {
     view?: EpgMappingReviewView,
   ): Promise<EpgMappingReview>;
   getSystemStatus(): Promise<SystemStatusSummary>;
+  getAutomationOverrides(): Promise<AutomationOverrides>;
+  saveAutomationOverrides(
+    overrides: AutomationOverrides,
+  ): Promise<AutomationOverrides>;
   getChannelLogoUrl(
     sourceId: string,
     channelId: string,
@@ -3192,6 +3203,62 @@ export class PostgresSourceRepository implements SourceRepository {
       total: channels.length,
       truncated: visible.length > limit,
     };
+  }
+
+  async getAutomationOverrides(): Promise<AutomationOverrides> {
+    const result = await this.#pool.query<{
+      playlist_interval_minutes: number | null;
+      playlist_enabled: boolean | null;
+      epg_interval_minutes: number | null;
+      epg_enabled: boolean | null;
+    }>(
+      `SELECT playlist_interval_minutes, playlist_enabled,
+              epg_interval_minutes, epg_enabled
+       FROM automation_setting
+       WHERE singleton = TRUE`,
+    );
+    const row = result.rows[0];
+    if (!row) return {};
+    return {
+      playlistIntervalMinutes: row.playlist_interval_minutes,
+      playlistEnabled: row.playlist_enabled,
+      epgIntervalMinutes: row.epg_interval_minutes,
+      epgEnabled: row.epg_enabled,
+    };
+  }
+
+  /**
+   * Stores refresh scheduling overrides. Only the fields present in the input
+   * are written, so a caller can change one interval without restating the
+   * rest; a field set to null returns that value to the configured default.
+   */
+  async saveAutomationOverrides(
+    overrides: AutomationOverrides,
+  ): Promise<AutomationOverrides> {
+    const fields: Array<[string, unknown]> = [];
+    if (overrides.playlistIntervalMinutes !== undefined)
+      fields.push([
+        'playlist_interval_minutes',
+        overrides.playlistIntervalMinutes,
+      ]);
+    if (overrides.playlistEnabled !== undefined)
+      fields.push(['playlist_enabled', overrides.playlistEnabled]);
+    if (overrides.epgIntervalMinutes !== undefined)
+      fields.push(['epg_interval_minutes', overrides.epgIntervalMinutes]);
+    if (overrides.epgEnabled !== undefined)
+      fields.push(['epg_enabled', overrides.epgEnabled]);
+    if (fields.length === 0) return this.getAutomationOverrides();
+
+    const columns = fields.map(([column]) => column);
+    await this.#pool.query(
+      `INSERT INTO automation_setting (singleton, ${columns.join(', ')})
+       VALUES (TRUE, ${columns.map((_, index) => `$${index + 1}`).join(', ')})
+       ON CONFLICT (singleton) DO UPDATE SET
+         ${columns.map((column) => `${column} = EXCLUDED.${column}`).join(', ')},
+         updated_at = NOW()`,
+      fields.map(([, value]) => value),
+    );
+    return this.getAutomationOverrides();
   }
 
   async getChannelLogoUrl(

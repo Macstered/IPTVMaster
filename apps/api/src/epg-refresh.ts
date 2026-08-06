@@ -229,7 +229,7 @@ export class EpgScheduler {
   readonly #repository: SourceRepository;
   readonly #coordinator: EpgRefreshCoordinator;
   readonly #logger: PlaylistSchedulerLogger;
-  readonly #intervalMs: number;
+  #intervalMs: number;
   readonly #initialDelayMs: number;
   #timer?: NodeJS.Timeout;
   #cyclePromise?: Promise<void>;
@@ -264,6 +264,24 @@ export class EpgScheduler {
     this.#timer = undefined;
     this.#nextRunAt = undefined;
     await this.#cyclePromise;
+  }
+
+  /**
+   * Applies a scheduling change without a restart. A pending run is re-armed
+   * from now against the new interval, so shortening it takes effect
+   * immediately rather than after the previous, longer wait.
+   */
+  reconfigure(settings: { intervalMs?: number; enabled?: boolean }): void {
+    if (settings.intervalMs !== undefined && settings.intervalMs > 0) {
+      this.#intervalMs = settings.intervalMs;
+      if (this.#started && this.#timer) {
+        clearTimeout(this.#timer);
+        this.#timer = undefined;
+        this.#schedule(settings.intervalMs);
+      }
+    }
+    if (settings.enabled === true && !this.#started) this.start();
+    if (settings.enabled === false && this.#started) void this.stop();
   }
 
   status(): EpgSchedulerStatus {

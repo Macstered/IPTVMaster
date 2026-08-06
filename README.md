@@ -46,7 +46,8 @@ URLs, so playback traffic never passes through IPTVMaster.
 - A status board shows per-provider channel counts, EPG coverage, last
   refresh results, and anything that needs your attention.
 - Non-overlapping scheduled refreshes with bounded retries; rejected or failed
-  feeds leave the last-known-good data active.
+  feeds leave the last-known-good data active. How often playlists and guides
+  are checked is editable from the overview page, and each can be paused.
 - Retained playlist snapshots with two-step restore and a full activity log.
 - Verified PostgreSQL backups with a daily systemd timer and rehearsable
   transactional restore.

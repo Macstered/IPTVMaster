@@ -1,5 +1,11 @@
 # Architecture
 
+Refresh intervals come from the environment on a fresh installation and can be
+changed at runtime from the editor. An override is stored in `automation_setting`
+and applied to the running scheduler immediately, re-arming any pending run, so
+shortening an interval takes effect without waiting out the previous one. A
+column left NULL means the configured environment value is used.
+
 ## Boundaries
 
 IPTVMaster manages metadata and generated playlist/EPG artifacts. It does not proxy or transcode video. The application must remain usable when the provider is temporarily unavailable by retaining the most recent validated output.

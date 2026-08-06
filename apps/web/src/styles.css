@@ -3066,6 +3066,44 @@ strong {
   font-size: 12px;
   line-height: 1.5;
 }
+.automation-settings {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.automation-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 220px)) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 13px;
+}
+.automation-form > div {
+  display: grid;
+  gap: 6px;
+}
+.automation-form label,
+.automation-form input,
+.automation-form button {
+  grid-column: auto;
+  grid-row: auto;
+}
+.automation-form small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.automation-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: center;
+  margin-top: 12px;
+}
+@media (max-width: 650px) {
+  .automation-form {
+    grid-template-columns: 1fr;
+  }
+}
 .epg-sources-panel {
   margin-top: 20px;
   padding-top: 20px;

@@ -163,7 +163,7 @@ export class PlaylistScheduler {
   readonly #repository: SourceRepository;
   readonly #coordinator: PlaylistRefreshCoordinator;
   readonly #logger: PlaylistSchedulerLogger;
-  readonly #options: PlaylistSchedulerOptions;
+  #options: PlaylistSchedulerOptions;
   #timer?: NodeJS.Timeout;
   #cyclePromise?: Promise<void>;
   #started = false;
@@ -181,7 +181,7 @@ export class PlaylistScheduler {
     this.#repository = repository;
     this.#coordinator = coordinator;
     this.#logger = logger;
-    this.#options = options;
+    this.#options = { ...options };
   }
 
   start(): void {
@@ -196,6 +196,24 @@ export class PlaylistScheduler {
     this.#timer = undefined;
     this.#nextRunAt = undefined;
     await this.#cyclePromise;
+  }
+
+  /**
+   * Applies a scheduling change without a restart. A pending run is re-armed
+   * from now against the new interval, so shortening it takes effect
+   * immediately rather than after the previous, longer wait.
+   */
+  reconfigure(settings: { intervalMs?: number; enabled?: boolean }): void {
+    if (settings.intervalMs !== undefined && settings.intervalMs > 0) {
+      this.#options.intervalMs = settings.intervalMs;
+      if (this.#started && this.#timer) {
+        clearTimeout(this.#timer);
+        this.#timer = undefined;
+        this.#schedule(settings.intervalMs);
+      }
+    }
+    if (settings.enabled === true && !this.#started) this.start();
+    if (settings.enabled === false && this.#started) void this.stop();
   }
 
   status(): PlaylistSchedulerStatus {

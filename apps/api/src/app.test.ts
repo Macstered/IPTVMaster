@@ -1024,6 +1024,17 @@ class MemorySourceRepository implements SourceRepository {
     return { updatedCount };
   }
 
+  automationOverrides: Record<string, unknown> = {};
+
+  async getAutomationOverrides() {
+    return this.automationOverrides;
+  }
+
+  async saveAutomationOverrides(overrides: Record<string, unknown>) {
+    this.automationOverrides = { ...this.automationOverrides, ...overrides };
+    return this.automationOverrides;
+  }
+
   async getChannelLogoUrl(sourceId: string, channelId: string) {
     const channel = this.channels.find(
       (candidate) =>
@@ -2484,6 +2495,89 @@ describe('IPTVMaster API', () => {
     expect(reviewAfterRemove.json().mappings).toContainEqual(
       expect.objectContaining({ channelId, status: 'missing' }),
     );
+  });
+
+  it('reads and updates the refresh schedule at runtime', async () => {
+    const repository = new MemorySourceRepository();
+    await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'UTC',
+      displayTimezone: 'UTC',
+    });
+    const app = await buildApp({
+      sourceRepository: repository,
+      enablePlaylistScheduler: true,
+      enableEpgScheduler: true,
+      playlistRefreshIntervalMs: 120 * 60_000,
+      epgRefreshIntervalMs: 720 * 60_000,
+      playlistRefreshInitialDelayMs: 60 * 60_000,
+      epgRefreshInitialDelayMs: 60 * 60_000,
+    });
+    applications.push(app);
+
+    const initial = await app.inject({
+      method: 'GET',
+      url: '/api/v1/automation/settings',
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({
+      playlist: { available: true, enabled: true, intervalMinutes: 120 },
+      epg: { available: true, enabled: true, intervalMinutes: 720 },
+    });
+
+    const updated = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/automation/settings',
+      headers: { origin: 'http://localhost' },
+      payload: { playlistIntervalMinutes: 45, epgIntervalMinutes: 1440 },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      playlist: { intervalMinutes: 45 },
+      epg: { intervalMinutes: 1440 },
+    });
+    expect(repository.automationOverrides).toMatchObject({
+      playlistIntervalMinutes: 45,
+      epgIntervalMinutes: 1440,
+    });
+
+    const paused = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/automation/settings',
+      headers: { origin: 'http://localhost' },
+      payload: { playlistEnabled: false },
+    });
+    expect(paused.json().playlist.enabled).toBe(false);
+    const afterPause = await app.inject({
+      method: 'GET',
+      url: '/api/v1/system/capabilities',
+    });
+    expect(afterPause.json().playlistAutomation).toBe(false);
+
+    const resumed = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/automation/settings',
+      headers: { origin: 'http://localhost' },
+      payload: { playlistEnabled: true },
+    });
+    expect(resumed.json().playlist.enabled).toBe(true);
+
+    for (const payload of [
+      { playlistIntervalMinutes: 5 },
+      { epgIntervalMinutes: 10 },
+      { playlistIntervalMinutes: 20_000 },
+      {},
+    ]) {
+      const rejected = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/automation/settings',
+        headers: { origin: 'http://localhost' },
+        payload,
+      });
+      expect(rejected.statusCode).toBe(400);
+    }
   });
 
   it('bulk-marks provider groups as events and toggles publishing', async () => {

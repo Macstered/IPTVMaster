@@ -3,6 +3,7 @@ import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
 import { channelLogoSource, ChannelLogo } from './components/ChannelLogo.js';
 import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
 import { showToast } from './toast.js';
+import { AutomationSettings } from './workspaces/AutomationSettings.js';
 import { EpgSourcesPanel } from './workspaces/EpgSourcesPanel.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
 
@@ -2075,7 +2076,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       ) : null}
 
       {workspace === 'overview' && capabilities?.sourcePersistence ? (
-        <EpgSourcesPanel active={workspace === 'overview'} />
+        <>
+          <EpgSourcesPanel active />
+          <AutomationSettings active />
+        </>
       ) : null}
 
       {importSummary ? (

@@ -35,6 +35,7 @@ import {
   PostgresSourceRepository,
   SnapshotActivationConflictError,
   XmltvDerivationError,
+  type AutomationOverrides,
   type SourceRepository,
 } from './source-repository.js';
 import {
@@ -277,6 +278,17 @@ const manualEpgMappingSchema = z.object({
 const epgChannelLogoSchema = z.object({
   channelId: z.string().trim().min(1).max(500),
 });
+
+const automationSettingsSchema = z
+  .object({
+    playlistIntervalMinutes: z.number().int().min(15).max(10_080).optional(),
+    playlistEnabled: z.boolean().optional(),
+    epgIntervalMinutes: z.number().int().min(30).max(10_080).optional(),
+    epgEnabled: z.boolean().optional(),
+  })
+  .refine((value) => Object.values(value).some((item) => item !== undefined), {
+    message: 'At least one automation field is required',
+  });
 
 const epgSourceCreateSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -573,7 +585,7 @@ export async function buildApp(
       (ownsSourceRepository &&
         process.env['PLAYLIST_REFRESH_ENABLED'] !== 'false'));
   const playlistScheduler =
-    schedulerEnabled && sourceRepository && refreshCoordinator
+    sourceRepository && refreshCoordinator
       ? new PlaylistScheduler(sourceRepository, refreshCoordinator, app.log, {
           intervalMs:
             options.playlistRefreshIntervalMs ??
@@ -601,7 +613,7 @@ export async function buildApp(
     (options.enableEpgScheduler ??
       (ownsSourceRepository && process.env['EPG_REFRESH_ENABLED'] !== 'false'));
   const epgScheduler =
-    epgSchedulerEnabled && sourceRepository && epgRefreshCoordinator
+    sourceRepository && epgRefreshCoordinator
       ? new EpgScheduler(sourceRepository, epgRefreshCoordinator, app.log, {
           intervalMs:
             options.epgRefreshIntervalMs ??
@@ -633,8 +645,28 @@ export async function buildApp(
         })
       : undefined;
   maintenanceScheduler?.start();
-  epgScheduler?.start();
-  playlistScheduler?.start();
+
+  // Environment values are the defaults; stored overrides win so a change made
+  // in the editor survives a restart.
+  const storedAutomation: AutomationOverrides = sourceRepository
+    ? await sourceRepository
+        .getAutomationOverrides()
+        .catch((): AutomationOverrides => ({}))
+    : {};
+  if (storedAutomation.epgIntervalMinutes) {
+    epgScheduler?.reconfigure({
+      intervalMs: storedAutomation.epgIntervalMinutes * 60_000,
+    });
+  }
+  if (storedAutomation.playlistIntervalMinutes) {
+    playlistScheduler?.reconfigure({
+      intervalMs: storedAutomation.playlistIntervalMinutes * 60_000,
+    });
+  }
+  if (storedAutomation.epgEnabled ?? epgSchedulerEnabled) epgScheduler?.start();
+  if (storedAutomation.playlistEnabled ?? schedulerEnabled) {
+    playlistScheduler?.start();
+  }
   if (
     playlistScheduler ||
     epgScheduler ||
@@ -911,8 +943,8 @@ export async function buildApp(
     sourcePersistence: sourceRepository !== undefined,
     databaseConfigured: databaseUrl !== undefined,
     encryptionConfigured: masterKey !== undefined,
-    playlistAutomation: playlistScheduler !== undefined,
-    epgAutomation: epgScheduler !== undefined,
+    playlistAutomation: playlistScheduler?.status().enabled ?? false,
+    epgAutomation: epgScheduler?.status().enabled ?? false,
     maintenanceAutomation: maintenanceScheduler !== undefined,
   }));
 
@@ -931,11 +963,99 @@ export async function buildApp(
         playlist: {
           enabled: playlistStatus?.enabled ?? false,
           intervalMinutes: playlistStatus?.intervalMinutes ?? 0,
+          ...(playlistStatus?.nextRunAt
+            ? { nextRunAt: playlistStatus.nextRunAt }
+            : {}),
         },
         epg: {
           enabled: epgStatus?.enabled ?? false,
           intervalMinutes: epgStatus?.intervalMinutes ?? 0,
+          ...(epgStatus?.nextRunAt ? { nextRunAt: epgStatus.nextRunAt } : {}),
         },
+      },
+    };
+  });
+
+  app.get('/api/v1/automation/settings', async (_request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const playlist = playlistScheduler?.status();
+    const epg = epgScheduler?.status();
+    return {
+      playlist: {
+        available: playlistScheduler !== undefined,
+        enabled: playlist?.enabled ?? false,
+        intervalMinutes: playlist?.intervalMinutes ?? 0,
+        ...(playlist?.nextRunAt ? { nextRunAt: playlist.nextRunAt } : {}),
+      },
+      epg: {
+        available: epgScheduler !== undefined,
+        enabled: epg?.enabled ?? false,
+        intervalMinutes: epg?.intervalMinutes ?? 0,
+        ...(epg?.nextRunAt ? { nextRunAt: epg.nextRunAt } : {}),
+      },
+      limits: {
+        playlistMinimumMinutes: 15,
+        epgMinimumMinutes: 30,
+        maximumMinutes: 10_080,
+      },
+    };
+  });
+
+  app.put('/api/v1/automation/settings', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const parsed = automationSettingsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: validationMessage(parsed.error) });
+    }
+    await sourceRepository.saveAutomationOverrides(parsed.data);
+    if (
+      parsed.data.playlistIntervalMinutes ||
+      parsed.data.playlistEnabled !== undefined
+    ) {
+      playlistScheduler?.reconfigure({
+        ...(parsed.data.playlistIntervalMinutes
+          ? { intervalMs: parsed.data.playlistIntervalMinutes * 60_000 }
+          : {}),
+        ...(parsed.data.playlistEnabled === undefined
+          ? {}
+          : { enabled: parsed.data.playlistEnabled }),
+      });
+    }
+    if (
+      parsed.data.epgIntervalMinutes ||
+      parsed.data.epgEnabled !== undefined
+    ) {
+      epgScheduler?.reconfigure({
+        ...(parsed.data.epgIntervalMinutes
+          ? { intervalMs: parsed.data.epgIntervalMinutes * 60_000 }
+          : {}),
+        ...(parsed.data.epgEnabled === undefined
+          ? {}
+          : { enabled: parsed.data.epgEnabled }),
+      });
+    }
+    const playlist = playlistScheduler?.status();
+    const epg = epgScheduler?.status();
+    return {
+      playlist: {
+        available: playlistScheduler !== undefined,
+        enabled: playlist?.enabled ?? false,
+        intervalMinutes: playlist?.intervalMinutes ?? 0,
+        ...(playlist?.nextRunAt ? { nextRunAt: playlist.nextRunAt } : {}),
+      },
+      epg: {
+        available: epgScheduler !== undefined,
+        enabled: epg?.enabled ?? false,
+        intervalMinutes: epg?.intervalMinutes ?? 0,
+        ...(epg?.nextRunAt ? { nextRunAt: epg.nextRunAt } : {}),
       },
     };
   });

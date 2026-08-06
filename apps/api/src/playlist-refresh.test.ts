@@ -91,6 +91,8 @@ function repository(
       outputProfileCount: 0,
     })),
     bulkUpdateGroupPolicies: vi.fn(async () => ({ updatedCount: 0 })),
+    getAutomationOverrides: vi.fn(async () => ({})),
+    saveAutomationOverrides: vi.fn(async () => ({})),
     getChannelLogoUrl: vi.fn(async () => null),
     getEpgChannelIconUrl: vi.fn(async () => null),
     listEpgSources: vi.fn(async () => []),
