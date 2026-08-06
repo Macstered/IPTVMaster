@@ -261,6 +261,10 @@ Size: M.
 
 ## Phase 7 — shared EPG pool and custom guide imports (planned 2026-08-06)
 
+**Status: DONE 2026-08-06** — 7.1–7.5 shipped (migration 015 rehearsed on a live
+fixture database before deploy; auto-match ladder included). 7.6 polish items
+remain optional.
+
 Goal: import standalone XMLTV guides that belong to no provider, and let every
 provider's channels map against every imported guide instead of only their own.
 
