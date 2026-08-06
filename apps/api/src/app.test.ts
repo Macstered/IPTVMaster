@@ -1550,7 +1550,7 @@ describe('IPTVMaster API', () => {
       sourceTimezone: 'Europe/Stockholm',
       displayTimezone: 'Europe/Helsinki',
     });
-    await repository.createOutputProfile([source.id], 'TiviMate');
+    await repository.createOutputProfile([source.id], 'My playlist');
     const app = await buildApp({ sourceRepository: repository });
     applications.push(app);
 
@@ -2751,7 +2751,7 @@ describe('IPTVMaster API', () => {
     const profileResponse = await app.inject({
       method: 'POST',
       url: '/api/v1/output-profiles',
-      payload: { sourceIds: [source.id], name: 'Living room TiviMate' },
+      payload: { sourceIds: [source.id], name: 'Living room player' },
     });
     const playlistPath = profileResponse.json().profile.playlistPath as string;
     const epgPath = profileResponse.json().profile.epgPath as string;
@@ -2782,7 +2782,7 @@ describe('IPTVMaster API', () => {
       profiles: [
         expect.objectContaining({
           accessToken,
-          name: 'Living room TiviMate',
+          name: 'Living room player',
           recoverable: true,
           sourceIds: [source.id],
         }),

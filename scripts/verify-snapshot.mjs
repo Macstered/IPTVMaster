@@ -264,7 +264,7 @@ try {
   const guide = await repository.getLatestEpg(source.id);
   const profile = await repository.createOutputProfile(
     source.id,
-    'Synthetic TiviMate',
+    'Synthetic output',
   );
   const resolvedProfile = await repository.resolveOutputProfile(
     profile.accessToken,

@@ -16,9 +16,10 @@ instance quickly.
   rewritten, with a `.env.bak` backup).
 - Docker + Compose on both ends. The workstation builds `linux/amd64` images.
 
-Defaults target `root@<host>:/opt/iptvmaster` with health checks against
-`http://<host>:8080`. Override with `IPTVMASTER_DEPLOY_HOST`,
-`IPTVMASTER_DEPLOY_KEY`, `IPTVMASTER_DEPLOY_DIR`, `IPTVMASTER_DEPLOY_URL`.
+`IPTVMASTER_DEPLOY_HOST` (for example `deploy@192.0.2.10`) and
+`IPTVMASTER_DEPLOY_URL` (for example `http://192.0.2.10:8080`) are required;
+`IPTVMASTER_DEPLOY_KEY` and `IPTVMASTER_DEPLOY_DIR` default to
+`~/.ssh/iptvmaster_deploy` and `/opt/iptvmaster`.
 
 ## Deploy
 
@@ -42,7 +43,7 @@ What it does:
 6. Waits until `/health` reports the deployed revision, then prunes host images
    older than current + previous.
 
-Editor UI and output URLs blip for a few seconds during activation. TiviMate
+Editor UI and output URLs blip for a few seconds during activation. Player
 playback is unaffected — streams go directly to the provider, never through
 IPTVMaster.
 

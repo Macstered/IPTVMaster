@@ -15,10 +15,10 @@ set -euo pipefail
 # the newer image. Application-only rollback is safe only while both releases
 # share the same schema; see docs/PROXMOX_INSTALL.md section 6.
 
-HOST="${IPTVMASTER_DEPLOY_HOST:-root@<host>}"
+HOST="${IPTVMASTER_DEPLOY_HOST:?Set IPTVMASTER_DEPLOY_HOST, e.g. deploy@192.0.2.10}"
 KEY="${IPTVMASTER_DEPLOY_KEY:-$HOME/.ssh/iptvmaster_deploy}"
 REMOTE_DIR="${IPTVMASTER_DEPLOY_DIR:-/opt/iptvmaster}"
-BASE_URL="${IPTVMASTER_DEPLOY_URL:-http://<host>:8080}"
+BASE_URL="${IPTVMASTER_DEPLOY_URL:?Set IPTVMASTER_DEPLOY_URL, e.g. http://192.0.2.10:8080}"
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"

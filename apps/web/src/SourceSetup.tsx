@@ -403,7 +403,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   );
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputSourceIds, setOutputSourceIds] = useState<string[]>([]);
-  const [outputName, setOutputName] = useState('TiviMate');
+  const [outputName, setOutputName] = useState('My playlist');
   const [outputProfiles, setOutputProfiles] = useState<ActiveOutputProfile[]>(
     [],
   );
@@ -1647,11 +1647,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sourceIds: outputSourceIds,
-          name: outputName.trim() || 'TiviMate',
+          name: outputName.trim() || 'My playlist',
         }),
       });
       await readJson<{ profile: CreatedOutputProfile }>(response);
-      showToast('success', 'TiviMate URL created');
+      showToast('success', 'Output URLs created');
       await loadOutputProfiles();
     } catch (caught) {
       showToast(
@@ -2396,7 +2396,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   {group.behavior === 'event' ? (
                     <label
                       className="permanent-visibility-toggle"
-                      title="Publish this event group in the TiviMate output"
+                      title="Publish this event group in the generated playlist"
                     >
                       <input
                         type="checkbox"
@@ -2640,7 +2640,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               <div className="subsection-heading event-review-heading">
                 <div>
                   <small>LIVE EVENT REVIEW</small>
-                  <strong>Provider and Finnish labels</strong>
+                  <strong>Provider and localized labels</strong>
                 </div>
                 <div className="section-heading-controls">
                   <select
@@ -2667,7 +2667,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               </div>
               <div hidden={collapsedSections.events}>
                 <p className="secret-note">
-                  Events are ordered by their calculated Finnish start time.
+                  Events are ordered by their calculated local start time.
                   Unparseable labels remain usable and are flagged instead of
                   being renamed. Reference date: {eventReview.referenceDate}.
                 </p>
@@ -2692,7 +2692,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                             </div>
                             <span>→</span>
                             <div>
-                              <small>TIVIMATE</small>
+                              <small>PLAYER</small>
                               <strong>{entry.localizedName}</strong>
                             </div>
                           </div>
@@ -2750,7 +2750,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               <div className="subsection-heading output-group-order-heading">
                 <div>
                   <small>PLAYLIST ORDER</small>
-                  <strong>TiviMate groups</strong>
+                  <strong>Playlist groups</strong>
                 </div>
                 <span className="channel-count">
                   {outputGroups.length.toLocaleString()}{' '}
@@ -2771,7 +2771,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 hidden={collapsedSections['output-group-order']}
               >
                 <p className="secret-note">
-                  Drag groups into their final TiviMate order. TV, live-event,
+                  Drag groups into their final playlist order. TV, live-event,
                   and custom groups all share this list.
                 </p>
                 <div className="channel-search output-group-search">
@@ -3185,9 +3185,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 <div className="custom-category-directory-heading">
                   <div>
                     <small>CUSTOM OUTPUT GROUPS</small>
-                    <strong>
-                      Available in the generated TiviMate playlist
-                    </strong>
+                    <strong>Available in the generated playlist</strong>
                   </div>
                   <span>
                     {customCategories.length.toLocaleString()}{' '}
@@ -3877,7 +3875,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
 
           <div className="output-setup" hidden={workspace !== 'overview'}>
             <div>
-              <strong>Combined TiviMate playlist and EPG URLs</strong>
+              <strong>Combined playlist and EPG URLs</strong>
               <small>
                 Pick one or more providers. Their channels and guide data are
                 combined into one private, revocable URL.
@@ -3918,7 +3916,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 disabled={creatingOutput || outputSourceIds.length === 0}
                 onClick={() => void createOutputProfile()}
               >
-                {creatingOutput ? 'Creating…' : 'Create TiviMate URL'}
+                {creatingOutput ? 'Creating…' : 'Create output URLs'}
               </button>
             </div>
           </div>
@@ -4016,8 +4014,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                     ) : (
                       <p className="legacy-output-note">
                         This older URL stays active but cannot be shown again.
-                        Create a replacement, update TiviMate, then revoke this
-                        one.
+                        Create a replacement, update your player, then revoke
+                        this one.
                       </p>
                     )}
                     <button

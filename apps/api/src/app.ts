@@ -139,7 +139,7 @@ const groupPolicySchema = z.object({
 
 const outputProfileSchema = z.object({
   sourceIds: z.array(z.uuid()).min(1).max(20),
-  name: z.string().trim().min(1).max(120).default('TiviMate'),
+  name: z.string().trim().min(1).max(120).default('My playlist'),
 });
 
 const channelListSchema = z.object({

@@ -45,7 +45,7 @@ The app is initially published on TCP port 8080. Restrict it to trusted LAN clie
 
 On the first browser visit, create the single local administrator account. Store that password in the same private password manager used for the VM administration credentials. Sessions last seven days by default; adjust `IPTVMASTER_SESSION_HOURS` if needed. Leave `IPTVMASTER_SECURE_COOKIES=false` for direct LAN HTTP. Set it to `true` only after an HTTPS reverse proxy is in place and HTTP access is no longer used.
 
-Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be used directly in TiviMate if local DNS is unavailable.
+Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be used directly in the player if local DNS is unavailable.
 
 ## 4. Verify
 
@@ -57,10 +57,10 @@ Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be
 - The container and VM recover after separate reboots.
 - The provider secret does not appear in container logs.
 - A generated M3U URL loads from another trusted LAN device and stops loading after revocation.
-- The paired XMLTV URL loads in TiviMate, contains guide programmes, and is also blocked by the same revocation.
+- The paired XMLTV URL loads in an IPTV player, contains guide programmes, and is also blocked by the same revocation.
 - A test playlist refresh does not relay playback through the VM.
 
-When creating a TiviMate URL, open the setup UI using the VM's stable LAN hostname or address, not `localhost`. The generated address uses the browser origin and must be reachable from the Nvidia Shield.
+When creating output URLs, open the setup UI using the VM's stable LAN hostname or address, not `localhost`. The generated address uses the browser origin and must be reachable from your playback devices.
 
 ## 5. Back up
 
@@ -69,7 +69,7 @@ Use two backup layers:
 1. Daily application-level PostgreSQL backups with tested restore instructions.
 2. Regular Proxmox VM backups to storage outside the VM disk.
 
-Do not assume a VM snapshot on the same physical disk is a sufficient backup. Test at least one restore before making IPTVMaster the primary TiviMate source.
+Do not assume a VM snapshot on the same physical disk is a sufficient backup. Test at least one restore before making IPTVMaster the primary playlist source.
 
 The repository includes a daily systemd timer. Install it after choosing storage outside the application checkout:
 
@@ -106,6 +106,6 @@ Before upgrading:
 2. Verify a recent Proxmox backup.
 3. Record the current Git/container release tag.
 4. Deploy the new pinned tag.
-5. Verify health, source import, artifact generation, and one TiviMate playback.
+5. Verify health, source import, artifact generation, and one player playback.
 
 If verification fails, use the application-only rollback only when the prior release is explicitly compatible with the migrated schema. Otherwise check out the prior release and restore the pre-upgrade database backup. SQL migrations are forward-only. Follow [RELEASES.md](./RELEASES.md), and run its restore command from the prior checkout so newer migrations are not reapplied.

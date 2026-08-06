@@ -2,7 +2,7 @@
 
 Working plan for the usability and presentation overhaul reviewed on 2026-08-05, plus the
 EPG-exclusion fix and the remote deploy pipeline. Each phase is independently shippable and
-ends with `npm run check` green and a deploy to the Proxmox instance (<host>).
+ends with `npm run check` green and a deploy to the LAN instance.
 Phases are ordered by user value; Track A (deploys) runs in parallel and only needs one-time
 host setup.
 
@@ -31,7 +31,7 @@ Conventions for every phase:
 
 **Status: DONE 2026-08-05** — scripts/deploy-remote.sh, docs/DEPLOY.md; rollback tested both ways.
 
-Goal: update the app inside Docker on the Proxmox VM (<host>) from this machine,
+Goal: update the app inside Docker on the LAN host from the workstation,
 without moving secrets off the host.
 
 Model (matches `docs/PROXMOX_INSTALL.md`): build the image locally on the workstation,
@@ -39,7 +39,7 @@ stream it over SSH into the VM's Docker, sync compose/migration files via git, f
 `IPTVMASTER_IMAGE` in the host `.env`, `docker compose up -d --no-build`, verify health.
 No registry required; GHCR remains available for tagged releases per `docs/RELEASES.md`.
 
-One-time setup Sami does on the VM (see chat message for the public key):
+One-time setup the operator does on the VM:
 
 - A1. Confirm SSH is enabled and reachable from the LAN; provide username + port.
 - A2. Append the provided `iptvmaster_deploy` public key to that user's
@@ -67,7 +67,7 @@ Steps I do once access works:
   `PROXMOX_INSTALL.md` §6 (application-only rollback only when schema-compatible).
 - A7. Open item: pushing to GitHub from this machine. `origin` is HTTPS and this Windows
   user has no stored credential; first push will tell. If needed: `gh auth login` once in
-  an interactive terminal, or Sami pushes while deploys use the rsync fallback.
+  an interactive terminal, or the maintainer pushes while deploys use the rsync fallback.
 
 Acceptance: a no-op deploy of the current commit succeeds end to end, `/health` revision
 matches, and rollback to the recorded prior tag is tested once.
@@ -108,7 +108,7 @@ Design:
     event-like (matches the event heuristics but is still `permanent`), show an inline
     hint linking to the Live events workspace, since marking the group is the right fix.
 - 1.5 Separator channels stay in the published M3U (many users keep them as visual
-  dividers in TiviMate) — exclusion affects EPG accounting only. Hiding them entirely is
+  dividers in the player) — exclusion affects EPG accounting only. Hiding them entirely is
   already possible per-channel in the lineup editor.
 
 Acceptance: on the real provider, EPG coverage counts only mappable channels; separators
@@ -242,7 +242,7 @@ Size: L (the largest UI change; extract `LineupWorkspace` first).
 - 6.3 Mobile: make Sign out reachable (status card is `display:none` under 980px
   today); audit tap targets on the horizontal nav strip.
 - 6.4 Output URLs: Copy buttons with confirmation + QR code (tiny local generator) for
-  phone-based TiviMate Companion setup.
+  phone-based the player Companion setup.
 - 6.5 Timezone fields become selects/datalists fed by
   `Intl.supportedValuesOf('timeZone')` (free-text IANA strings today).
 - 6.6 Honest truncation: "showing N of M" wherever lists are capped — event group list
@@ -339,4 +339,4 @@ Reproducible recipe (used for the 2026-08-05 review):
 ./scripts/deploy-remote.sh --rollback # previous tag, schema-compatible releases only
 ```
 
-Host: <host>, compose project `/opt/iptvmaster`, secrets stay in the host `.env`.
+Host: set via `IPTVMASTER_DEPLOY_HOST`, compose project `/opt/iptvmaster`, secrets stay in the host `.env`.

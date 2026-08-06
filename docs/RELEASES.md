@@ -109,7 +109,7 @@ curl --fail http://127.0.0.1:8080/health
 docker compose logs --no-color --tail=100 migrate app
 ```
 
-Verify one manual source refresh, both tokenized outputs, and one TiviMate stream before accepting the upgrade.
+Verify one manual source refresh, both tokenized outputs, and one player stream before accepting the upgrade.
 
 ## Roll back
 

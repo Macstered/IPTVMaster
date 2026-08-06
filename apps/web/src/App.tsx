@@ -42,19 +42,20 @@ const workspaceDetails: Record<
   overview: {
     label: 'Overview',
     title: 'Playlist overview',
-    subtitle: 'Manage providers, refresh sources, and copy your TiviMate URLs.',
+    subtitle: 'Manage providers, refresh sources, and copy your player URLs.',
     icon: <IconHome />,
   },
   lineup: {
     label: 'Lineup',
     title: 'Lineup editor',
-    subtitle: 'Arrange groups and edit the channels that appear in TiviMate.',
+    subtitle:
+      'Arrange groups and edit the channels that appear in your player.',
     icon: <IconRows />,
   },
   events: {
     label: 'Live events',
     title: 'Live event rules',
-    subtitle: 'Control daily event groups and preview Finnish event times.',
+    subtitle: 'Control daily event groups and preview localized event times.',
     icon: <IconClock />,
   },
   epg: {
@@ -115,7 +116,7 @@ const lineupDetails: Record<
   order: {
     label: 'Playlist order',
     title: 'Playlist order',
-    subtitle: 'Arrange final TiviMate groups and sort their channels.',
+    subtitle: 'Arrange final playlist groups and sort their channels.',
   },
   channels: {
     label: 'Group & channel editor',
@@ -436,8 +437,8 @@ export function App({ authUsername, onLogout }: AppProps) {
               </div>
 
               <p className="panel-copy">
-                Test how an event label from the provider will appear in
-                TiviMate. This rule never changes ordinary live-TV channels.
+                Test how an event label from the provider will appear in your
+                player. This rule never changes ordinary live-TV channels.
               </p>
 
               <form onSubmit={preview}>
@@ -458,7 +459,7 @@ export function App({ authUsername, onLogout }: AppProps) {
                 />
 
                 <button type="submit" disabled={loading}>
-                  {loading ? 'Converting…' : 'Preview Finnish time'}
+                  {loading ? 'Converting…' : 'Preview localized time'}
                 </button>
               </form>
 
@@ -472,7 +473,7 @@ export function App({ authUsername, onLogout }: AppProps) {
                   </div>
                   <span className="result-arrow">→</span>
                   <div>
-                    <small>TIVIMATE LABEL</small>
+                    <small>PLAYER LABEL</small>
                     <p>{result.localizedName}</p>
                   </div>
                   <dl>
@@ -486,7 +487,7 @@ export function App({ authUsername, onLogout }: AppProps) {
                       </dd>
                     </div>
                     <div>
-                      <dt>Finnish instant</dt>
+                      <dt>Localized instant</dt>
                       <dd>
                         {displayInstant(
                           result.displayDateTime,

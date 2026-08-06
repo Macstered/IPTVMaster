@@ -1,7 +1,7 @@
 # IPTVMaster Execution Plan
 
 Status: implementation in progress
-Scope: personal, self-hosted IPTV playlist and EPG editor for TiviMate  
+Scope: personal, self-hosted IPTV playlist and EPG editor for the IPTV player  
 Primary deployment target: Proxmox VE on an i7-3770K host with 16 GB RAM
 
 ## 1. Product goal
@@ -13,7 +13,7 @@ Build a local web application that:
 - Preserves channel edits when the provider refreshes or replaces streams.
 - Treats daily events as transient entries rather than permanent channels.
 - Converts event start times from `Europe/Stockholm` to `Europe/Helsinki` only in selected event groups.
-- Publishes stable M3U and XMLTV URLs for TiviMate.
+- Publishes stable M3U and XMLTV URLs for the IPTV player.
 - Updates automatically, retains a last-known-good output, and reports changes.
 - Keeps subscription credentials out of Git, logs, backups, and the user interface after initial entry.
 - Runs locally without relaying or transcoding video.
@@ -27,8 +27,8 @@ These are the recommended defaults. They can be changed before implementation be
 | Content          | Import and edit live TV only; skip VOD and series                                                   |
 | Daily events     | Transient snapshot model with persistent group-level rules                                          |
 | Event timezone   | Source `Europe/Stockholm`, output `Europe/Helsinki`, configurable per group                         |
-| Output           | M3U plus XMLTV endpoints for TiviMate                                                               |
-| Stream transport | Direct provider URLs initially; optional local HTTP redirect mode after a Shield compatibility test |
+| Output           | M3U plus XMLTV endpoints for the IPTV player                                                        |
+| Stream transport | Direct provider URLs initially; optional local HTTP redirect mode after a player compatibility test |
 | Backend          | TypeScript with Fastify and streaming M3U/XMLTV parsers                                             |
 | Frontend         | React and TypeScript                                                                                |
 | Database         | PostgreSQL, avoiding later migration pressure from large EPG datasets                               |
@@ -51,10 +51,10 @@ flowchart LR
     D --> U["React editor"]
     D --> G["M3U and XMLTV generator"]
     G --> A["Atomic published artifacts"]
-    A --> T["TiviMate on Nvidia Shield"]
+    A --> T["IPTV player"]
 ```
 
-The server is not in the video data path. TiviMate receives the current upstream stream URL, or a lightweight local redirect if that mode proves compatible. Playback traffic continues directly between the Shield and the provider.
+The server is not in the video data path. the IPTV player receives the current upstream stream URL, or a lightweight local redirect if that mode proves compatible. Playback traffic continues directly between the playback device and the provider.
 
 ## 4. Core data model
 
@@ -122,7 +122,7 @@ Event records disappear from published output when they disappear from a success
 - Ordering
 - M3U and XMLTV access token
 - Last successful artifact version
-- Optional future profiles for different TiviMate devices
+- Optional future profiles for different the IPTV player devices
 
 ## 5. Reconciliation rules
 
@@ -181,7 +181,7 @@ Tasks:
 - Sanitize the fixtures by replacing hostnames, credentials, stream IDs, and unnecessary copyrighted metadata.
 - Check whether the account exposes a usable Xtream API for live-only retrieval.
 - Verify the actual source timezone for each enabled event group.
-- Record TiviMate refresh behavior and whether it follows HTTP redirects reliably.
+- Record the IPTV player refresh behavior and whether it follows HTTP redirects reliably.
 
 Gate:
 
@@ -298,23 +298,23 @@ Gate:
 
 Estimated effort: 4–7 days.
 
-### Phase 6 — M3U/XMLTV publishing and TiviMate validation
+### Phase 6 — M3U/XMLTV publishing and the IPTV player validation
 
 Tasks:
 
 - Generate standards-compatible M3U and XMLTV artifacts.
 - Publish artifacts atomically and retain the previous successful version.
 - Add random revocable output tokens.
-- Implement cache headers and conditional requests suitable for TiviMate refreshes.
+- Implement cache headers and conditional requests suitable for the IPTV player refreshes.
 - Validate generated XML and playlist entry pairing.
-- Test direct provider URLs on the Nvidia Shield.
-- Prototype stable local HTTP redirects and enable only if TiviMate handles them reliably.
-- Document adding the playlist and EPG URLs to TiviMate.
+- Test direct provider URLs on the playback device.
+- Prototype stable local HTTP redirects and enable only if the IPTV player handles them reliably.
+- Document adding the playlist and EPG URLs to the IPTV player.
 
 Gate:
 
-- TiviMate imports the playlist and guide without manual file copying.
-- A provider refresh is reflected after TiviMate updates its playlist.
+- the IPTV player imports the playlist and guide without manual file copying.
+- A provider refresh is reflected after the IPTV player updates its playlist.
 - Playback traffic does not pass through IPTVMaster.
 - Revoking an output token blocks the old local playlist URL.
 
@@ -389,7 +389,7 @@ Installation tasks:
 8. Configure PostgreSQL, application, worker, and optional reverse-proxy containers with health checks.
 9. Restrict inbound access to the trusted LAN; do not expose the application or playlist endpoints to the public internet.
 10. Configure the application source, event groups, timezones, and output profile through the setup UI.
-11. Add the generated M3U/XMLTV URLs to TiviMate and perform playback/refresh tests.
+11. Add the generated M3U/XMLTV URLs to the IPTV player and perform playback/refresh tests.
 12. Configure daily application backups and Proxmox VM backups to storage outside the VM disk.
 13. Perform and document one restore and one application rollback.
 
@@ -397,7 +397,7 @@ Gate:
 
 - The application survives a VM reboot without manual intervention.
 - Scheduled imports execute in Finnish local time while stored timestamps remain UTC.
-- TiviMate can update and play selected channels from the production instance.
+- the IPTV player can update and play selected channels from the production instance.
 - A Proxmox backup and an application-level database backup both exist.
 
 Estimated effort: 1 day after an MVP release image is ready.
@@ -408,7 +408,7 @@ Tasks:
 
 - Run the app alongside the current IPTVEditor workflow for at least seven days.
 - Compare daily Finnish event groups and ordinary channel edits.
-- Record false matches, time parsing misses, provider outages, and TiviMate refresh behavior.
+- Record false matches, time parsing misses, provider outages, and the IPTV player refresh behavior.
 - Fix critical issues before making IPTVMaster the primary playlist source.
 - Tag the first stable release only after a backup/restore rehearsal.
 
@@ -446,12 +446,12 @@ Estimated effort: 7 calendar days of observation plus fixes.
 
 ### Manual device tests
 
-- Add source to TiviMate on the Nvidia Shield Pro.
+- Add source to an IPTV player.
 - Refresh playlist and EPG independently.
 - Open permanent channels and daily event streams.
 - Verify localized event names and date rollover.
 - Verify direct playback and optional redirect behavior.
-- Reboot the Shield, VM, and Proxmox host separately.
+- Reboot the playback device, VM, and Proxmox host separately.
 
 ## 8. GitHub safety and workflow
 
@@ -513,7 +513,7 @@ IPTVMaster/
 - Create or verify a recent Proxmox VM backup.
 - Record the running image/release tag.
 - Pull/build the new pinned release and run migrations.
-- Check health, import, publication, and one TiviMate stream.
+- Check health, import, publication, and one the IPTV player stream.
 - Roll back to the prior tag if the acceptance check fails.
 
 ## 10. Explicitly deferred features
@@ -542,7 +542,7 @@ Execution order:
 3. Capture sanitized two-day fixtures and validate the live-only source path.
 4. Build ingestion and snapshot safety before any editor UI.
 5. Build permanent reconciliation and daily-event timezone handling.
-6. Build the web editor and TiviMate outputs.
+6. Build the web editor and the IPTV player outputs.
 7. Complete EPG reconciliation, resilience, security, and restore testing.
 8. Produce a pinned release and install it on Proxmox.
 9. Run the parallel seven-day home beta.
