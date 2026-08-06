@@ -58,7 +58,6 @@ export async function inspectRemotePlaylist(
   const maxLiveEntries = options.maxLiveEntries ?? 100_000;
   const fetchImplementation = options.fetchImplementation ?? guardedFetch;
   const response = await fetchImplementation(url, {
-    redirect: 'follow',
     signal: AbortSignal.timeout(timeoutMs),
     headers: {
       accept:

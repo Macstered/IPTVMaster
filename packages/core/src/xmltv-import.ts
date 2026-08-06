@@ -58,7 +58,6 @@ export async function inspectRemoteXmltv(
   const timeoutMs = options.timeoutMs ?? 120_000;
   const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
   const response = await (options.fetchImplementation ?? guardedFetch)(url, {
-    redirect: 'follow',
     signal: AbortSignal.timeout(timeoutMs),
     headers: {
       accept: 'application/xml, text/xml, text/plain;q=0.8, */*;q=0.1',

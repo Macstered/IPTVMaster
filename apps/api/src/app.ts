@@ -11,7 +11,7 @@ import {
   serializeM3u,
   serializeXmltv,
   SnapshotRejectedError,
-  BlockedAddressError,
+  findBlockedAddressError,
   type EventGroupPolicy,
   type M3uEntry,
   type PlaylistInspection,
@@ -1141,8 +1141,9 @@ export async function buildApp(
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
         }
-        if (error instanceof BlockedAddressError) {
-          return reply.code(400).send({ error: error.message });
+        const blocked = findBlockedAddressError(error);
+        if (blocked) {
+          return reply.code(400).send({ error: blocked.message });
         }
         throw error;
       }
@@ -1208,8 +1209,9 @@ export async function buildApp(
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
         }
-        if (error instanceof BlockedAddressError) {
-          return reply.code(400).send({ error: error.message });
+        const blocked = findBlockedAddressError(error);
+        if (blocked) {
+          return reply.code(400).send({ error: blocked.message });
         }
         throw error;
       }
@@ -1289,8 +1291,9 @@ export async function buildApp(
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
         }
-        if (error instanceof BlockedAddressError) {
-          return reply.code(400).send({ error: error.message });
+        const blocked = findBlockedAddressError(error);
+        if (blocked) {
+          return reply.code(400).send({ error: blocked.message });
         }
         throw error;
       }

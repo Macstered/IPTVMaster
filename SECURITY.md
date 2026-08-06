@@ -29,11 +29,20 @@ malicious provider is treated as an attacker in this project's threat model,
 because its feed reaches the parser, the database, the published output, and
 the administrator's browser.
 
-Outbound feed requests refuse private, loopback, link-local, and reserved
-addresses, and revalidate on every redirect hop, so a feed cannot redirect the
-server into scanning the network it runs on. Set
-`IPTVMASTER_ALLOW_PRIVATE_SOURCE_ADDRESSES=true` only if you deliberately host
-a playlist or XMLTV generator on your own network. Downloads are size- and
+Outbound feed requests are followed hop by hop by the application rather than
+by the HTTP client, and the destination is validated before every hop. This
+matters because an HTTP client resolves a redirect target itself, and a hop to
+a bare address literal performs no DNS lookup, so a connector-level guard alone
+would not see it. Addresses are classified with a real IP parser, so
+IPv4-mapped IPv6 forms such as `::ffff:7f00:1` and the whole `fe80::/10`
+link-local range are refused like their obvious equivalents.
+
+Only public unicast destinations are allowed by default. If you host a playlist
+or XMLTV generator on your own network, name its network in
+`IPTVMASTER_ALLOWED_SOURCE_CIDRS` (for example `192.168.1.0/24`). Loopback,
+link-local — which carries the cloud metadata address — multicast, and reserved
+ranges are refused even when a CIDR list is configured, because nothing
+legitimate serves a feed from them. Downloads are size- and
 time-bounded, parsing is linear in input size, and channel logo URLs supplied
 by a feed are only rendered when they point at public hosts.
 
