@@ -100,7 +100,10 @@ export type SourceActivityKind =
   | 'manual-epg-exclude'
   | 'manual-epg-include'
   | 'snapshot-activate'
-  | 'snapshot-reactivate';
+  | 'snapshot-reactivate'
+  | 'channels-retired'
+  | 'group-removed'
+  | 'group-restored';
 
 export interface SourceActivityEvent {
   id: string;
@@ -175,6 +178,13 @@ export interface PermanentGroupSummary {
   outputGroupStatus: PermanentGroupOutputStatus;
   outputGroupName?: string;
   policyOutputGroupName?: string;
+}
+
+export interface RemovedGroupSummary {
+  providerGroup: string;
+  removedAt: string;
+  /** The provider still lists it, so restoring brings the channels straight back. */
+  stillOffered: boolean;
 }
 
 export interface UpdatePermanentGroupInput {
@@ -466,6 +476,12 @@ export interface SourceRepository {
   ): Promise<ChannelListPage>;
   listOutputGroups?(sourceId: string): Promise<OutputGroupSummary[]>;
   listPermanentGroups?(sourceId: string): Promise<PermanentGroupSummary[]>;
+  listRemovedGroups?(sourceId: string): Promise<RemovedGroupSummary[]>;
+  removeGroup?(
+    sourceId: string,
+    providerGroup: string,
+  ): Promise<{ removedChannels: number }>;
+  restoreGroup?(sourceId: string, providerGroup: string): Promise<void>;
   updatePermanentGroup?(
     sourceId: string,
     providerGroup: string,
@@ -622,7 +638,13 @@ interface ChannelAuditHistoryRow {
 
 interface SourceAuditHistoryRow {
   id: string;
-  action: 'snapshot-activate' | 'snapshot-reactivate';
+  action:
+    | 'snapshot-activate'
+    | 'snapshot-reactivate'
+    | 'channels-retired'
+    | 'group-removed'
+    | 'group-restored';
+  details: unknown;
   created_at: Date;
   target_live_count: number | null;
 }
@@ -759,6 +781,59 @@ function isStringRecord(value: unknown): value is Record<string, string> {
     !Array.isArray(value) &&
     Object.values(value).every((item) => typeof item === 'string')
   );
+}
+
+function auditDetail(details: unknown, key: string): unknown {
+  if (typeof details !== 'object' || details === null || Array.isArray(details))
+    return undefined;
+  return (details as Record<string, unknown>)[key];
+}
+
+/** Headline and explanation for one source-level audit row. */
+function describeSourceAuditEvent(row: SourceAuditHistoryRow): {
+  title: string;
+  detail: string;
+} {
+  const group = auditDetail(row.details, 'providerGroup');
+  const groupName = typeof group === 'string' ? group : 'A group';
+  const removed = auditDetail(row.details, 'removedChannels');
+  const removedCount = typeof removed === 'number' ? removed : 0;
+  const channelCount = `${removedCount.toLocaleString()} ${
+    removedCount === 1 ? 'channel' : 'channels'
+  }`;
+
+  switch (row.action) {
+    case 'channels-retired':
+      return {
+        title: `Retired ${channelCount}`,
+        detail:
+          'Absent from several provider refreshes in a row, so removed ' +
+          'along with any edits.',
+      };
+    case 'group-removed':
+      return {
+        title: `Removed ${groupName}`,
+        detail: `${channelCount} deleted. Refreshes will not bring the group back until you restore it.`,
+      };
+    case 'group-restored':
+      return {
+        title: `Restored ${groupName}`,
+        detail:
+          'Its channels came back from the current snapshot, as new rows ' +
+          'without the edits they had before removal.',
+      };
+    default:
+      return {
+        title:
+          row.action === 'snapshot-activate'
+            ? 'Snapshot restored'
+            : 'Provider snapshot reactivated',
+        detail:
+          row.target_live_count !== null
+            ? `${row.target_live_count.toLocaleString()} retained live entries became current.`
+            : 'The selected retained snapshot became current.',
+      };
+  }
 }
 
 function outputProfileSourceIds(configuration: unknown): string[] {
@@ -949,6 +1024,16 @@ function toChannelSummary(row: ChannelRow): ChannelSummary {
 
 function accessTokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex');
+}
+
+/**
+ * Provider refreshes a channel may be absent from before its row is removed.
+ * Providers rotate identifiers, so a row that stops matching is usually gone
+ * for good; waiting several cycles avoids deleting one that briefly flickers.
+ */
+function channelRetentionRefreshes(): number {
+  const configured = Number(process.env['CHANNEL_RETENTION_REFRESHES']);
+  return Number.isInteger(configured) && configured > 0 ? configured : 5;
 }
 
 export function guideScopedId(epgSourceId: string, upstreamId: string): string {
@@ -1308,7 +1393,19 @@ export class PostgresSourceRepository implements SourceRepository {
         );
       }
 
-      await this.#reconcileChannels(client, sourceId, snapshot.id);
+      const removedChannels = await this.#reconcileChannels(
+        client,
+        sourceId,
+        snapshot.id,
+        { countRefreshCycle: true },
+      );
+      if (removedChannels > 0) {
+        await client.query(
+          `INSERT INTO source_audit_event (source_id, action, details)
+           VALUES ($1, 'channels-retired', $2::jsonb)`,
+          [sourceId, JSON.stringify({ removedChannels })],
+        );
+      }
 
       const summary = toSnapshotSummary(snapshot, false);
       await client.query(
@@ -1379,7 +1476,7 @@ export class PostgresSourceRepository implements SourceRepository {
         [sourceId, limit],
       ),
       this.#pool.query<SourceAuditHistoryRow>(
-        `SELECT a.id, a.action, a.created_at,
+        `SELECT a.id, a.action, a.details, a.created_at,
                   target.live_count AS target_live_count
            FROM source_audit_event a
            LEFT JOIN source_snapshot target ON target.id = a.to_snapshot_id
@@ -1422,17 +1519,10 @@ export class PostgresSourceRepository implements SourceRepository {
         };
       }),
       ...sourceAuditResult.rows.map((row) => ({
+        ...describeSourceAuditEvent(row),
         id: row.id,
         kind: row.action,
         occurredAt: row.created_at.toISOString(),
-        title:
-          row.action === 'snapshot-activate'
-            ? 'Snapshot restored'
-            : 'Provider snapshot reactivated',
-        detail:
-          row.target_live_count !== null
-            ? `${row.target_live_count.toLocaleString()} retained live entries became current.`
-            : 'The selected retained snapshot became current.',
         status: 'succeeded' as const,
       })),
       ...epgMappingAuditResult.rows.map((row) => {
@@ -1533,6 +1623,7 @@ export class PostgresSourceRepository implements SourceRepository {
           i.provider_group
         )
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+         AND COALESCE(p.excluded, FALSE) = FALSE
          AND (c.id IS NULL OR c.enabled = TRUE)
        ORDER BY COALESCE(
                   category_order.sort_order,
@@ -1915,6 +2006,7 @@ export class PostgresSourceRepository implements SourceRepository {
          ON group_order.source_id = s.source_id
         AND group_order.provider_group = i.provider_group
        WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+         AND COALESCE(p.excluded, FALSE) = FALSE
        GROUP BY i.provider_group, p.id, group_order.sort_order,
                 src.source_timezone, src.display_timezone
        ORDER BY COALESCE(
@@ -2067,6 +2159,117 @@ export class PostgresSourceRepository implements SourceRepository {
     }
   }
 
+  /**
+   * Deletes a provider group's channels and remembers the removal, so later
+   * refreshes do not import the group again. The group policy row itself and
+   * the playlist ordering survive, which is what makes a restore possible.
+   */
+  async removeGroup(
+    sourceId: string,
+    providerGroup: string,
+  ): Promise<{ removedChannels: number }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO group_policy
+           (source_id, provider_group, behavior, excluded)
+         VALUES ($1, $2, 'permanent', TRUE)
+         ON CONFLICT (source_id, provider_group) DO UPDATE SET
+           excluded = TRUE,
+           updated_at = NOW()`,
+        [sourceId, providerGroup],
+      );
+      const deleted = await client.query(
+        `DELETE FROM channel
+         WHERE source_id = $1 AND provider_group = $2`,
+        [sourceId, providerGroup],
+      );
+      const removedChannels = deleted.rowCount ?? 0;
+      await client.query(
+        `INSERT INTO source_audit_event (source_id, action, details)
+         VALUES ($1, 'group-removed', $2::jsonb)`,
+        [sourceId, JSON.stringify({ providerGroup, removedChannels })],
+      );
+      await this.#reconcileEpgMappings(client, sourceId);
+      await client.query('COMMIT');
+      return { removedChannels };
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Clears a removal so the group returns. Reconciliation runs immediately, so
+   * the channels are back from the current snapshot without waiting for the
+   * next provider refresh.
+   */
+  async restoreGroup(sourceId: string, providerGroup: string): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const restored = await client.query(
+        `UPDATE group_policy
+         SET excluded = FALSE, updated_at = NOW()
+         WHERE source_id = $1 AND provider_group = $2 AND excluded`,
+        [sourceId, providerGroup],
+      );
+      if ((restored.rowCount ?? 0) > 0) {
+        await client.query(
+          `INSERT INTO source_audit_event (source_id, action, details)
+           VALUES ($1, 'group-restored', $2::jsonb)`,
+          [sourceId, JSON.stringify({ providerGroup })],
+        );
+        const snapshot = await client.query<{ id: string }>(
+          `SELECT id
+           FROM source_snapshot
+           WHERE source_id = $1 AND is_last_known_good = TRUE`,
+          [sourceId],
+        );
+        if (snapshot.rows[0]) {
+          await this.#reconcileChannels(client, sourceId, snapshot.rows[0].id);
+        }
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Groups the operator removed, newest first, so they can be restored. */
+  async listRemovedGroups(sourceId: string): Promise<RemovedGroupSummary[]> {
+    const result = await this.#pool.query<{
+      provider_group: string;
+      removed_at: Date;
+      available: boolean;
+    }>(
+      `SELECT p.provider_group, p.updated_at AS removed_at,
+              EXISTS (
+                SELECT 1
+                FROM source_snapshot s
+                JOIN upstream_item i ON i.snapshot_id = s.id
+                WHERE s.source_id = p.source_id
+                  AND s.is_last_known_good = TRUE
+                  AND i.provider_group = p.provider_group
+              ) AS available
+       FROM group_policy p
+       WHERE p.source_id = $1 AND p.excluded
+       ORDER BY p.updated_at DESC, p.provider_group ASC`,
+      [sourceId],
+    );
+    return result.rows.map((row) => ({
+      providerGroup: row.provider_group,
+      removedAt: row.removed_at.toISOString(),
+      stillOffered: row.available,
+    }));
+  }
+
   async listPermanentGroups(
     sourceId: string,
   ): Promise<PermanentGroupSummary[]> {
@@ -2086,6 +2289,7 @@ export class PostgresSourceRepository implements SourceRepository {
        WHERE c.source_id = $1 AND c.archived_at IS NULL
          AND c.current_upstream_item_id IS NOT NULL
          AND COALESCE(p.behavior, 'permanent') = 'permanent'
+         AND COALESCE(p.excluded, FALSE) = FALSE
        GROUP BY c.provider_group
        ORDER BY MIN(c.sort_order) ASC, c.provider_group ASC`,
       [sourceId],
@@ -2116,6 +2320,7 @@ export class PostgresSourceRepository implements SourceRepository {
            ON group_order.source_id = s.source_id
           AND group_order.provider_group = i.provider_group
          WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+           AND COALESCE(p.excluded, FALSE) = FALSE
        ), names AS (
          SELECT name FROM entry_groups
          UNION
@@ -2954,6 +3159,7 @@ export class PostgresSourceRepository implements SourceRepository {
              match_confidence = 1,
              reconciliation_status = 'matched',
              last_seen_at = NOW(),
+             missed_refreshes = 0,
              updated_at = NOW()
          WHERE source_id = $1 AND id = $2 AND archived_at IS NULL
          RETURNING id, source_id, provider_name, provider_group, tvg_id,
@@ -3767,7 +3973,7 @@ export class PostgresSourceRepository implements SourceRepository {
               COALESCE(p.numeric_date_order, 'month-day') AS numeric_date_order
        FROM group_policy p
        JOIN source src ON src.id = p.source_id
-       WHERE p.source_id = $1`,
+       WHERE p.source_id = $1 AND p.excluded = FALSE`,
       [sourceId],
     );
     return result.rows.map((row) => {
@@ -3994,7 +4200,12 @@ export class PostgresSourceRepository implements SourceRepository {
     client: PoolClient,
     sourceId: string,
     snapshotId: string,
-  ): Promise<void> {
+    options: { countRefreshCycle?: boolean } = {},
+  ): Promise<number> {
+    // Reconciliation also runs when group policies change, which must not
+    // count as a provider refresh: otherwise editing policies a few times
+    // would age out channels that are still being served.
+    const countRefreshCycle = options.countRefreshCycle === true;
     const existingResult = await client.query<{
       id: string;
       provider_stream_id: string | null;
@@ -4061,9 +4272,19 @@ export class PostgresSourceRepository implements SourceRepository {
        SET current_upstream_item_id = NULL,
            reconciliation_status = 'missing',
            match_confidence = NULL,
+           missed_refreshes = CASE
+             WHEN $2 AND COALESCE(
+               (SELECT p.behavior
+                FROM group_policy p
+                WHERE p.source_id = channel.source_id
+                  AND p.provider_group = channel.provider_group),
+               'permanent'
+             ) = 'permanent' THEN missed_refreshes + 1
+             ELSE missed_refreshes
+           END,
            updated_at = NOW()
        WHERE source_id = $1 AND archived_at IS NULL`,
-      [sourceId],
+      [sourceId, countRefreshCycle],
     );
 
     if (reconciliation.matches.length > 0) {
@@ -4088,6 +4309,7 @@ export class PostgresSourceRepository implements SourceRepository {
              match_confidence = item.confidence,
              reconciliation_status = 'matched',
              last_seen_at = NOW(),
+             missed_refreshes = 0,
              updated_at = NOW()
          FROM jsonb_to_recordset($1::jsonb) AS item(
            channel_id UUID,
@@ -4152,12 +4374,46 @@ export class PostgresSourceRepository implements SourceRepository {
            provider_group TEXT,
            provider_logo_url TEXT,
            sort_order INTEGER
+         )
+         WHERE NOT EXISTS (
+           SELECT 1 FROM group_policy removed
+           WHERE removed.source_id = $1
+             AND removed.provider_group = item.provider_group
+             AND removed.excluded
          )`,
         [sourceId, JSON.stringify(values)],
       );
     }
 
+    // A row that has not matched the provider for several refreshes is gone
+    // rather than merely renamed, so it is removed along with its edits. Group
+    // configuration and ordering are never touched here.
+    //
+    // Only permanent groups age. Event groups are matched through their
+    // upstream items rather than channel rows, so their channels never match
+    // here and would otherwise be deleted for standing still.
+    let removedChannels = 0;
+    if (countRefreshCycle) {
+      const removed = await client.query(
+        `DELETE FROM channel c
+         WHERE c.source_id = $1
+           AND c.archived_at IS NULL
+           AND c.current_upstream_item_id IS NULL
+           AND c.missed_refreshes >= $2
+           AND COALESCE(
+                 (SELECT p.behavior
+                  FROM group_policy p
+                  WHERE p.source_id = c.source_id
+                    AND p.provider_group = c.provider_group),
+                 'permanent'
+               ) = 'permanent'`,
+        [sourceId, channelRetentionRefreshes()],
+      );
+      removedChannels = removed.rowCount ?? 0;
+    }
+
     await this.#reconcileEpgMappings(client, sourceId);
+    return removedChannels;
   }
 
   async #loadEpgReconciliation(

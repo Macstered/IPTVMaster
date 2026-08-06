@@ -21,6 +21,13 @@ URLs, so playback traffic never passes through IPTVMaster.
 - Provider changes are reconciled conservatively: safe matches follow
   automatically, uncertain ones go to a review queue with an audit trail, and
   manual matches are locked until you release them.
+- Providers rotate channel identifiers, so entries regularly stop matching. A
+  channel absent from five consecutive refreshes is retired along with its
+  edits (`CHANNEL_RETENTION_REFRESHES`); a refresh that returns unchanged data
+  does not count. Groups are never retired automatically.
+- Groups you do not want at all can be removed outright. Their channels are
+  deleted and refreshes will not import them again, but the group is remembered
+  and can be restored at any time.
 
 **Daily live-event groups**
 

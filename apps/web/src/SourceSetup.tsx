@@ -69,6 +69,12 @@ interface GroupSummary {
   numericDateOrder: 'month-day' | 'day-month';
 }
 
+interface RemovedGroupSummary {
+  providerGroup: string;
+  removedAt: string;
+  stillOffered: boolean;
+}
+
 interface EventReviewEntry {
   id: string;
   originalName: string;
@@ -222,7 +228,10 @@ interface SourceActivityEvent {
     | 'manual-epg-exclude'
     | 'manual-epg-include'
     | 'snapshot-activate'
-    | 'snapshot-reactivate';
+    | 'snapshot-reactivate'
+    | 'channels-retired'
+    | 'group-removed'
+    | 'group-restored';
   occurredAt: string;
   title: string;
   detail: string;
@@ -325,6 +334,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [bulkGroupSaving, setBulkGroupSaving] = useState(false);
   const [groupListLimit, setGroupListLimit] = useState(50);
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
+  const [removedGroups, setRemovedGroups] = useState<RemovedGroupSummary[]>([]);
+  const [groupRemovalPending, setGroupRemovalPending] = useState<
+    string[] | null
+  >(null);
+  const [removingGroups, setRemovingGroups] = useState(false);
   const [eventReview, setEventReview] = useState<EventReview | null>(null);
   const [selectedEventGroup, setSelectedEventGroup] = useState('');
   const [editingEventGroup, setEditingEventGroup] = useState<string | null>(
@@ -440,6 +454,12 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
     const payload = await readJson<{ groups: GroupSummary[] }>(response);
     setGroups(payload.groups);
+  }
+
+  async function loadRemovedGroups(sourceId: string) {
+    const response = await fetch(`/api/v1/sources/${sourceId}/removed-groups`);
+    const payload = await readJson<{ groups: RemovedGroupSummary[] }>(response);
+    setRemovedGroups(payload.groups);
   }
 
   async function loadOutputGroupCategories(sourceId: string) {
@@ -589,6 +609,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               setOutputSourceIds([firstSource.id]);
               initialLoads.push(
                 loadGroups(firstSource.id),
+                loadRemovedGroups(firstSource.id),
                 loadOutputGroupCategories(firstSource.id),
                 loadPermanentGroups(firstSource.id),
                 loadCustomCategories(firstSource.id),
@@ -632,6 +653,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     try {
       await Promise.all([
         loadGroups(source.id),
+        loadRemovedGroups(source.id),
         loadOutputGroupCategories(source.id),
         loadPermanentGroups(source.id),
         loadCustomCategories(source.id),
@@ -1482,6 +1504,86 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }
   }
 
+  /**
+   * Deletes the selected groups' channels. Group policies and playlist order
+   * survive, so a restore puts everything back where it was.
+   */
+  async function removeGroups(source: SafeSource, groupNames: string[]) {
+    if (groupNames.length === 0) return;
+    setRemovingGroups(true);
+    try {
+      let removedChannels = 0;
+      for (const groupName of groupNames) {
+        const response = await fetch(
+          `/api/v1/sources/${source.id}/removed-groups`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ groupName }),
+          },
+        );
+        const payload = await readJson<{ removedChannels: number }>(response);
+        removedChannels += payload.removedChannels;
+      }
+      setSelectedGroupNames([]);
+      setGroupRemovalPending(null);
+      showToast(
+        'success',
+        `${groupNames.length.toLocaleString()} group${
+          groupNames.length === 1 ? '' : 's'
+        } removed with ${removedChannels.toLocaleString()} channel${
+          removedChannels === 1 ? '' : 's'
+        }`,
+      );
+      await Promise.all([
+        loadGroups(source.id),
+        loadRemovedGroups(source.id),
+        loadEventReview(source.id),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
+      ]);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error ? caught.message : 'Could not remove the group',
+      );
+    } finally {
+      setRemovingGroups(false);
+    }
+  }
+
+  async function restoreGroup(source: SafeSource, groupName: string) {
+    setRemovingGroups(true);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/removed-groups/restore`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ groupName }),
+        },
+      );
+      await readJson<unknown>(response);
+      showToast('success', `${groupName} restored`);
+      await Promise.all([
+        loadGroups(source.id),
+        loadRemovedGroups(source.id),
+        loadEventReview(source.id),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
+      ]);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not restore the group',
+      );
+    } finally {
+      setRemovingGroups(false);
+    }
+  }
+
   function toggleGroupSelection(groupName: string) {
     setSelectedGroupNames((current) =>
       current.includes(groupName)
@@ -1722,6 +1824,12 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         : true),
   );
   const visibleGroups = matchingGroups.slice(0, groupListLimit);
+  const pendingRemovalChannelCount = (groupRemovalPending ?? []).reduce(
+    (total, name) =>
+      total +
+      (groups.find((group) => group.providerGroup === name)?.channelCount ?? 0),
+    0,
+  );
   const eventGroupCount = groups.filter(
     (group) => group.behavior === 'event',
   ).length;
@@ -2439,6 +2547,55 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 >
                   Unpublish
                 </button>
+                <button
+                  className="danger-button compact"
+                  type="button"
+                  disabled={
+                    bulkGroupSaving ||
+                    removingGroups ||
+                    selectedGroupNames.length === 0
+                  }
+                  onClick={() => setGroupRemovalPending(selectedGroupNames)}
+                >
+                  Remove
+                </button>
+              </div>
+            ) : null}
+            {groupRemovalPending && groupRemovalPending.length > 0 ? (
+              <div className="group-removal-confirm">
+                <div>
+                  <strong>
+                    Remove {groupRemovalPending.length.toLocaleString()} group
+                    {groupRemovalPending.length === 1 ? '' : 's'}?
+                  </strong>
+                  <small>
+                    {pendingRemovalChannelCount.toLocaleString()} channel
+                    {pendingRemovalChannelCount === 1 ? '' : 's'} and their
+                    edits are deleted, and refreshes will not bring the group
+                    {groupRemovalPending.length === 1 ? '' : 's'} back. You can
+                    restore {groupRemovalPending.length === 1 ? 'it' : 'them'}{' '}
+                    below at any time, but the channels return without those
+                    edits.
+                  </small>
+                </div>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={removingGroups}
+                  onClick={() => setGroupRemovalPending(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="danger-button compact"
+                  type="button"
+                  disabled={removingGroups}
+                  onClick={() =>
+                    void removeGroups(primarySource, groupRemovalPending)
+                  }
+                >
+                  {removingGroups ? 'Removing…' : 'Remove them'}
+                </button>
               </div>
             ) : null}
             <div className="group-list">
@@ -2539,6 +2696,46 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 >
                   Show all {matchingGroups.length.toLocaleString()}
                 </button>
+              </div>
+            ) : null}
+            {removedGroups.length > 0 ? (
+              <div className="removed-groups">
+                <div className="subsection-heading">
+                  <div>
+                    <small>REMOVED GROUPS</small>
+                    <strong>
+                      {removedGroups.length.toLocaleString()} kept out of
+                      refreshes
+                    </strong>
+                  </div>
+                </div>
+                <div className="removed-group-list">
+                  {removedGroups.map((group) => (
+                    <div
+                      className="removed-group-row"
+                      key={group.providerGroup}
+                    >
+                      <span className="group-select-text">
+                        <strong>{group.providerGroup || '(Ungrouped)'}</strong>
+                        <small>
+                          {group.stillOffered
+                            ? 'The provider still lists it'
+                            : 'The provider no longer lists it'}
+                        </small>
+                      </span>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        disabled={removingGroups}
+                        onClick={() =>
+                          void restoreGroup(primarySource, group.providerGroup)
+                        }
+                      >
+                        Restore
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : null}
 

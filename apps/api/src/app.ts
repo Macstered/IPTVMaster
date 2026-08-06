@@ -126,6 +126,10 @@ const updateSourceSchema = z
     }
   });
 
+const groupRemovalSchema = z.object({
+  groupName: z.string().min(1).max(500),
+});
+
 const groupPolicySchema = z.object({
   groupName: z.string().min(1).max(500),
   behavior: z.enum(['permanent', 'event']),
@@ -1569,6 +1573,78 @@ export async function buildApp(
         bulk.data.groupNames,
         bulk.data.update,
       );
+    },
+  );
+
+  app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/removed-groups',
+    async (request, reply) => {
+      if (!sourceRepository?.listRemovedGroups) {
+        return reply
+          .code(503)
+          .send({ error: 'Group removal is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      return {
+        groups: await sourceRepository.listRemovedGroups(sourceId.data),
+      };
+    },
+  );
+
+  app.post<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/removed-groups',
+    async (request, reply) => {
+      if (!sourceRepository?.removeGroup) {
+        return reply
+          .code(503)
+          .send({ error: 'Group removal is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const body = groupRemovalSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!body.success) {
+        return reply.code(400).send({ error: validationMessage(body.error) });
+      }
+      const groups = await sourceRepository.listGroups(sourceId.data);
+      if (
+        !groups.some((group) => group.providerGroup === body.data.groupName)
+      ) {
+        return reply.code(404).send({ error: 'Group not found' });
+      }
+      const result = await sourceRepository.removeGroup(
+        sourceId.data,
+        body.data.groupName,
+      );
+      return {
+        ...result,
+        groups: await sourceRepository.listGroups(sourceId.data),
+      };
+    },
+  );
+
+  app.post<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/removed-groups/restore',
+    async (request, reply) => {
+      if (!sourceRepository?.restoreGroup) {
+        return reply
+          .code(503)
+          .send({ error: 'Group removal is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const body = groupRemovalSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!body.success) {
+        return reply.code(400).send({ error: validationMessage(body.error) });
+      }
+      await sourceRepository.restoreGroup(sourceId.data, body.data.groupName);
+      return { groups: await sourceRepository.listGroups(sourceId.data) };
     },
   );
 

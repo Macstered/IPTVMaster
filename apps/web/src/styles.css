@@ -841,6 +841,65 @@ h2 {
 .group-action-spacer {
   min-width: 100px;
 }
+.group-removal-confirm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 9px;
+  align-items: center;
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid var(--danger-border);
+  border-radius: 4px;
+  background: var(--surface-inset);
+}
+.group-removal-confirm strong {
+  display: block;
+  color: var(--danger);
+  font-size: 12px;
+}
+.group-removal-confirm small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.removed-groups {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.removed-group-list {
+  display: grid;
+  gap: 7px;
+  max-height: 210px;
+  margin-top: 12px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+.removed-group-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+.removed-group-row strong,
+.removed-group-row small {
+  display: block;
+}
+.removed-group-row strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+.removed-group-row small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 .behavior-badge {
   padding: 6px 8px;
   border: 1px solid var(--border-strong);
@@ -2487,6 +2546,9 @@ button:disabled {
   }
   .group-row {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .group-removal-confirm {
+    grid-template-columns: minmax(0, 1fr);
   }
   .group-row .secondary-button,
   .group-action-spacer {
