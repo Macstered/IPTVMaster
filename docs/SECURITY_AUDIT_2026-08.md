@@ -54,6 +54,24 @@ Traced and confirmed clean, not assumed:
   and verified auth tags; no credential reaches logs, responses, or the stored
   `safe_error` column.
 
+## Follow-up review (GPT-5.6, same month)
+
+A second model reviewed `safe-fetch.ts` and the surrounding application. It
+found that the first SSRF fix was incomplete, which a test confirmed before
+the rework:
+
+| Sev    | Issue                                                                                                                                                                                                                                                                                      | Status                                                                                                                                        |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| High   | Redirects were followed by the HTTP client, which resolves a redirect target itself. A hop to a bare address literal performs no DNS lookup, so the connector guard never ran: a feed answering with a redirect to `http://127.0.0.1/` reached the internal service and returned its body. | Fixed — redirects are followed in-process, capped at three hops, with the address policy applied before every hop                             |
+| Medium | Hand-rolled address parsing matched IPv6 link-local only at the `fe80` prefix rather than `fe80::/10`, and IPv4-mapped IPv6 only in dotted form, so `fe90::1` and `::ffff:7f00:1` were treated as public                                                                                   | Fixed — classification uses `ipaddr.js` range detection, with mapped addresses judged as the address they reach                               |
+| Medium | The blanket private-address switch was all-or-nothing                                                                                                                                                                                                                                      | Fixed — `IPTVMASTER_ALLOWED_SOURCE_CIDRS` names the permitted networks; loopback, link-local, multicast, and reserved stay refused regardless |
+| Medium | Provider-supplied logo URLs were fetched by the administrator's browser                                                                                                                                                                                                                    | Fixed — logos are proxied by the server with signature validation, and the image policy narrowed to `img-src 'self' data:`                    |
+| Medium | No supported way to run the editor over TLS                                                                                                                                                                                                                                                | Fixed — optional reverse-proxy overlay, plus a warning when the session is in the clear                                                       |
+
+The lesson worth keeping: a guard placed at the connection layer only sees
+what that layer resolves. Address literals and client-followed redirects go
+around it, so the policy has to be applied where the destination is chosen.
+
 ## Notes for future work
 
 - The login throttle and refresh coordination are per-process, so running more
