@@ -42,6 +42,8 @@ describe('request URL policy', () => {
     'http://provider.example/list.m3u',
     'https://provider.example/guide.xml',
     'http://provider.example:8080/list.m3u',
+    'http://provider.example:2095/list.m3u',
+    'http://provider.example:25461/list.m3u',
   ])('accepts %s', (value) => {
     expect(() => assertAllowedRequestUrl(new URL(value))).not.toThrow();
   });
@@ -49,7 +51,6 @@ describe('request URL policy', () => {
   it.each([
     'ftp://provider.example/list.m3u',
     'file:///etc/passwd',
-    'http://provider.example:22/list.m3u',
     'http://127.0.0.1/list.m3u',
     'http://169.254.169.254/latest/meta-data/',
     'http://[::1]/list.m3u',

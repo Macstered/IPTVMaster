@@ -10,8 +10,6 @@ export class BlockedAddressError extends Error {
   }
 }
 
-const ALLOWED_PORTS = new Set([80, 443, 8080, 8443]);
-
 /**
  * Some operators legitimately run a provider or guide generator on their own
  * network. Private addresses stay blocked by default so a hostile feed cannot
@@ -66,17 +64,9 @@ export function assertAllowedRequestUrl(url: URL): void {
   if (!['http:', 'https:'].includes(url.protocol)) {
     throw new BlockedAddressError('Provider URL must use HTTP or HTTPS');
   }
-  const port = url.port
-    ? Number(url.port)
-    : url.protocol === 'https:'
-      ? 443
-      : 80;
-  if (!privateAddressesAllowed() && !ALLOWED_PORTS.has(port)) {
-    throw new BlockedAddressError(
-      `Provider port ${port} is not permitted. Set ` +
-        'IPTVMASTER_ALLOW_PRIVATE_SOURCE_ADDRESSES=true to allow it.',
-    );
-  }
+  // Ports are deliberately unrestricted: IPTV providers commonly serve on
+  // non-standard ports (2095, 8000, 25461, ...). The address checks below and
+  // in the connector are what prevent reaching internal services.
   const literal = url.hostname.replace(/^\[|\]$/g, '');
   if (isIP(literal) && isBlockedAddress(literal)) {
     throw new BlockedAddressError(
