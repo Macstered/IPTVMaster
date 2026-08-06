@@ -1,0 +1,29 @@
+# Terminates TLS for IPTVMaster and forwards to the application over the
+# Compose network. IPTVMASTER_TLS selects how the certificate is obtained:
+#
+#   internal                      Caddy's own local CA (install its root on
+#                                 each client, see docs/HTTPS.md)
+#   /path/cert.pem /path/key.pem  a certificate you provide, mounted read-only
+#   you@example.com               an ACME account email for a public hostname
+#
+{
+	admin off
+}
+
+{$IPTVMASTER_HOSTNAME} {
+	tls {$IPTVMASTER_TLS}
+
+	encode zstd gzip
+	reverse_proxy app:8080 {
+		header_up X-Forwarded-Proto https
+	}
+
+	header {
+		# The application sets its own security headers; this one only makes
+		# sense once TLS actually terminates here.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+}
+
+# Caddy redirects plain HTTP to HTTPS for this site automatically, preserving
+# the configured port, so a session cookie is never sent in the clear.

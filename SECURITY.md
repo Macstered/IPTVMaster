@@ -16,6 +16,8 @@ Database backups contain encrypted provider URLs and should be stored with restr
 
 IPTVMaster is intended for trusted-LAN access only. Do not expose the application, database, or generated playlist endpoints directly to the public internet.
 
+Plain HTTP exposes the administrator password, the session cookie, provider URLs, and the output tokens to anyone observing the network. The application warns when it is reached that way, and `docs/HTTPS.md` describes an optional reverse-proxy overlay that terminates TLS, redirects HTTP, and marks session cookies `Secure`.
+
 The editor API requires the single local administrator session after first-run setup. Passwords are hashed with scrypt and a random salt. Session and CSRF tokens are stored only as SHA-256 hashes; the browser session cookie is `HttpOnly` and both cookies use `SameSite=Strict`. Enable `IPTVMASTER_SECURE_COOKIES=true` only when the browser always reaches the app through HTTPS. State-changing editor requests also require a same-origin CSRF header, and repeated failed logins are throttled.
 
 Authentication is an additional layer, not permission to expose the service publicly. Playlist and EPG output endpoints deliberately do not use the browser session; their long random output token remains the access control and can be revoked independently.

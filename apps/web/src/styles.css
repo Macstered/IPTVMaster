@@ -3040,6 +3040,23 @@ strong {
 .permanent-group-actions.collapsed .permanent-group-name-form {
   grid-column: auto;
 }
+.transport-warning {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-panel);
+  background: var(--warn-bg);
+}
+.transport-warning strong {
+  color: var(--warn);
+  font-size: 13px;
+}
+.transport-warning p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .epg-sources-panel {
   margin-top: 20px;
   padding-top: 20px;

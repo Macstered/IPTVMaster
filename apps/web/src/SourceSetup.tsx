@@ -16,6 +16,7 @@ interface SourceSetupProps {
 }
 
 interface Capabilities {
+  secureTransport?: boolean;
   version: string;
   revision: string;
   sourcePersistence: boolean;
@@ -1765,6 +1766,20 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               : 'Preview mode'}
         </span>
       </div>
+
+      {workspace === 'overview' &&
+      capabilities &&
+      capabilities.secureTransport === false ? (
+        <div className="transport-warning" role="status">
+          <strong>This session is not encrypted</strong>
+          <p>
+            You are signed in over plain HTTP, so your password, provider URLs,
+            and output addresses cross the network in the clear. That is
+            tolerable on a trusted home network, but see docs/HTTPS.md to put a
+            certificate in front of IPTVMaster.
+          </p>
+        </div>
+      ) : null}
 
       {capabilities && !capabilities.sourcePersistence ? (
         <p className="panel-copy">

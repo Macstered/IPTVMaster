@@ -537,9 +537,10 @@ export async function buildApp(
       60 *
       60 *
       1_000;
+  const behindTlsProxy = process.env['IPTVMASTER_BEHIND_TLS_PROXY'] === 'true';
   const secureCookies =
     options.secureCookies ??
-    process.env['IPTVMASTER_SECURE_COOKIES'] === 'true';
+    (process.env['IPTVMASTER_SECURE_COOKIES'] === 'true' || behindTlsProxy);
   const developmentMode =
     options.developmentMode ?? process.env['NODE_ENV'] === 'development';
   const authService = authRepository
@@ -900,7 +901,11 @@ export async function buildApp(
     return reply.code(204).send();
   });
 
-  app.get('/api/v1/system/capabilities', async () => ({
+  app.get('/api/v1/system/capabilities', async (request) => ({
+    secureTransport:
+      behindTlsProxy ||
+      request.protocol === 'https' ||
+      request.headers['x-forwarded-proto'] === 'https',
     version: process.env['IPTVMASTER_VERSION'] ?? 'development',
     revision: process.env['IPTVMASTER_REVISION'] ?? 'unknown',
     sourcePersistence: sourceRepository !== undefined,

@@ -1,0 +1,40 @@
+# HTTPS overlay. Use together with the base file:
+#
+#   docker compose -f compose.yaml -f compose.https.yaml up -d
+#
+# Caddy terminates TLS and is the only published service; the application is
+# reachable only from the Compose network, so nothing serves plain HTTP to the
+# LAN. Set IPTVMASTER_HOSTNAME and IPTVMASTER_TLS in .env first — see
+# docs/HTTPS.md for the certificate options.
+
+services:
+  app:
+    # Remove the plain-HTTP publication from the base file. The application is
+    # reached through the proxy on the Compose network instead.
+    ports: !override []
+    environment:
+      IPTVMASTER_SECURE_COOKIES: 'true'
+      IPTVMASTER_BEHIND_TLS_PROXY: 'true'
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      IPTVMASTER_HOSTNAME: ${IPTVMASTER_HOSTNAME:?Set IPTVMASTER_HOSTNAME in .env}
+      IPTVMASTER_TLS: ${IPTVMASTER_TLS:?Set IPTVMASTER_TLS in .env}
+    ports:
+      - '${IPTVMASTER_HTTP_PORT:-80}:80'
+      - '${IPTVMASTER_HTTPS_PORT:-443}:443'
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy-data:
+  caddy-config:
