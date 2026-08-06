@@ -424,7 +424,11 @@ class MemorySourceRepository implements SourceRepository {
   async bulkUpdateGroupPolicies(
     sourceId: string,
     groupNames: string[],
-    update: { behavior?: 'permanent' | 'event'; enabled?: boolean },
+    update: {
+      behavior?: 'permanent' | 'event';
+      enabled?: boolean;
+      outputGroupName?: string | null;
+    },
   ) {
     const entries =
       this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
@@ -442,12 +446,22 @@ class MemorySourceRepository implements SourceRepository {
       if (existing) {
         if (update.behavior !== undefined) existing.behavior = update.behavior;
         if (update.enabled !== undefined) existing.enabled = update.enabled;
+        if (update.outputGroupName !== undefined) {
+          if (update.outputGroupName === null) {
+            delete existing.outputGroupName;
+          } else {
+            existing.outputGroupName = update.outputGroupName;
+          }
+        }
       } else {
         byName.set(name, {
           groupName: name,
           behavior: update.behavior ?? 'permanent',
           enabled: update.enabled ?? true,
           hidePlaceholders: true,
+          ...(update.outputGroupName
+            ? { outputGroupName: update.outputGroupName }
+            : {}),
         });
       }
     }
@@ -2257,6 +2271,56 @@ describe('IPTVMaster API', () => {
       unpublished.find((group) => group.providerGroup === 'Events B'),
     ).toEqual(expect.objectContaining({ behavior: 'event', enabled: true }));
     expect(emptyUpdateResponse.statusCode).toBe(400);
+
+    const renameResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/group-policies/bulk`,
+      payload: {
+        groupNames: ['Finland'],
+        update: { outputGroupName: 'Suomi' },
+      },
+    });
+    const groupsAfterRename = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/groups`,
+    });
+    const clearResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/group-policies/bulk`,
+      payload: {
+        groupNames: ['Finland'],
+        update: { outputGroupName: null },
+      },
+    });
+    const groupsAfterClear = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/groups`,
+    });
+
+    expect(renameResponse.statusCode).toBe(200);
+    expect(
+      (
+        groupsAfterRename.json().groups as Array<{
+          providerGroup: string;
+          behavior: string;
+          outputGroupName?: string;
+        }>
+      ).find((group) => group.providerGroup === 'Finland'),
+    ).toEqual(
+      expect.objectContaining({
+        behavior: 'permanent',
+        outputGroupName: 'Suomi',
+      }),
+    );
+    expect(clearResponse.statusCode).toBe(200);
+    expect(
+      (
+        groupsAfterClear.json().groups as Array<{
+          providerGroup: string;
+          outputGroupName?: string;
+        }>
+      ).find((group) => group.providerGroup === 'Finland')?.outputGroupName,
+    ).toBeUndefined();
   });
 
   it('publishes a token-protected M3U with event policies applied', async () => {

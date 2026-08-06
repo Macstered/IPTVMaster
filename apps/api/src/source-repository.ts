@@ -149,6 +149,7 @@ export interface GroupSummary {
 export interface BulkGroupPolicyUpdate {
   behavior?: 'permanent' | 'event';
   enabled?: boolean;
+  outputGroupName?: string | null;
 }
 
 export interface SaveGroupPolicyInput {
@@ -173,6 +174,7 @@ export interface PermanentGroupSummary {
   firstSortOrder: number;
   outputGroupStatus: PermanentGroupOutputStatus;
   outputGroupName?: string;
+  policyOutputGroupName?: string;
 }
 
 export interface UpdatePermanentGroupInput {
@@ -670,6 +672,7 @@ interface PermanentGroupRow {
   custom_group_count: string | number;
   has_provider_group: boolean;
   custom_group_name: string | null;
+  policy_output_group?: string | null;
 }
 
 interface OutputGroupRow {
@@ -835,6 +838,9 @@ function toPermanentGroupSummary(
     outputGroupStatus,
     ...(outputGroupStatus === 'custom' && row.custom_group_name
       ? { outputGroupName: row.custom_group_name }
+      : {}),
+    ...(row.policy_output_group
+      ? { policyOutputGroupName: row.policy_output_group }
       : {}),
   };
 }
@@ -1835,9 +1841,14 @@ export class PostgresSourceRepository implements SourceRepository {
     groupNames: string[],
     update: BulkGroupPolicyUpdate,
   ): Promise<BulkUpdateChannelResult> {
-    if (update.behavior === undefined && update.enabled === undefined) {
+    if (
+      update.behavior === undefined &&
+      update.enabled === undefined &&
+      update.outputGroupName === undefined
+    ) {
       return { updatedCount: 0 };
     }
+    const applyOutputGroup = update.outputGroupName !== undefined;
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
@@ -1845,10 +1856,11 @@ export class PostgresSourceRepository implements SourceRepository {
         `INSERT INTO group_policy
           (source_id, provider_group, behavior, enabled, hide_placeholders,
            placeholder_patterns, source_timezone, display_timezone,
-           numeric_date_order)
+           numeric_date_order, output_group)
          SELECT s.id, name.value, COALESCE($3, 'permanent'),
                 COALESCE($4::boolean, TRUE), TRUE, $5::jsonb,
-                s.source_timezone, s.display_timezone, 'month-day'
+                s.source_timezone, s.display_timezone, 'month-day',
+                CASE WHEN $7::boolean THEN $6 ELSE NULL END
          FROM source s
          CROSS JOIN unnest($2::text[]) AS name(value)
          WHERE s.id = $1
@@ -1862,6 +1874,10 @@ export class PostgresSourceRepository implements SourceRepository {
          ON CONFLICT (source_id, provider_group) DO UPDATE SET
            behavior = COALESCE($3, group_policy.behavior),
            enabled = COALESCE($4::boolean, group_policy.enabled),
+           output_group = CASE
+             WHEN $7::boolean THEN $6
+             ELSE group_policy.output_group
+           END,
            updated_at = NOW()`,
         [
           sourceId,
@@ -1869,6 +1885,8 @@ export class PostgresSourceRepository implements SourceRepository {
           update.behavior ?? null,
           update.enabled ?? null,
           JSON.stringify(DEFAULT_PLACEHOLDER_PATTERNS),
+          update.outputGroupName ?? null,
+          applyOutputGroup,
         ],
       );
       const snapshot = await client.query<{ id: string }>(
@@ -1902,7 +1920,8 @@ export class PostgresSourceRepository implements SourceRepository {
               COUNT(DISTINCT c.custom_group) AS custom_group_count,
               BOOL_OR(c.custom_group IS NULL) AS has_provider_group,
               MAX(c.custom_group) FILTER (WHERE c.custom_group IS NOT NULL)
-                AS custom_group_name
+                AS custom_group_name,
+              MAX(p.output_group) AS policy_output_group
        FROM channel c
        LEFT JOIN group_policy p
          ON p.source_id = c.source_id AND p.provider_group = c.provider_group

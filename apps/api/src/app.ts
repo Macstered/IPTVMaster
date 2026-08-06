@@ -226,6 +226,9 @@ const bulkGroupPolicySchema = z.object({
     .object({
       behavior: z.enum(['permanent', 'event']).optional(),
       enabled: z.boolean().optional(),
+      outputGroupName: z
+        .union([z.string().trim().min(1).max(500), z.null()])
+        .optional(),
     })
     .refine(
       (value) => Object.values(value).some((item) => item !== undefined),

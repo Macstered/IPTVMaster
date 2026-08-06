@@ -1759,7 +1759,7 @@ h2 {
 }
 .permanent-group-actions {
   display: grid;
-  grid-template-columns: auto minmax(260px, 1fr) auto;
+  grid-template-columns: auto minmax(260px, 1fr);
   gap: 7px;
   align-items: center;
   padding: 6px 9px 8px;
@@ -3033,6 +3033,12 @@ strong {
 }
 .permanent-group-actions.collapsed {
   grid-template-columns: auto;
+}
+.permanent-group-actions .permanent-group-name-form {
+  grid-column: 2;
+}
+.permanent-group-actions.collapsed .permanent-group-name-form {
+  grid-column: auto;
 }
 .copy-row {
   display: flex;

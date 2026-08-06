@@ -155,6 +155,7 @@ interface PermanentGroupSummary {
   firstSortOrder: number;
   outputGroupStatus: 'provider' | 'custom' | 'mixed';
   outputGroupName?: string;
+  policyOutputGroupName?: string;
 }
 
 interface CustomCategory {
@@ -352,6 +353,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [draggedChannelId, setDraggedChannelId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [permanentGroupNames, setPermanentGroupNames] = useState<
+    Record<string, string>
+  >({});
+  const [permanentGroupRenames, setPermanentGroupRenames] = useState<
     Record<string, string>
   >({});
   const [outputGroupFilter, setOutputGroupFilter] = useState('');
@@ -1395,7 +1399,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   async function bulkUpdateGroupPolicies(
     source: SafeSource,
     groupNames: string[],
-    update: { behavior?: 'permanent' | 'event'; enabled?: boolean },
+    update: {
+      behavior?: 'permanent' | 'event';
+      enabled?: boolean;
+      outputGroupName?: string | null;
+    },
   ) {
     if (groupNames.length === 0) return;
     setBulkGroupSaving(true);
@@ -1417,9 +1425,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           ? 'marked as live events'
           : update.behavior === 'permanent'
             ? 'switched to regular TV'
-            : update.enabled === false
-              ? 'unpublished'
-              : 'published';
+            : update.outputGroupName !== undefined
+              ? update.outputGroupName === null
+                ? 'reset to the provider name'
+                : `renamed to “${update.outputGroupName}”`
+              : update.enabled === false
+                ? 'unpublished'
+                : 'published';
       showToast(
         'success',
         `${payload.updatedCount.toLocaleString()} group${
@@ -3217,8 +3229,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                       ? 'Mixed output groups'
                       : `Output: ${
                           group.outputGroupName ??
+                          group.policyOutputGroupName ??
                           (group.providerGroup || '(Ungrouped)')
                         }`;
+                  const renameValue =
+                    permanentGroupRenames[group.providerGroup] ??
+                    group.policyOutputGroupName ??
+                    '';
                   const isSaving = savingPermanentGroup === group.providerGroup;
                   return (
                     <article
@@ -3278,6 +3295,66 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                             className="permanent-group-name-form"
                             onSubmit={(event) => {
                               event.preventDefault();
+                              if (!renameValue.trim()) return;
+                              void bulkUpdateGroupPolicies(
+                                primarySource,
+                                [group.providerGroup],
+                                { outputGroupName: renameValue.trim() },
+                              );
+                            }}
+                          >
+                            <input
+                              aria-label={`Rename output group for ${group.providerGroup}`}
+                              placeholder="Rename output group"
+                              value={renameValue}
+                              onChange={(event) =>
+                                setPermanentGroupRenames((current) => ({
+                                  ...current,
+                                  [group.providerGroup]: event.target.value,
+                                }))
+                              }
+                            />
+                            <button
+                              className="secondary-button compact"
+                              type="submit"
+                              disabled={
+                                isSaving ||
+                                bulkGroupSaving ||
+                                !renameValue.trim()
+                              }
+                            >
+                              Rename
+                            </button>
+                            <button
+                              className="secondary-button compact"
+                              type="button"
+                              disabled={
+                                isSaving ||
+                                bulkGroupSaving ||
+                                !group.policyOutputGroupName
+                              }
+                              title="Use the provider's group name again"
+                              onClick={() => {
+                                setPermanentGroupRenames((current) => ({
+                                  ...current,
+                                  [group.providerGroup]: '',
+                                }));
+                                void bulkUpdateGroupPolicies(
+                                  primarySource,
+                                  [group.providerGroup],
+                                  { outputGroupName: null },
+                                );
+                              }}
+                            >
+                              Provider name
+                            </button>
+                          </form>
+                        )}
+                        {!isExpanded ? null : (
+                          <form
+                            className="permanent-group-name-form"
+                            onSubmit={(event) => {
+                              event.preventDefault();
                               if (!customGroupValue.trim()) return;
                               void updatePermanentGroup(primarySource, group, {
                                 customGroup: customGroupValue.trim(),
@@ -3285,9 +3362,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                             }}
                           >
                             <input
-                              aria-label={`Output group for ${group.providerGroup}`}
+                              aria-label={`Custom category for ${group.providerGroup}`}
                               list="custom-category-choices"
-                              placeholder="Move all to output group"
+                              placeholder="Move channels to a custom category"
                               value={customGroupValue}
                               onChange={(event) =>
                                 setPermanentGroupNames((current) => ({
