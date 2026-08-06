@@ -88,6 +88,7 @@ function repository(): SourceRepository {
       sources: [],
       outputProfileCount: 0,
     })),
+    bulkUpdateGroupPolicies: vi.fn(async () => ({ updatedCount: 0 })),
     getEpgMappingReview: vi.fn(async () => ({
       mappings: [],
       matchedCount: 0,

@@ -813,7 +813,7 @@ h2 {
 }
 .group-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 100px 130px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   gap: 12px;
   align-items: center;
   min-height: 55px;
@@ -2486,7 +2486,7 @@ button:disabled {
     width: 100%;
   }
   .group-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
   .group-row .secondary-button,
   .group-action-spacer {
@@ -3044,6 +3044,15 @@ strong {
 }
 .group-view-chips {
   margin-top: 0;
+}
+.group-bulk-toolbar {
+  grid-template-columns: auto auto auto auto auto auto;
+  justify-content: start;
+}
+@media (max-width: 650px) {
+  .group-bulk-toolbar {
+    grid-template-columns: auto auto;
+  }
 }
 .nav-link:focus-visible,
 .brand:focus-visible {

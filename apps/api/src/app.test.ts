@@ -421,6 +421,40 @@ class MemorySourceRepository implements SourceRepository {
       );
   }
 
+  async bulkUpdateGroupPolicies(
+    sourceId: string,
+    groupNames: string[],
+    update: { behavior?: 'permanent' | 'event'; enabled?: boolean },
+  ) {
+    const entries =
+      this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const knownGroups = new Set(
+      entries.map((entry) => entry.attributes['group-title'] ?? ''),
+    );
+    const byName = new Map(
+      this.policies.map((policy) => [policy.groupName, policy]),
+    );
+    let updatedCount = 0;
+    for (const name of groupNames) {
+      if (!knownGroups.has(name)) continue;
+      updatedCount += 1;
+      const existing = byName.get(name);
+      if (existing) {
+        if (update.behavior !== undefined) existing.behavior = update.behavior;
+        if (update.enabled !== undefined) existing.enabled = update.enabled;
+      } else {
+        byName.set(name, {
+          groupName: name,
+          behavior: update.behavior ?? 'permanent',
+          enabled: update.enabled ?? true,
+          hidePlaceholders: true,
+        });
+      }
+    }
+    this.policies = [...byName.values()];
+    return { updatedCount };
+  }
+
   async saveGroupPolicy(
     sourceId: string,
     input: SaveGroupPolicyInput,
@@ -2140,6 +2174,89 @@ describe('IPTVMaster API', () => {
     expect(restoredReview.json()).toEqual(
       expect.objectContaining({ excludedCount: 0, total: 2 }),
     );
+  });
+
+  it('bulk-marks provider groups as events and toggles publishing', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    repository.latestEntries = ['Events A', 'Events B', 'Finland'].map(
+      (group, index) => ({
+        duration: -1,
+        attributes: { 'tvg-name': `Entry ${index}`, 'group-title': group },
+        name: `Entry ${index}`,
+        url: `http://provider.test/synthetic/${index}`,
+        mediaType: 'live' as const,
+        lineNumber: index + 1,
+      }),
+    );
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const markResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/group-policies/bulk`,
+      payload: {
+        groupNames: ['Events A', 'Events B', 'No such group'],
+        update: { behavior: 'event' },
+      },
+    });
+    const groupsAfterMark = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/groups`,
+    });
+    const unpublishResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/group-policies/bulk`,
+      payload: {
+        groupNames: ['Events A'],
+        update: { enabled: false },
+      },
+    });
+    const groupsAfterUnpublish = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/groups`,
+    });
+    const emptyUpdateResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/group-policies/bulk`,
+      payload: { groupNames: ['Events A'], update: {} },
+    });
+
+    expect(markResponse.statusCode).toBe(200);
+    expect(markResponse.json()).toEqual({ updatedCount: 2 });
+    const marked = groupsAfterMark.json().groups as Array<{
+      providerGroup: string;
+      behavior: string;
+      enabled: boolean;
+    }>;
+    expect(marked.find((group) => group.providerGroup === 'Events A')).toEqual(
+      expect.objectContaining({ behavior: 'event', enabled: true }),
+    );
+    expect(marked.find((group) => group.providerGroup === 'Events B')).toEqual(
+      expect.objectContaining({ behavior: 'event', enabled: true }),
+    );
+    expect(marked.find((group) => group.providerGroup === 'Finland')).toEqual(
+      expect.objectContaining({ behavior: 'permanent' }),
+    );
+    expect(unpublishResponse.statusCode).toBe(200);
+    const unpublished = groupsAfterUnpublish.json().groups as Array<{
+      providerGroup: string;
+      behavior: string;
+      enabled: boolean;
+    }>;
+    expect(
+      unpublished.find((group) => group.providerGroup === 'Events A'),
+    ).toEqual(expect.objectContaining({ behavior: 'event', enabled: false }));
+    expect(
+      unpublished.find((group) => group.providerGroup === 'Events B'),
+    ).toEqual(expect.objectContaining({ behavior: 'event', enabled: true }));
+    expect(emptyUpdateResponse.statusCode).toBe(400);
   });
 
   it('publishes a token-protected M3U with event policies applied', async () => {

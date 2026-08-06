@@ -146,6 +146,11 @@ export interface GroupSummary {
   numericDateOrder: NumericDateOrder;
 }
 
+export interface BulkGroupPolicyUpdate {
+  behavior?: 'permanent' | 'event';
+  enabled?: boolean;
+}
+
 export interface SaveGroupPolicyInput {
   groupName: string;
   behavior: 'permanent' | 'event';
@@ -415,6 +420,11 @@ export interface SourceRepository {
     sourceId: string,
     input: SaveGroupPolicyInput,
   ): Promise<GroupSummary>;
+  bulkUpdateGroupPolicies(
+    sourceId: string,
+    groupNames: string[],
+    update: BulkGroupPolicyUpdate,
+  ): Promise<BulkUpdateChannelResult>;
   listChannels(
     sourceId: string,
     filters: ChannelListFilters,
@@ -1811,6 +1821,74 @@ export class PostgresSourceRepository implements SourceRepository {
     if (!group)
       throw new Error('Saved group policy does not match a current group');
     return group;
+  }
+
+  /**
+   * Applies a partial policy change to many provider groups at once. Existing
+   * policies keep every field that is not part of the update (placeholder
+   * patterns, timezones, output names survive a bulk behavior flip); groups
+   * without a policy get one seeded from the source defaults. Group names that
+   * do not exist in the last-known-good snapshot are ignored.
+   */
+  async bulkUpdateGroupPolicies(
+    sourceId: string,
+    groupNames: string[],
+    update: BulkGroupPolicyUpdate,
+  ): Promise<BulkUpdateChannelResult> {
+    if (update.behavior === undefined && update.enabled === undefined) {
+      return { updatedCount: 0 };
+    }
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `INSERT INTO group_policy
+          (source_id, provider_group, behavior, enabled, hide_placeholders,
+           placeholder_patterns, source_timezone, display_timezone,
+           numeric_date_order)
+         SELECT s.id, name.value, COALESCE($3, 'permanent'),
+                COALESCE($4::boolean, TRUE), TRUE, $5::jsonb,
+                s.source_timezone, s.display_timezone, 'month-day'
+         FROM source s
+         CROSS JOIN unnest($2::text[]) AS name(value)
+         WHERE s.id = $1
+           AND EXISTS (
+             SELECT 1
+             FROM source_snapshot snap
+             JOIN upstream_item item ON item.snapshot_id = snap.id
+             WHERE snap.source_id = s.id AND snap.is_last_known_good = TRUE
+               AND item.provider_group = name.value
+           )
+         ON CONFLICT (source_id, provider_group) DO UPDATE SET
+           behavior = COALESCE($3, group_policy.behavior),
+           enabled = COALESCE($4::boolean, group_policy.enabled),
+           updated_at = NOW()`,
+        [
+          sourceId,
+          groupNames,
+          update.behavior ?? null,
+          update.enabled ?? null,
+          JSON.stringify(DEFAULT_PLACEHOLDER_PATTERNS),
+        ],
+      );
+      const snapshot = await client.query<{ id: string }>(
+        `SELECT id
+         FROM source_snapshot
+         WHERE source_id = $1 AND is_last_known_good = TRUE`,
+        [sourceId],
+      );
+      if (snapshot.rows[0]) {
+        await this.#reconcileChannels(client, sourceId, snapshot.rows[0].id);
+      }
+      await this.#reconcileEpgMappings(client, sourceId);
+      await client.query('COMMIT');
+      return { updatedCount: result.rowCount ?? 0 };
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listPermanentGroups(

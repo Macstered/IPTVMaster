@@ -220,6 +220,19 @@ const customCategorySchema = z.object({
   name: z.string().trim().min(1).max(500),
 });
 
+const bulkGroupPolicySchema = z.object({
+  groupNames: z.array(z.string().max(500)).min(1).max(1000),
+  update: z
+    .object({
+      behavior: z.enum(['permanent', 'event']).optional(),
+      enabled: z.boolean().optional(),
+    })
+    .refine(
+      (value) => Object.values(value).some((item) => item !== undefined),
+      { message: 'At least one bulk group policy field is required' },
+    ),
+});
+
 const reconciliationReviewSchema = z.object({
   search: z.string().trim().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -1190,6 +1203,30 @@ export async function buildApp(
         policy.data,
       );
       return { group: saved };
+    },
+  );
+
+  app.put<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/group-policies/bulk',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const bulk = bulkGroupPolicySchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!bulk.success) {
+        return reply.code(400).send({ error: validationMessage(bulk.error) });
+      }
+      return sourceRepository.bulkUpdateGroupPolicies(
+        sourceId.data,
+        bulk.data.groupNames,
+        bulk.data.update,
+      );
     },
   );
 

@@ -312,6 +312,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [eventGroupView, setEventGroupView] = useState<'events' | 'all'>(
     'events',
   );
+  const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([]);
+  const [bulkGroupSaving, setBulkGroupSaving] = useState(false);
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [eventReview, setEventReview] = useState<EventReview | null>(null);
   const [selectedEventGroup, setSelectedEventGroup] = useState('');
@@ -1387,6 +1389,83 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }
   }
 
+  async function bulkUpdateGroupPolicies(
+    source: SafeSource,
+    groupNames: string[],
+    update: { behavior?: 'permanent' | 'event'; enabled?: boolean },
+  ) {
+    if (groupNames.length === 0) return;
+    setBulkGroupSaving(true);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/group-policies/bulk`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            groupNames: groupNames.slice(0, 1000),
+            update,
+          }),
+        },
+      );
+      const payload = await readJson<{ updatedCount: number }>(response);
+      const action =
+        update.behavior === 'event'
+          ? 'marked as live events'
+          : update.behavior === 'permanent'
+            ? 'switched to regular TV'
+            : update.enabled === false
+              ? 'unpublished'
+              : 'published';
+      showToast(
+        'success',
+        `${payload.updatedCount.toLocaleString()} group${
+          payload.updatedCount === 1 ? '' : 's'
+        } ${action}`,
+      );
+      setSelectedGroupNames([]);
+      await Promise.all([
+        loadGroups(source.id),
+        loadEventReview(source.id),
+        refreshPermanentWorkspace(source.id),
+        loadReconciliationReview(source.id),
+      ]);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not update group policies',
+      );
+    } finally {
+      setBulkGroupSaving(false);
+    }
+  }
+
+  function toggleGroupSelection(groupName: string) {
+    setSelectedGroupNames((current) =>
+      current.includes(groupName)
+        ? current.filter((value) => value !== groupName)
+        : [...current, groupName],
+    );
+  }
+
+  function toggleAllVisibleGroups() {
+    setSelectedGroupNames((current) =>
+      visibleGroups.every((group) => current.includes(group.providerGroup))
+        ? current.filter(
+            (name) =>
+              !visibleGroups.some((group) => group.providerGroup === name),
+          )
+        : [
+            ...current,
+            ...visibleGroups
+              .map((group) => group.providerGroup)
+              .filter((name) => !current.includes(name)),
+          ],
+    );
+  }
+
   function toggleSection(section: string) {
     setCollapsedSections((current) => ({
       ...current,
@@ -2182,9 +2261,90 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               placeholder filtering. Switch to “All groups” to find a provider
               group and mark it as an event.
             </p>
+            {visibleGroups.length > 0 ? (
+              <div className="bulk-toolbar group-bulk-toolbar">
+                <label className="bulk-select-all">
+                  <input
+                    type="checkbox"
+                    checked={
+                      visibleGroups.length > 0 &&
+                      visibleGroups.every((group) =>
+                        selectedGroupNames.includes(group.providerGroup),
+                      )
+                    }
+                    onChange={toggleAllVisibleGroups}
+                  />
+                  Select shown
+                </label>
+                <strong>{selectedGroupNames.length} selected</strong>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={bulkGroupSaving || selectedGroupNames.length === 0}
+                  onClick={() =>
+                    void bulkUpdateGroupPolicies(
+                      primarySource,
+                      selectedGroupNames,
+                      { behavior: 'event' },
+                    )
+                  }
+                >
+                  Mark as event
+                </button>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={bulkGroupSaving || selectedGroupNames.length === 0}
+                  onClick={() =>
+                    void bulkUpdateGroupPolicies(
+                      primarySource,
+                      selectedGroupNames,
+                      { behavior: 'permanent' },
+                    )
+                  }
+                >
+                  Treat as TV
+                </button>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={bulkGroupSaving || selectedGroupNames.length === 0}
+                  onClick={() =>
+                    void bulkUpdateGroupPolicies(
+                      primarySource,
+                      selectedGroupNames,
+                      { enabled: true },
+                    )
+                  }
+                >
+                  Publish
+                </button>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={bulkGroupSaving || selectedGroupNames.length === 0}
+                  onClick={() =>
+                    void bulkUpdateGroupPolicies(
+                      primarySource,
+                      selectedGroupNames,
+                      { enabled: false },
+                    )
+                  }
+                >
+                  Unpublish
+                </button>
+              </div>
+            ) : null}
             <div className="group-list">
               {visibleGroups.map((group) => (
                 <div className="group-row" key={group.providerGroup}>
+                  <input
+                    className="channel-select"
+                    type="checkbox"
+                    aria-label={`Select ${group.providerGroup || '(Ungrouped)'}`}
+                    checked={selectedGroupNames.includes(group.providerGroup)}
+                    onChange={() => toggleGroupSelection(group.providerGroup)}
+                  />
                   <div>
                     <strong>{group.providerGroup || '(Ungrouped)'}</strong>
                     <small>
@@ -2194,6 +2354,28 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   <span className={`behavior-badge ${group.behavior}`}>
                     {group.behavior === 'event' ? 'LIVE EVENT' : 'LIVE TV'}
                   </span>
+                  {group.behavior === 'event' ? (
+                    <label
+                      className="permanent-visibility-toggle"
+                      title="Publish this event group in the TiviMate output"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={group.enabled}
+                        disabled={bulkGroupSaving || savingGroup !== null}
+                        onChange={(event) =>
+                          void bulkUpdateGroupPolicies(
+                            primarySource,
+                            [group.providerGroup],
+                            { enabled: event.target.checked },
+                          )
+                        }
+                      />
+                      {group.enabled ? 'Published' : 'Hidden'}
+                    </label>
+                  ) : (
+                    <span className="group-action-spacer" />
+                  )}
                   {group.behavior === 'event' ? (
                     <button
                       className="secondary-button compact"
@@ -2209,7 +2391,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   <button
                     className="secondary-button compact"
                     type="button"
-                    disabled={savingGroup !== null}
+                    disabled={savingGroup !== null || bulkGroupSaving}
                     onClick={() =>
                       void setGroupBehavior(
                         primarySource,
