@@ -79,9 +79,11 @@ function unresolvedFrom(
 
 /**
  * Matches playlist channels against the shared guide pool. Manual locks
- * resolve inside their recorded guide; automatic matching stays inside the
- * provider's own guide so a shared pool cannot turn today's unique matches
- * ambiguous. Cross-guide coverage is reached through manual mapping.
+ * resolve inside their recorded guide. Automatic matching walks a priority
+ * ladder — own-guide tvg-id, unique tvg-id across all guides, own-guide
+ * name, unique name across all guides — so the provider's own guide always
+ * wins before the pool widens coverage, and no own-guide match can be stolen
+ * by adding more guides.
  */
 export function reconcileEpgMappings(
   channels: readonly EpgPlaylistChannel[],
@@ -91,12 +93,20 @@ export function reconcileEpgMappings(
   const exactIndex = new Map<string, EpgGuideChannel[]>();
   const ownIdIndex = new Map<string, EpgGuideChannel[]>();
   const ownNameIndex = new Map<string, EpgGuideChannel[]>();
+  const allIdIndex = new Map<string, EpgGuideChannel[]>();
+  const allNameIndex = new Map<string, EpgGuideChannel[]>();
   for (const guideChannel of guideChannels) {
     addToIndex(
       exactIndex,
       guideChannel.epgSourceId +
         GUIDE_KEY_SEPARATOR +
         normalized(guideChannel.id),
+      guideChannel,
+    );
+    addToIndex(allIdIndex, normalized(guideChannel.id), guideChannel);
+    addToIndex(
+      allNameIndex,
+      normalized(guideChannel.displayName),
       guideChannel,
     );
     if (guideChannel.ownGuide) {
@@ -141,6 +151,8 @@ export function reconcileEpgMappings(
       continue;
     }
 
+    // Priority ladder: own-guide tvg-id, unique tvg-id across all guides,
+    // own-guide name, unique name across all guides.
     const idCandidates = channel.tvgId
       ? (ownIdIndex.get(normalized(channel.tvgId)) ?? [])
       : [];
@@ -158,6 +170,23 @@ export function reconcileEpgMappings(
       continue;
     }
 
+    const poolIdCandidates = channel.tvgId
+      ? (allIdIndex.get(normalized(channel.tvgId)) ?? [])
+      : [];
+    if (poolIdCandidates.length === 1 && poolIdCandidates[0]) {
+      matches.push({
+        channelId: channel.id,
+        epgChannel: poolIdCandidates[0],
+        confidence: 0.95,
+        manuallyLocked: false,
+      });
+      continue;
+    }
+    if (poolIdCandidates.length > 1) {
+      unresolved.push(unresolvedFrom(channel.id, poolIdCandidates));
+      continue;
+    }
+
     const nameCandidates =
       ownNameIndex.get(normalized(channel.displayName)) ?? [];
     if (nameCandidates.length === 1 && nameCandidates[0]) {
@@ -169,7 +198,23 @@ export function reconcileEpgMappings(
       });
       continue;
     }
-    unresolved.push(unresolvedFrom(channel.id, nameCandidates));
+    if (nameCandidates.length > 1) {
+      unresolved.push(unresolvedFrom(channel.id, nameCandidates));
+      continue;
+    }
+
+    const poolNameCandidates =
+      allNameIndex.get(normalized(channel.displayName)) ?? [];
+    if (poolNameCandidates.length === 1 && poolNameCandidates[0]) {
+      matches.push({
+        channelId: channel.id,
+        epgChannel: poolNameCandidates[0],
+        confidence: 0.8,
+        manuallyLocked: false,
+      });
+      continue;
+    }
+    unresolved.push(unresolvedFrom(channel.id, poolNameCandidates));
   }
 
   return { matches, unresolved };

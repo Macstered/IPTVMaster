@@ -88,7 +88,7 @@ describe('EPG reconciliation', () => {
     ]);
   });
 
-  it('does not auto-match against other guides in the pool', () => {
+  it('falls back to a unique tvg-id from another guide in the pool', () => {
     const result = reconcileEpgMappings(
       [
         {
@@ -101,9 +101,69 @@ describe('EPG reconciliation', () => {
       [customGuideChannel('bbc1.uk', 'BBC One')],
     );
 
+    expect(result.matches).toEqual([
+      expect.objectContaining({
+        channelId: 'channel-1',
+        confidence: 0.95,
+        epgChannel: expect.objectContaining({ epgSourceId: 'guide-custom' }),
+      }),
+    ]);
+  });
+
+  it('prefers the own guide over the pool and never steals its matches', () => {
+    const result = reconcileEpgMappings(
+      [
+        {
+          id: 'channel-1',
+          tvgId: 'bbc1.uk',
+          displayName: 'BBC One',
+          providerGroup: 'UK',
+        },
+      ],
+      [
+        ownGuideChannel('bbc1.uk', 'BBC One'),
+        customGuideChannel('bbc1.uk', 'BBC One (Alt)'),
+      ],
+    );
+
+    expect(result.matches).toEqual([
+      expect.objectContaining({
+        channelId: 'channel-1',
+        confidence: 1,
+        epgChannel: expect.objectContaining({ epgSourceId: 'guide-own' }),
+      }),
+    ]);
+  });
+
+  it('reports pool-wide duplicates as ambiguous with their guides', () => {
+    const result = reconcileEpgMappings(
+      [
+        {
+          id: 'channel-1',
+          tvgId: null,
+          displayName: 'Discovery',
+          providerGroup: 'Docs',
+        },
+      ],
+      [
+        customGuideChannel('disc.fi', 'Discovery'),
+        {
+          id: 'disc.uk',
+          displayName: 'Discovery',
+          epgSourceId: 'guide-custom-2',
+          epgSourceName: 'Second guide',
+          ownGuide: false,
+        },
+      ],
+    );
+
     expect(result.matches).toHaveLength(0);
     expect(result.unresolved).toEqual([
-      expect.objectContaining({ channelId: 'channel-1', status: 'missing' }),
+      expect.objectContaining({
+        channelId: 'channel-1',
+        status: 'ambiguous',
+        candidateIds: ['disc.fi', 'disc.uk'],
+      }),
     ]);
   });
 
