@@ -259,6 +259,55 @@ Size: M.
 
 ---
 
+## Phase 7 — shared EPG pool and custom guide imports (planned 2026-08-06)
+
+Goal: import standalone XMLTV guides that belong to no provider, and let every
+provider's channels map against every imported guide instead of only their own.
+
+Current constraint: guide data (`epg_channel`, `epg_programme`,
+`epg_snapshot_state`) is keyed by provider `source_id`, the one optional XMLTV
+URL lives inside the provider's encrypted credentials, and reconciliation only
+searches the owning provider's guide.
+
+Design: promote guides to first-class **EPG sources**.
+
+- 7.1 Migration `015_epg_sources.sql` (additive, forward-only): new `epg_source`
+  table (`kind` = provider|custom, `owner_source_id` for provider guides,
+  `credential_ref` for custom guides' encrypted URLs, `enabled`). Backfill one
+  provider-kind row per source that has guide data; add `epg_source_id` to
+  `epg_channel` (backfilled; kept nullable at the DB level so the previous
+  release stays rollback-compatible, enforced in code) with
+  `UNIQUE (epg_source_id, upstream_id)`; add `epg_source_id` to `epg_mapping`
+  (backfilled) because upstream ids like `bbc1.uk` may exist in several guides;
+  rekey `epg_snapshot_state` per guide. Provider guides keep their URL inside
+  provider credentials (no credential migration); missing provider rows are
+  created lazily at import time. Custom guides store their URL through the
+  existing encrypted `secret_value` mechanism.
+- 7.2 Import/refresh: XMLTV import pipeline and the EPG scheduler iterate
+  `epg_source` rows (custom ones included) with the same bounded downloads,
+  unchanged-feed detection, transactional replacement, and non-overlap
+  coordination, now keyed per guide.
+- 7.3 API/UI for custom guides: CRUD + import-now on an "EPG sources" panel on
+  Overview (name + URL entered once, encrypted, never shown again — same
+  contract as provider connections), last-sync lines on the status board and in
+  `system/status`.
+- 7.4 Cross-guide manual mapping: the EPG picker searches all enabled guides,
+  every option/candidate/matched note carries a guide badge, manual locks store
+  (guide, upstream id). Combined XMLTV outputs namespace ids per guide, not per
+  provider, so identical upstream ids cannot collide.
+- 7.5 Cross-guide auto-matching with a conservative priority ladder so no
+  existing match regresses: manual lock, then exact tvg-id in the provider's
+  own guide, then unique tvg-id across all guides, then unique normalized name
+  in the own guide, then unique normalized name across all guides; otherwise
+  missing/ambiguous with candidates drawn from all guides.
+- 7.6 Optional polish: per-provider guide priority ordering, per-guide health
+  cards, bulk re-map tooling.
+
+Delivery order: 7.1–7.4 first (custom guides + cross-provider mapping usable
+manually), 7.5 second (automatic coverage), 7.6 as needed. The migration gets
+rehearsed on the fixture stack with pre-existing guide data before touching the
+LAN instance.
+
 ## Appendix A — local verification stack
 
 Reproducible recipe (used for the 2026-08-05 review):
