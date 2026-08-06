@@ -9,11 +9,15 @@ export interface EpgPlaylistChannel {
 export interface EpgGuideChannel {
   id: string;
   displayName: string;
+  epgSourceId: string;
+  epgSourceName: string;
+  ownGuide: boolean;
 }
 
 export interface LockedEpgMapping {
   channelId: string;
   epgChannelId: string;
+  epgSourceId: string;
 }
 
 export interface EpgMappingMatch {
@@ -26,14 +30,18 @@ export interface EpgMappingMatch {
 export interface UnresolvedEpgMapping {
   channelId: string;
   status: 'missing' | 'ambiguous';
+  candidates: EpgGuideChannel[];
   candidateIds: string[];
   lockedEpgChannelId?: string;
+  lockedEpgSourceId?: string;
 }
 
 export interface EpgReconciliation {
   matches: EpgMappingMatch[];
   unresolved: UnresolvedEpgMapping[];
 }
+
+const GUIDE_KEY_SEPARATOR = ' ';
 
 function normalized(value: string): string {
   return value
@@ -48,26 +56,57 @@ function normalized(value: string): string {
 
 function addToIndex(
   index: Map<string, EpgGuideChannel[]>,
-  value: string,
+  key: string,
   channel: EpgGuideChannel,
 ): void {
-  const key = normalized(value);
   if (!key) return;
   const existing = index.get(key);
   if (existing) existing.push(channel);
   else index.set(key, [channel]);
 }
 
+function unresolvedFrom(
+  channelId: string,
+  candidates: EpgGuideChannel[],
+): UnresolvedEpgMapping {
+  return {
+    channelId,
+    status: candidates.length > 1 ? 'ambiguous' : 'missing',
+    candidates,
+    candidateIds: candidates.map((candidate) => candidate.id),
+  };
+}
+
+/**
+ * Matches playlist channels against the shared guide pool. Manual locks
+ * resolve inside their recorded guide; automatic matching stays inside the
+ * provider's own guide so a shared pool cannot turn today's unique matches
+ * ambiguous. Cross-guide coverage is reached through manual mapping.
+ */
 export function reconcileEpgMappings(
   channels: readonly EpgPlaylistChannel[],
   guideChannels: readonly EpgGuideChannel[],
   lockedMappings: readonly LockedEpgMapping[] = [],
 ): EpgReconciliation {
-  const idIndex = new Map<string, EpgGuideChannel[]>();
-  const nameIndex = new Map<string, EpgGuideChannel[]>();
+  const exactIndex = new Map<string, EpgGuideChannel[]>();
+  const ownIdIndex = new Map<string, EpgGuideChannel[]>();
+  const ownNameIndex = new Map<string, EpgGuideChannel[]>();
   for (const guideChannel of guideChannels) {
-    addToIndex(idIndex, guideChannel.id, guideChannel);
-    addToIndex(nameIndex, guideChannel.displayName, guideChannel);
+    addToIndex(
+      exactIndex,
+      guideChannel.epgSourceId +
+        GUIDE_KEY_SEPARATOR +
+        normalized(guideChannel.id),
+      guideChannel,
+    );
+    if (guideChannel.ownGuide) {
+      addToIndex(ownIdIndex, normalized(guideChannel.id), guideChannel);
+      addToIndex(
+        ownNameIndex,
+        normalized(guideChannel.displayName),
+        guideChannel,
+      );
+    }
   }
   const lockedByChannel = new Map(
     lockedMappings.map((mapping) => [mapping.channelId, mapping]),
@@ -78,7 +117,12 @@ export function reconcileEpgMappings(
   for (const channel of channels) {
     const locked = lockedByChannel.get(channel.id);
     if (locked) {
-      const candidates = idIndex.get(normalized(locked.epgChannelId)) ?? [];
+      const candidates =
+        exactIndex.get(
+          locked.epgSourceId +
+            GUIDE_KEY_SEPARATOR +
+            normalized(locked.epgChannelId),
+        ) ?? [];
       const selected = candidates[0];
       if (selected && candidates.length === 1) {
         matches.push({
@@ -89,17 +133,16 @@ export function reconcileEpgMappings(
         });
       } else {
         unresolved.push({
-          channelId: channel.id,
-          status: candidates.length > 1 ? 'ambiguous' : 'missing',
-          candidateIds: candidates.map((candidate) => candidate.id),
+          ...unresolvedFrom(channel.id, candidates),
           lockedEpgChannelId: locked.epgChannelId,
+          lockedEpgSourceId: locked.epgSourceId,
         });
       }
       continue;
     }
 
     const idCandidates = channel.tvgId
-      ? (idIndex.get(normalized(channel.tvgId)) ?? [])
+      ? (ownIdIndex.get(normalized(channel.tvgId)) ?? [])
       : [];
     if (idCandidates.length === 1 && idCandidates[0]) {
       matches.push({
@@ -111,15 +154,12 @@ export function reconcileEpgMappings(
       continue;
     }
     if (idCandidates.length > 1) {
-      unresolved.push({
-        channelId: channel.id,
-        status: 'ambiguous',
-        candidateIds: idCandidates.map((candidate) => candidate.id),
-      });
+      unresolved.push(unresolvedFrom(channel.id, idCandidates));
       continue;
     }
 
-    const nameCandidates = nameIndex.get(normalized(channel.displayName)) ?? [];
+    const nameCandidates =
+      ownNameIndex.get(normalized(channel.displayName)) ?? [];
     if (nameCandidates.length === 1 && nameCandidates[0]) {
       matches.push({
         channelId: channel.id,
@@ -129,11 +169,7 @@ export function reconcileEpgMappings(
       });
       continue;
     }
-    unresolved.push({
-      channelId: channel.id,
-      status: nameCandidates.length > 1 ? 'ambiguous' : 'missing',
-      candidateIds: nameCandidates.map((candidate) => candidate.id),
-    });
+    unresolved.push(unresolvedFrom(channel.id, nameCandidates));
   }
 
   return { matches, unresolved };

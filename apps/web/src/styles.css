@@ -3040,6 +3040,79 @@ strong {
 .permanent-group-actions.collapsed .permanent-group-name-form {
   grid-column: auto;
 }
+.epg-sources-panel {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.epg-source-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 13px;
+}
+.epg-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-inset);
+}
+.epg-source-main {
+  min-width: 0;
+}
+.epg-source-main strong,
+.epg-source-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.epg-source-main strong {
+  color: var(--text-bright);
+  font-size: 13px;
+}
+.epg-source-main small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.epg-source-main .epg-source-error {
+  color: var(--warn);
+}
+.epg-source-confirm {
+  grid-column: 1 / -1;
+}
+.epg-source-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(220px, 1.4fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 13px;
+}
+.epg-source-form > div {
+  display: grid;
+  gap: 6px;
+}
+.epg-source-form label,
+.epg-source-form input,
+.epg-source-form button {
+  grid-column: auto;
+  grid-row: auto;
+}
+@media (max-width: 650px) {
+  .epg-source-form {
+    grid-template-columns: 1fr;
+  }
+  .epg-source-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .epg-source-row button {
+    grid-column: auto;
+  }
+}
 .copy-row {
   display: flex;
   gap: 7px;

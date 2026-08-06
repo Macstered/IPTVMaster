@@ -268,6 +268,12 @@ const epgChannelSearchSchema = z.object({
 
 const manualEpgMappingSchema = z.object({
   epgChannelId: z.string().trim().min(1).max(500),
+  epgSourceId: z.uuid().optional(),
+});
+
+const epgSourceCreateSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  url: z.url().max(4_000),
 });
 
 const administratorUsernameSchema = z
@@ -1185,6 +1191,104 @@ export async function buildApp(
     },
   );
 
+  app.get('/api/v1/epg-sources', async (_request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    return { epgSources: await sourceRepository.listEpgSources() };
+  });
+
+  app.post('/api/v1/epg-sources', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const parsed = epgSourceCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: validationMessage(parsed.error) });
+    }
+    if (!['http:', 'https:'].includes(new URL(parsed.data.url).protocol)) {
+      return reply.code(400).send({ error: 'EPG URL must use HTTP or HTTPS' });
+    }
+    const epgSource = await sourceRepository.createCustomEpgSource(
+      parsed.data.name,
+      parsed.data.url,
+    );
+    return reply.code(201).send({ epgSource });
+  });
+
+  app.post<{ Params: { epgSourceId: string } }>(
+    '/api/v1/epg-sources/:epgSourceId/import',
+    async (request, reply) => {
+      if (!sourceRepository || !epgRefreshCoordinator) {
+        return reply
+          .code(503)
+          .send({ error: 'EPG persistence is not configured' });
+      }
+      const epgSourceId = z.uuid().safeParse(request.params.epgSourceId);
+      if (!epgSourceId.success) {
+        return reply.code(400).send({ error: 'epgSourceId must be a UUID' });
+      }
+      try {
+        const result = await epgRefreshCoordinator.refreshEpgSource(
+          epgSourceId.data,
+        );
+        if (result.status === 'already-running') {
+          return reply.code(202).send({
+            status: result.status,
+            startedAt: result.startedAt,
+          });
+        }
+        const { inspection, summary } = result;
+        if (!inspection || !summary) {
+          throw new Error('Completed EPG refresh is missing its result');
+        }
+        return reply.code(summary.unchanged ? 200 : 201).send({
+          summary,
+          inspection: {
+            fingerprint: inspection.fingerprint,
+            totalBytes: inspection.totalBytes,
+            channelCount: inspection.channels.length,
+            programmeCount: inspection.programmes.length,
+            issueCount: inspection.issues.length,
+            issuesTruncated: inspection.issuesTruncated,
+          },
+        });
+      } catch (error) {
+        if (error instanceof EpgNotConfiguredError) {
+          return reply.code(404).send({ error: error.message });
+        }
+        if (error instanceof SnapshotRejectedError) {
+          return reply.code(422).send({ error: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete<{ Params: { epgSourceId: string } }>(
+    '/api/v1/epg-sources/:epgSourceId',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const epgSourceId = z.uuid().safeParse(request.params.epgSourceId);
+      if (!epgSourceId.success) {
+        return reply.code(400).send({ error: 'epgSourceId must be a UUID' });
+      }
+      const removed = await sourceRepository.removeEpgSource(epgSourceId.data);
+      if (!removed) {
+        return reply.code(404).send({ error: 'Custom EPG source not found' });
+      }
+      return reply.code(204).send();
+    },
+  );
+
   app.put<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/group-policies',
     async (request, reply) => {
@@ -1819,6 +1923,7 @@ export async function buildApp(
         sourceId.data,
         channelId.data,
         mapping.data.epgChannelId,
+        mapping.data.epgSourceId,
       );
       if (!saved) {
         return reply

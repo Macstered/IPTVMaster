@@ -24,6 +24,8 @@ interface EpgGuideChannelSummary {
   id: string;
   displayName: string;
   iconUrl?: string;
+  epgSourceId?: string;
+  epgSourceName?: string;
 }
 
 interface EpgMappingReviewItem {
@@ -41,6 +43,8 @@ interface EpgMappingReviewItem {
   separatorLike?: boolean;
   eventLike?: boolean;
   logoUrl?: string;
+  epgSourceId?: string;
+  epgSourceName?: string;
 }
 
 interface EpgMappingReview {
@@ -190,7 +194,10 @@ function EpgChannelPicker({
               <ChannelLogo url={option.iconUrl} name={option.displayName} />
               <div>
                 <strong>{option.displayName}</strong>
-                <small>{option.id}</small>
+                <small>
+                  {option.id}
+                  {option.epgSourceName ? ` · ${option.epgSourceName}` : ''}
+                </small>
               </div>
             </li>
           ))}
@@ -270,7 +277,11 @@ export function EpgWorkspace({
     }
   }
 
-  async function saveMapping(channelId: string, epgChannelId: string) {
+  async function saveMapping(
+    channelId: string,
+    epgChannelId: string,
+    epgSourceId?: string,
+  ) {
     if (!sourceId) return;
     setSavingChannel(channelId);
     await runMutation(async () => {
@@ -279,7 +290,10 @@ export function EpgWorkspace({
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ epgChannelId }),
+          body: JSON.stringify({
+            epgChannelId,
+            ...(epgSourceId ? { epgSourceId } : {}),
+          }),
         },
       );
       await readJson<{ saved: boolean }>(response);
@@ -460,6 +474,7 @@ export function EpgWorkspace({
                 <div className="epg-mapping-control epg-matched-control">
                   <small className="epg-mapping-note matched">
                     {mapping.epgDisplayName} · {mapping.epgChannelId}
+                    {mapping.epgSourceName ? ` · ${mapping.epgSourceName}` : ''}
                   </small>
                   <button
                     className="secondary-button compact"
@@ -482,11 +497,20 @@ export function EpgWorkspace({
                           disabled={busy}
                           title={`Lock ${mapping.channelName} to ${candidate.displayName}`}
                           onClick={() =>
-                            void saveMapping(mapping.channelId, candidate.id)
+                            void saveMapping(
+                              mapping.channelId,
+                              candidate.id,
+                              candidate.epgSourceId,
+                            )
                           }
                         >
                           <strong>{candidate.displayName}</strong>
-                          <small>{candidate.id}</small>
+                          <small>
+                            {candidate.id}
+                            {candidate.epgSourceName
+                              ? ` · ${candidate.epgSourceName}`
+                              : ''}
+                          </small>
                         </button>
                       ))}
                     </div>
@@ -497,7 +521,11 @@ export function EpgWorkspace({
                       disabled={busy && !isSaving}
                       placeholder={isSaving ? 'Saving…' : 'Search XMLTV guide…'}
                       onPick={(channel) =>
-                        void saveMapping(mapping.channelId, channel.id)
+                        void saveMapping(
+                          mapping.channelId,
+                          channel.id,
+                          channel.epgSourceId,
+                        )
                       }
                     />
                   ) : null}

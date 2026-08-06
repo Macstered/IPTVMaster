@@ -69,6 +69,142 @@ class MemorySourceRepository implements SourceRepository {
   activity: SourceActivityEvent[] = [];
   snapshotEntries = new Map<string, M3uEntry[]>();
   epgMappings = new Map<string, string>();
+  readonly epgMappingSources = new Map<string, string | undefined>();
+  customEpgSources: Array<{
+    id: string;
+    name: string;
+    url: string;
+    enabled: boolean;
+  }> = [];
+  readonly customGuides = new Map<
+    string,
+    {
+      channels: Array<{ id: string; displayName: string }>;
+      programmeCount: number;
+    }
+  >();
+  #epgSourceSequence = 0;
+
+  #allGuideChannels(sourceName: string) {
+    const own = this.latestEpg.channels.map((channel) => ({
+      id: channel.id,
+      displayName: channel.displayName,
+      epgSourceId: 'epg-provider-1',
+      epgSourceName: `${sourceName} guide`,
+      ownGuide: true,
+    }));
+    const custom = this.customEpgSources.flatMap((epgSource) =>
+      (this.customGuides.get(epgSource.id)?.channels ?? []).map((channel) => ({
+        id: channel.id,
+        displayName: channel.displayName,
+        epgSourceId: epgSource.id,
+        epgSourceName: epgSource.name,
+        ownGuide: false,
+      })),
+    );
+    return [...own, ...custom];
+  }
+
+  async listEpgSources() {
+    const providerEntries =
+      this.latestEpg.channels.length > 0 && this.sources[0]
+        ? [
+            {
+              id: 'epg-provider-1',
+              kind: 'provider' as const,
+              name: `${this.sources[0].name} guide`,
+              ownerSourceId: this.sources[0].id,
+              enabled: true,
+              channelCount: this.latestEpg.channels.length,
+              programmeCount: this.latestEpg.programmes.length,
+            },
+          ]
+        : [];
+    return [
+      ...providerEntries,
+      ...this.customEpgSources.map((epgSource) => ({
+        id: epgSource.id,
+        kind: 'custom' as const,
+        name: epgSource.name,
+        enabled: epgSource.enabled,
+        channelCount: this.customGuides.get(epgSource.id)?.channels.length ?? 0,
+        programmeCount:
+          this.customGuides.get(epgSource.id)?.programmeCount ?? 0,
+      })),
+    ];
+  }
+
+  async createCustomEpgSource(name: string, url: string) {
+    this.#epgSourceSequence += 1;
+    const epgSource = {
+      id: `00000000-0000-4000-8000-00000000e${String(
+        this.#epgSourceSequence,
+      ).padStart(3, '0')}`,
+      name,
+      url,
+      enabled: true,
+    };
+    this.customEpgSources.push(epgSource);
+    return {
+      id: epgSource.id,
+      kind: 'custom' as const,
+      name,
+      enabled: true,
+      channelCount: 0,
+      programmeCount: 0,
+    };
+  }
+
+  async removeEpgSource(epgSourceId: string) {
+    const index = this.customEpgSources.findIndex(
+      (epgSource) => epgSource.id === epgSourceId,
+    );
+    if (index < 0) return false;
+    this.customEpgSources.splice(index, 1);
+    this.customGuides.delete(epgSourceId);
+    for (const [channelId, mappedSource] of this.epgMappingSources) {
+      if (mappedSource === epgSourceId) {
+        this.epgMappings.delete(channelId);
+        this.epgMappingSources.delete(channelId);
+      }
+    }
+    return true;
+  }
+
+  async getEpgSourceRefreshTarget(epgSourceId: string) {
+    const custom = this.customEpgSources.find(
+      (epgSource) => epgSource.id === epgSourceId,
+    );
+    if (!custom) return null;
+    return {
+      id: custom.id,
+      kind: 'custom' as const,
+      name: custom.name,
+      epgUrl: custom.url,
+    };
+  }
+
+  async saveEpgSnapshotForEpgSource(
+    epgSourceId: string,
+    inspection: XmltvInspection,
+  ) {
+    this.customGuides.set(epgSourceId, {
+      channels: inspection.channels.map((channel) => ({
+        id: channel.id,
+        displayName: channel.displayName,
+      })),
+      programmeCount: inspection.programmes.length,
+    });
+    return {
+      sourceId: epgSourceId,
+      fingerprint: inspection.fingerprint,
+      importedAt: '2026-08-06T00:00:00.000Z',
+      channelCount: inspection.channels.length,
+      programmeCount: inspection.programmes.length,
+      issueCount: inspection.issues.length,
+      unchanged: false,
+    };
+  }
   readonly customCategories = new Map<string, Set<string>>();
   readonly outputGroupOrders = new Map<string, string[]>();
   readonly outputCategoryOrders = new Map<string, string[]>();
@@ -1049,10 +1185,20 @@ class MemorySourceRepository implements SourceRepository {
       )
       .map((channel) => {
         const manualId = this.epgMappings.get(channel.id);
-        const candidates = this.latestEpg.channels.filter(
+        const manualSource = this.epgMappingSources.get(channel.id);
+        const pool = this.#allGuideChannels(
+          this.sources.find((source) => source.id === sourceId)?.name ??
+            this.sources[0]?.name ??
+            'Provider',
+        );
+        const candidates = pool.filter(
           (guide) =>
-            (manualId && guide.id === manualId) ||
+            (manualId &&
+              guide.id === manualId &&
+              (manualSource === undefined ||
+                guide.epgSourceId === manualSource)) ||
             (!manualId &&
+              guide.ownGuide &&
               ((channel.tvgId && guide.id === channel.tvgId) ||
                 guide.displayName.toLocaleLowerCase() ===
                   channel.providerName
@@ -1076,6 +1222,8 @@ class MemorySourceRepository implements SourceRepository {
                 epgChannelId: selected.id,
                 epgDisplayName: selected.displayName,
                 confidence: manualId || channel.tvgId ? 1 : 0.85,
+                epgSourceId: selected.epgSourceId,
+                epgSourceName: selected.epgSourceName,
               }
             : manualId
               ? { epgChannelId: manualId }
@@ -1113,13 +1261,21 @@ class MemorySourceRepository implements SourceRepository {
     limit: number,
   ) {
     const normalizedSearch = search?.toLocaleLowerCase() ?? '';
-    const channels = this.latestEpg.channels.filter(
-      (channel) =>
-        !normalizedSearch ||
-        [channel.id, channel.displayName].some((value) =>
-          value.toLocaleLowerCase().includes(normalizedSearch),
-        ),
-    );
+    const pool = this.#allGuideChannels(this.sources[0]?.name ?? 'Provider');
+    const channels = pool
+      .filter(
+        (channel) =>
+          !normalizedSearch ||
+          [channel.id, channel.displayName, channel.epgSourceName].some(
+            (value) => value.toLocaleLowerCase().includes(normalizedSearch),
+          ),
+      )
+      .map((channel) => ({
+        id: channel.id,
+        displayName: channel.displayName,
+        epgSourceId: channel.epgSourceId,
+        epgSourceName: channel.epgSourceName,
+      }));
     return {
       channels: channels.slice(0, limit),
       total: channels.length,
@@ -1131,15 +1287,22 @@ class MemorySourceRepository implements SourceRepository {
     sourceId: string,
     channelId: string,
     epgChannelId: string,
+    epgSourceId?: string,
   ): Promise<boolean> {
+    const pool = this.#allGuideChannels(this.sources[0]?.name ?? 'Provider');
     if (
       !this.channels.some(
         (channel) => channel.sourceId === sourceId && channel.id === channelId,
       ) ||
-      !this.latestEpg.channels.some((channel) => channel.id === epgChannelId)
+      !pool.some(
+        (guide) =>
+          guide.id === epgChannelId &&
+          (epgSourceId === undefined || guide.epgSourceId === epgSourceId),
+      )
     ) {
       return false;
     }
+    this.epgMappingSources.set(channelId, epgSourceId);
     this.epgMappings.set(channelId, epgChannelId);
     return true;
   }
@@ -2187,6 +2350,123 @@ describe('IPTVMaster API', () => {
     expect(includeResponse.json().channel.epgExcluded).toBeUndefined();
     expect(restoredReview.json()).toEqual(
       expect.objectContaining({ excludedCount: 0, total: 2 }),
+    );
+  });
+
+  it('imports a custom EPG source and maps channels across guides', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/list' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    const channelId = '00000000-0000-4000-8000-000000000041';
+    repository.channels = [
+      {
+        id: channelId,
+        sourceId: source.id,
+        providerName: 'UK: ITV1 FHD',
+        providerGroup: 'UK',
+        enabled: true,
+        sortOrder: 1,
+        matchLocked: false,
+        reconciliationStatus: 'matched',
+        updatedAt: '2026-08-06T00:00:00.000Z',
+      },
+    ];
+    const app = await buildApp({
+      sourceRepository: repository,
+      epgInspector: async () => ({
+        fingerprint: 'a'.repeat(64),
+        totalBytes: 500,
+        channels: [{ id: 'itv1.uk', displayName: 'ITV 1' }],
+        programmes: [
+          {
+            channelId: 'itv1.uk',
+            start: '2026-08-06T18:00:00.000Z',
+            stop: '2026-08-06T19:00:00.000Z',
+            title: 'Evening News',
+          },
+        ],
+        issues: [],
+        issuesTruncated: false,
+      }),
+    });
+    applications.push(app);
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/epg-sources',
+      payload: { name: 'UK guide', url: 'http://guides.test/uk.xml' },
+    });
+    expect(createResponse.statusCode).toBe(201);
+    const epgSourceId = createResponse.json().epgSource.id as string;
+
+    const importResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/epg-sources/${epgSourceId}/import`,
+    });
+    expect(importResponse.statusCode).toBe(201);
+    expect(importResponse.json().summary.channelCount).toBe(1);
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/v1/epg-sources',
+    });
+    expect(listResponse.json().epgSources).toContainEqual(
+      expect.objectContaining({
+        id: epgSourceId,
+        kind: 'custom',
+        name: 'UK guide',
+        channelCount: 1,
+      }),
+    );
+
+    const searchResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-channels?search=itv`,
+    });
+    expect(searchResponse.json().channels).toContainEqual(
+      expect.objectContaining({
+        id: 'itv1.uk',
+        epgSourceId,
+        epgSourceName: 'UK guide',
+      }),
+    );
+
+    const mapResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/sources/${source.id}/channels/${channelId}/epg-mapping`,
+      payload: { epgChannelId: 'itv1.uk', epgSourceId },
+    });
+    expect(mapResponse.statusCode).toBe(200);
+
+    const reviewResponse = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    expect(reviewResponse.json().mappings).toContainEqual(
+      expect.objectContaining({
+        channelId,
+        status: 'matched',
+        manuallyLocked: true,
+        epgSourceName: 'UK guide',
+      }),
+    );
+
+    const removeResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/epg-sources/${epgSourceId}`,
+    });
+    expect(removeResponse.statusCode).toBe(204);
+    const reviewAfterRemove = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings`,
+    });
+    expect(reviewAfterRemove.json().mappings).toContainEqual(
+      expect.objectContaining({ channelId, status: 'missing' }),
     );
   });
 

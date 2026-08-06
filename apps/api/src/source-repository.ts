@@ -285,6 +285,30 @@ export interface EpgGuideChannelSummary {
   id: string;
   displayName: string;
   iconUrl?: string;
+  epgSourceId?: string;
+  epgSourceName?: string;
+}
+
+export type EpgSourceKind = 'provider' | 'custom';
+
+export interface EpgSourceSummary {
+  id: string;
+  kind: EpgSourceKind;
+  name: string;
+  ownerSourceId?: string;
+  enabled: boolean;
+  channelCount: number;
+  programmeCount: number;
+  importedAt?: string;
+  lastError?: string;
+}
+
+export interface EpgSourceRefreshTarget {
+  id: string;
+  kind: EpgSourceKind;
+  name: string;
+  ownerSourceId?: string;
+  epgUrl?: string;
 }
 
 export interface EpgMappingReviewItem {
@@ -302,6 +326,8 @@ export interface EpgMappingReviewItem {
   separatorLike?: boolean;
   eventLike?: boolean;
   logoUrl?: string;
+  epgSourceId?: string;
+  epgSourceName?: string;
 }
 
 export interface EpgMappingReview {
@@ -498,7 +524,21 @@ export interface SourceRepository {
     sourceId: string,
     channelId: string,
     epgChannelId: string,
+    epgSourceId?: string,
   ): Promise<boolean>;
+  listEpgSources(): Promise<EpgSourceSummary[]>;
+  createCustomEpgSource(
+    name: string,
+    epgUrl: string,
+  ): Promise<EpgSourceSummary>;
+  removeEpgSource(epgSourceId: string): Promise<boolean>;
+  getEpgSourceRefreshTarget(
+    epgSourceId: string,
+  ): Promise<EpgSourceRefreshTarget | null>;
+  saveEpgSnapshotForEpgSource(
+    epgSourceId: string,
+    inspection: XmltvInspection,
+  ): Promise<StoredEpgSummary>;
   unlockEpgMapping(sourceId: string, channelId: string): Promise<boolean>;
   listOutputGroupPolicies(
     sourceId: string,
@@ -625,6 +665,7 @@ interface StoredEntryRow {
   custom_logo_url: string | null;
   sort_order: number | null;
   epg_channel_upstream_id: string | null;
+  mapping_epg_source_id: string | null;
   group_sort_order: number | null;
 }
 
@@ -889,6 +930,10 @@ function toChannelSummary(row: ChannelRow): ChannelSummary {
 
 function accessTokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex');
+}
+
+export function guideScopedId(epgSourceId: string, upstreamId: string): string {
+  return `g${epgSourceId.replaceAll('-', '').slice(0, 10)}.${upstreamId}`;
 }
 
 function toEpgSummary(row: EpgStateRow, unchanged: boolean): StoredEpgSummary {
@@ -1449,6 +1494,7 @@ export class PostgresSourceRepository implements SourceRepository {
       `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata,
               c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order,
               mapping.epg_channel_upstream_id,
+              mapping.epg_source_id AS mapping_epg_source_id,
               group_order.sort_order AS group_sort_order
        FROM source_snapshot s
        JOIN upstream_item i ON i.snapshot_id = s.id
@@ -1486,8 +1532,11 @@ export class PostgresSourceRepository implements SourceRepository {
       if (row.custom_name) attributes['tvg-name'] = row.custom_name;
       if (row.custom_group) attributes['group-title'] = row.custom_group;
       if (row.custom_logo_url) attributes['tvg-logo'] = row.custom_logo_url;
-      if (row.epg_channel_upstream_id) {
-        attributes['tvg-id'] = row.epg_channel_upstream_id;
+      if (row.epg_channel_upstream_id && row.mapping_epg_source_id) {
+        attributes['tvg-id'] = guideScopedId(
+          row.mapping_epg_source_id,
+          row.epg_channel_upstream_id,
+        );
       }
       return {
         duration: row.metadata.duration ?? null,
@@ -1504,25 +1553,56 @@ export class PostgresSourceRepository implements SourceRepository {
     sourceId: string,
     inspection: XmltvInspection,
   ): Promise<StoredEpgSummary> {
+    const epgSourceId = await this.#ensureProviderEpgSource(sourceId);
+    return this.#saveGuideSnapshot(epgSourceId, sourceId, inspection);
+  }
+
+  async saveEpgSnapshotForEpgSource(
+    epgSourceId: string,
+    inspection: XmltvInspection,
+  ): Promise<StoredEpgSummary> {
+    return this.#saveGuideSnapshot(epgSourceId, null, inspection);
+  }
+
+  async #ensureProviderEpgSource(sourceId: string): Promise<string> {
+    const result = await this.#pool.query<{ id: string }>(
+      `INSERT INTO epg_source (kind, owner_source_id, name)
+       SELECT 'provider', s.id, s.name || ' guide'
+       FROM source s
+       WHERE s.id = $1
+       ON CONFLICT (owner_source_id) DO UPDATE SET updated_at = NOW()
+       RETURNING id`,
+      [sourceId],
+    );
+    const id = result.rows[0]?.id;
+    if (!id) throw new Error('Provider EPG source could not be ensured');
+    return id;
+  }
+
+  async #saveGuideSnapshot(
+    epgSourceId: string,
+    ownerSourceId: string | null,
+    inspection: XmltvInspection,
+  ): Promise<StoredEpgSummary> {
     const client = await this.#pool.connect();
     let syncRunId: string | undefined;
     try {
       const runResult = await client.query<{ id: string }>(
-        `INSERT INTO sync_run (source_id, sync_type, status)
-         VALUES ($1, 'epg', 'running')
+        `INSERT INTO sync_run (source_id, epg_source_id, sync_type, status)
+         VALUES ($1, $2, 'epg', 'running')
          RETURNING id`,
-        [sourceId],
+        [ownerSourceId, epgSourceId],
       );
       syncRunId = runResult.rows[0]?.id;
       if (!syncRunId)
         throw new Error('EPG sync run did not return an identifier');
 
       const existing = await client.query<EpgStateRow>(
-        `SELECT source_id, fingerprint, imported_at, channel_count,
-                programme_count, issue_count
-         FROM epg_snapshot_state
-         WHERE source_id = $1`,
-        [sourceId],
+        `SELECT epg_source_id AS source_id, fingerprint, imported_at,
+                channel_count, programme_count, issue_count
+         FROM epg_source_snapshot_state
+         WHERE epg_source_id = $1`,
+        [epgSourceId],
       );
       const previous = existing.rows[0];
       if (previous?.fingerprint === inspection.fingerprint) {
@@ -1559,8 +1639,8 @@ export class PostgresSourceRepository implements SourceRepository {
       }
 
       await client.query('BEGIN');
-      await client.query('DELETE FROM epg_channel WHERE source_id = $1', [
-        sourceId,
+      await client.query('DELETE FROM epg_channel WHERE epg_source_id = $1', [
+        epgSourceId,
       ]);
       const channelChunkSize = 2_000;
       for (
@@ -1577,14 +1657,14 @@ export class PostgresSourceRepository implements SourceRepository {
           }));
         await client.query(
           `INSERT INTO epg_channel
-            (source_id, upstream_id, display_name, icon_url)
-           SELECT $1, item.upstream_id, item.display_name, item.icon_url
-           FROM jsonb_to_recordset($2::jsonb) AS item(
+            (source_id, epg_source_id, upstream_id, display_name, icon_url)
+           SELECT $1, $2, item.upstream_id, item.display_name, item.icon_url
+           FROM jsonb_to_recordset($3::jsonb) AS item(
              upstream_id TEXT,
              display_name TEXT,
              icon_url TEXT
            )`,
-          [sourceId, JSON.stringify(values)],
+          [ownerSourceId, epgSourceId, JSON.stringify(values)],
         );
       }
 
@@ -1619,33 +1699,75 @@ export class PostgresSourceRepository implements SourceRepository {
              category TEXT
            )
            JOIN epg_channel channel
-             ON channel.source_id = $1 AND channel.upstream_id = item.channel_id`,
-          [sourceId, JSON.stringify(values)],
+             ON channel.epg_source_id = $1
+            AND channel.upstream_id = item.channel_id`,
+          [epgSourceId, JSON.stringify(values)],
         );
       }
 
-      await this.#reconcileEpgMappings(client, sourceId);
+      await client.query(
+        `UPDATE epg_mapping mapping
+         SET epg_channel_id = NULL, updated_at = NOW()
+         WHERE mapping.epg_source_id = $1 AND mapping.manually_locked = TRUE`,
+        [epgSourceId],
+      );
+      await client.query(
+        `UPDATE epg_mapping mapping
+         SET epg_channel_id = guide.id, updated_at = NOW()
+         FROM epg_channel guide
+         WHERE mapping.epg_source_id = $1
+           AND mapping.manually_locked = TRUE
+           AND guide.epg_source_id = mapping.epg_source_id
+           AND guide.upstream_id = mapping.epg_channel_upstream_id`,
+        [epgSourceId],
+      );
+
+      if (ownerSourceId) {
+        await this.#reconcileEpgMappings(client, ownerSourceId);
+      }
 
       const stateResult = await client.query<EpgStateRow>(
-        `INSERT INTO epg_snapshot_state
-          (source_id, fingerprint, channel_count, programme_count, issue_count)
+        `INSERT INTO epg_source_snapshot_state
+          (epg_source_id, fingerprint, channel_count, programme_count,
+           issue_count)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (source_id) DO UPDATE SET
+         ON CONFLICT (epg_source_id) DO UPDATE SET
            fingerprint = EXCLUDED.fingerprint,
            imported_at = NOW(),
            channel_count = EXCLUDED.channel_count,
            programme_count = EXCLUDED.programme_count,
            issue_count = EXCLUDED.issue_count
-         RETURNING source_id, fingerprint, imported_at, channel_count,
-                   programme_count, issue_count`,
+         RETURNING epg_source_id AS source_id, fingerprint, imported_at,
+                   channel_count, programme_count, issue_count`,
         [
-          sourceId,
+          epgSourceId,
           inspection.fingerprint,
           inspection.channels.length,
           inspection.programmes.length,
           inspection.issues.length,
         ],
       );
+      if (ownerSourceId) {
+        await client.query(
+          `INSERT INTO epg_snapshot_state
+            (source_id, fingerprint, channel_count, programme_count,
+             issue_count)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (source_id) DO UPDATE SET
+             fingerprint = EXCLUDED.fingerprint,
+             imported_at = NOW(),
+             channel_count = EXCLUDED.channel_count,
+             programme_count = EXCLUDED.programme_count,
+             issue_count = EXCLUDED.issue_count`,
+          [
+            ownerSourceId,
+            inspection.fingerprint,
+            inspection.channels.length,
+            inspection.programmes.length,
+            inspection.issues.length,
+          ],
+        );
+      }
       const state = stateResult.rows[0];
       if (!state) throw new Error('EPG state update did not return a row');
       const summary = toEpgSummary(state, false);
@@ -1685,17 +1807,25 @@ export class PostgresSourceRepository implements SourceRepository {
 
   async getLatestEpg(sourceId: string): Promise<StoredEpgGuide> {
     const channels = await this.#pool.query<{
+      epg_source_id: string;
       upstream_id: string;
       display_name: string;
       icon_url: string | null;
     }>(
-      `SELECT upstream_id, display_name, icon_url
-       FROM epg_channel
-       WHERE source_id = $1
-       ORDER BY display_name, upstream_id`,
+      `SELECT DISTINCT ec.epg_source_id, ec.upstream_id, ec.display_name,
+              ec.icon_url
+       FROM epg_mapping m
+       JOIN channel c ON c.id = m.channel_id
+       JOIN epg_channel ec
+         ON ec.epg_source_id = m.epg_source_id
+        AND ec.upstream_id = m.epg_channel_upstream_id
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND c.enabled = TRUE AND c.current_upstream_item_id IS NOT NULL
+       ORDER BY ec.display_name, ec.upstream_id`,
       [sourceId],
     );
     const programmes = await this.#pool.query<{
+      epg_source_id: string;
       channel_id: string;
       starts_at: Date;
       stops_at: Date | null;
@@ -1703,23 +1833,32 @@ export class PostgresSourceRepository implements SourceRepository {
       description: string | null;
       category: string | null;
     }>(
-      `SELECT channel.upstream_id AS channel_id, programme.starts_at,
-              programme.stops_at, programme.title, programme.description,
-              programme.category
+      `SELECT ec.epg_source_id, ec.upstream_id AS channel_id,
+              programme.starts_at, programme.stops_at, programme.title,
+              programme.description, programme.category
        FROM epg_programme programme
-       JOIN epg_channel channel ON channel.id = programme.epg_channel_id
-       WHERE channel.source_id = $1
-       ORDER BY programme.starts_at, channel.upstream_id`,
+       JOIN epg_channel ec ON ec.id = programme.epg_channel_id
+       WHERE ec.id IN (
+         SELECT DISTINCT inner_ec.id
+         FROM epg_mapping m
+         JOIN channel c ON c.id = m.channel_id
+         JOIN epg_channel inner_ec
+           ON inner_ec.epg_source_id = m.epg_source_id
+          AND inner_ec.upstream_id = m.epg_channel_upstream_id
+         WHERE c.source_id = $1 AND c.archived_at IS NULL
+           AND c.enabled = TRUE AND c.current_upstream_item_id IS NOT NULL
+       )
+       ORDER BY programme.starts_at, ec.upstream_id`,
       [sourceId],
     );
     return {
       channels: channels.rows.map((row) => ({
-        id: row.upstream_id,
+        id: guideScopedId(row.epg_source_id, row.upstream_id),
         displayName: row.display_name,
         ...(row.icon_url ? { iconUrl: row.icon_url } : {}),
       })),
       programmes: programmes.rows.map((row) => ({
-        channelId: row.channel_id,
+        channelId: guideScopedId(row.epg_source_id, row.channel_id),
         start: row.starts_at.toISOString(),
         ...(row.stops_at ? { stop: row.stops_at.toISOString() } : {}),
         title: row.title,
@@ -2924,8 +3063,11 @@ export class PostgresSourceRepository implements SourceRepository {
     const lockedIds = new Set(
       lockedMappings.map((mapping) => mapping.channelId),
     );
-    const guideById = new Map(
-      guideChannels.map((channel) => [channel.id, channel]),
+    const guideByExact = new Map(
+      guideChannels.map((channel) => [
+        `${channel.epgSourceId} ${channel.id}`,
+        channel,
+      ]),
     );
     const mappings: EpgMappingReviewItem[] =
       view === 'excluded'
@@ -2946,7 +3088,12 @@ export class PostgresSourceRepository implements SourceRepository {
             const match = matchesByChannel.get(channel.id);
             const unresolved = unresolvedByChannel.get(channel.id);
             const lockedId = unresolved?.lockedEpgChannelId;
-            const lockedGuide = lockedId ? guideById.get(lockedId) : undefined;
+            const lockedGuide =
+              lockedId && unresolved?.lockedEpgSourceId
+                ? guideByExact.get(
+                    `${unresolved.lockedEpgSourceId} ${lockedId}`,
+                  )
+                : undefined;
             const unresolvedFlags =
               match === undefined
                 ? {
@@ -2971,24 +3118,32 @@ export class PostgresSourceRepository implements SourceRepository {
                     epgChannelId: match.epgChannel.id,
                     epgDisplayName: match.epgChannel.displayName,
                     confidence: match.confidence,
+                    epgSourceId: match.epgChannel.epgSourceId,
+                    epgSourceName: match.epgChannel.epgSourceName,
                   }
                 : lockedId
                   ? {
                       epgChannelId: lockedId,
+                      ...(unresolved?.lockedEpgSourceId
+                        ? { epgSourceId: unresolved.lockedEpgSourceId }
+                        : {}),
                       ...(lockedGuide
-                        ? { epgDisplayName: lockedGuide.displayName }
+                        ? {
+                            epgDisplayName: lockedGuide.displayName,
+                            epgSourceName: lockedGuide.epgSourceName,
+                          }
                         : {}),
                     }
                   : {}),
               candidateIds: unresolved?.candidateIds ?? [],
-              ...(unresolved && unresolved.candidateIds.length > 0
+              ...(unresolved && unresolved.candidates.length > 0
                 ? {
-                    candidates: unresolved.candidateIds.flatMap((id) => {
-                      const guide = guideById.get(id);
-                      return guide
-                        ? [{ id: guide.id, displayName: guide.displayName }]
-                        : [];
-                    }),
+                    candidates: unresolved.candidates.map((candidate) => ({
+                      id: candidate.id,
+                      displayName: candidate.displayName,
+                      epgSourceId: candidate.epgSourceId,
+                      epgSourceName: candidate.epgSourceName,
+                    })),
                   }
                 : {}),
               ...unresolvedFlags,
@@ -3028,6 +3183,173 @@ export class PostgresSourceRepository implements SourceRepository {
       excludedCount,
       total: channels.length,
       truncated: visible.length > limit,
+    };
+  }
+
+  async listEpgSources(): Promise<EpgSourceSummary[]> {
+    const result = await this.#pool.query<{
+      id: string;
+      kind: EpgSourceKind;
+      name: string;
+      owner_source_id: string | null;
+      enabled: boolean;
+      imported_at: Date | null;
+      channel_count: string | number | null;
+      programme_count: string | number | null;
+      last_error: string | null;
+    }>(
+      `SELECT es.id, es.kind, es.name, es.owner_source_id, es.enabled,
+              st.imported_at, st.channel_count, st.programme_count,
+              last_run.safe_error AS last_error
+       FROM epg_source es
+       LEFT JOIN epg_source_snapshot_state st ON st.epg_source_id = es.id
+       LEFT JOIN LATERAL (
+         SELECT r.safe_error
+         FROM sync_run r
+         WHERE r.epg_source_id = es.id AND r.status IN ('failed', 'rejected')
+           AND NOT EXISTS (
+             SELECT 1 FROM sync_run ok
+             WHERE ok.epg_source_id = es.id AND ok.status = 'succeeded'
+               AND ok.started_at > r.started_at
+           )
+         ORDER BY r.started_at DESC
+         LIMIT 1
+       ) last_run ON TRUE
+       ORDER BY es.kind, es.name, es.id`,
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      name: row.name,
+      ...(row.owner_source_id ? { ownerSourceId: row.owner_source_id } : {}),
+      enabled: row.enabled,
+      channelCount: Number(row.channel_count ?? 0),
+      programmeCount: Number(row.programme_count ?? 0),
+      ...(row.imported_at ? { importedAt: row.imported_at.toISOString() } : {}),
+      ...(row.last_error ? { lastError: row.last_error } : {}),
+    }));
+  }
+
+  async createCustomEpgSource(
+    name: string,
+    epgUrl: string,
+  ): Promise<EpgSourceSummary> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const encrypted = encryptSecret(
+        JSON.stringify({ epgUrl }),
+        this.#masterKey,
+      );
+      const secretResult = await client.query<{ id: string }>(
+        'INSERT INTO secret_value (encrypted_value) VALUES ($1) RETURNING id',
+        [encrypted],
+      );
+      const secretId = secretResult.rows[0]?.id;
+      if (!secretId)
+        throw new Error('Secret insert did not return an identifier');
+      const result = await client.query<{ id: string; enabled: boolean }>(
+        `INSERT INTO epg_source (kind, name, credential_ref)
+         VALUES ('custom', $1, $2)
+         RETURNING id, enabled`,
+        [name, secretId],
+      );
+      await client.query('COMMIT');
+      const row = result.rows[0];
+      if (!row) throw new Error('EPG source insert did not return a row');
+      return {
+        id: row.id,
+        kind: 'custom',
+        name,
+        enabled: row.enabled,
+        channelCount: 0,
+        programmeCount: 0,
+      };
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async removeEpgSource(epgSourceId: string): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{ credential_ref: string | null }>(
+        `DELETE FROM epg_source
+         WHERE id = $1 AND kind = 'custom'
+         RETURNING credential_ref`,
+        [epgSourceId],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      if (row.credential_ref) {
+        await client.query('DELETE FROM secret_value WHERE id = $1', [
+          row.credential_ref,
+        ]);
+      }
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getEpgSourceRefreshTarget(
+    epgSourceId: string,
+  ): Promise<EpgSourceRefreshTarget | null> {
+    const result = await this.#pool.query<{
+      id: string;
+      kind: EpgSourceKind;
+      name: string;
+      owner_source_id: string | null;
+      encrypted_value: string | null;
+    }>(
+      `SELECT es.id, es.kind, es.name, es.owner_source_id, v.encrypted_value
+       FROM epg_source es
+       LEFT JOIN secret_value v ON v.id = es.credential_ref
+       WHERE es.id = $1 AND es.enabled = TRUE`,
+      [epgSourceId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    if (row.kind === 'provider' && row.owner_source_id) {
+      const credentials = await this.getSourceCredentials(row.owner_source_id);
+      return {
+        id: row.id,
+        kind: row.kind,
+        name: row.name,
+        ownerSourceId: row.owner_source_id,
+        ...(credentials?.epgUrl ? { epgUrl: credentials.epgUrl } : {}),
+      };
+    }
+    let epgUrl: string | undefined;
+    if (row.encrypted_value) {
+      const value: unknown = JSON.parse(
+        decryptSecret(row.encrypted_value, this.#masterKey),
+      );
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        'epgUrl' in value &&
+        typeof value.epgUrl === 'string'
+      ) {
+        epgUrl = value.epgUrl;
+      }
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      name: row.name,
+      ...(epgUrl ? { epgUrl } : {}),
     };
   }
 
@@ -3171,24 +3493,31 @@ export class PostgresSourceRepository implements SourceRepository {
     search: string | undefined,
     limit: number,
   ): Promise<EpgGuideChannelPage> {
-    const values: unknown[] = [sourceId];
+    void sourceId;
+    const values: unknown[] = [];
     let filter = '';
     if (search) {
       values.push(`%${search}%`);
-      filter = `AND (upstream_id ILIKE $${values.length}
-                     OR display_name ILIKE $${values.length})`;
+      filter = `AND (ec.upstream_id ILIKE $${values.length}
+                     OR ec.display_name ILIKE $${values.length}
+                     OR es.name ILIKE $${values.length})`;
     }
     values.push(limit);
     const result = await this.#pool.query<{
       upstream_id: string;
       display_name: string;
       icon_url: string | null;
+      epg_source_id: string;
+      epg_source_name: string;
       total_count: string | number;
     }>(
-      `SELECT upstream_id, display_name, icon_url, COUNT(*) OVER() AS total_count
-       FROM epg_channel
-       WHERE source_id = $1 ${filter}
-       ORDER BY display_name, upstream_id
+      `SELECT ec.upstream_id, ec.display_name, ec.icon_url,
+              ec.epg_source_id, es.name AS epg_source_name,
+              COUNT(*) OVER() AS total_count
+       FROM epg_channel ec
+       JOIN epg_source es ON es.id = ec.epg_source_id AND es.enabled = TRUE
+       WHERE ec.upstream_id IS NOT NULL ${filter}
+       ORDER BY ec.display_name, ec.upstream_id
        LIMIT $${values.length}`,
       values,
     );
@@ -3198,6 +3527,8 @@ export class PostgresSourceRepository implements SourceRepository {
         id: row.upstream_id,
         displayName: row.display_name,
         ...(row.icon_url ? { iconUrl: row.icon_url } : {}),
+        epgSourceId: row.epg_source_id,
+        epgSourceName: row.epg_source_name,
       })),
       total,
       truncated: total > limit,
@@ -3208,41 +3539,58 @@ export class PostgresSourceRepository implements SourceRepository {
     sourceId: string,
     channelId: string,
     epgChannelId: string,
+    epgSourceId?: string,
   ): Promise<boolean> {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const result = await client.query<{ channel_id: string }>(
+      const channelResult = await client.query<{ channel_id: string }>(
         `SELECT c.id AS channel_id
          FROM channel c
-         JOIN epg_channel guide
-           ON guide.source_id = c.source_id AND guide.upstream_id = $3
          LEFT JOIN group_policy policy
            ON policy.source_id = c.source_id
           AND policy.provider_group = c.provider_group
          WHERE c.source_id = $1 AND c.id = $2 AND c.archived_at IS NULL
            AND COALESCE(policy.behavior, 'permanent') = 'permanent'
          FOR UPDATE OF c`,
-        [sourceId, channelId, epgChannelId],
+        [sourceId, channelId],
       );
-      if (!result.rows[0]) {
+      if (!channelResult.rows[0]) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const guideResult = await client.query<{
+        id: string;
+        epg_source_id: string;
+      }>(
+        `SELECT ec.id, ec.epg_source_id
+         FROM epg_channel ec
+         JOIN epg_source es ON es.id = ec.epg_source_id AND es.enabled = TRUE
+         WHERE ec.upstream_id = $2
+           AND ($3::uuid IS NULL OR ec.epg_source_id = $3::uuid)
+         ORDER BY COALESCE(es.owner_source_id = $1, FALSE) DESC,
+                  es.created_at
+         LIMIT 1`,
+        [sourceId, epgChannelId, epgSourceId ?? null],
+      );
+      const guide = guideResult.rows[0];
+      if (!guide) {
         await client.query('ROLLBACK');
         return false;
       }
       await client.query(
         `INSERT INTO epg_mapping
-          (channel_id, epg_channel_id, epg_channel_upstream_id, confidence,
-           manually_locked)
-         SELECT $2, guide.id, guide.upstream_id, 1, TRUE
-         FROM epg_channel guide
-         WHERE guide.source_id = $1 AND guide.upstream_id = $3
+          (channel_id, epg_channel_id, epg_channel_upstream_id, epg_source_id,
+           confidence, manually_locked)
+         VALUES ($1, $2, $3, $4, 1, TRUE)
          ON CONFLICT (channel_id) DO UPDATE SET
            epg_channel_id = EXCLUDED.epg_channel_id,
            epg_channel_upstream_id = EXCLUDED.epg_channel_upstream_id,
+           epg_source_id = EXCLUDED.epg_source_id,
            confidence = 1,
            manually_locked = TRUE,
            updated_at = NOW()`,
-        [sourceId, channelId, epgChannelId],
+        [channelId, guide.id, epgChannelId, guide.epg_source_id],
       );
       await client.query(
         `INSERT INTO epg_mapping_audit
@@ -3730,24 +4078,33 @@ export class PostgresSourceRepository implements SourceRepository {
     const guideResult = await client.query<{
       upstream_id: string;
       display_name: string;
+      epg_source_id: string;
+      epg_source_name: string;
+      own_guide: boolean;
     }>(
-      `SELECT upstream_id, display_name
-         FROM epg_channel
-         WHERE source_id = $1 AND upstream_id IS NOT NULL
-         ORDER BY display_name, upstream_id`,
+      `SELECT ec.upstream_id, ec.display_name, ec.epg_source_id,
+              es.name AS epg_source_name,
+              COALESCE(es.owner_source_id = $1, FALSE) AS own_guide
+         FROM epg_channel ec
+         JOIN epg_source es ON es.id = ec.epg_source_id AND es.enabled = TRUE
+         WHERE ec.upstream_id IS NOT NULL
+         ORDER BY ec.display_name, ec.upstream_id`,
       [sourceId],
     );
     const lockedResult = await client.query<{
       channel_id: string;
       epg_channel_upstream_id: string;
+      epg_source_id: string;
     }>(
-      `SELECT mapping.channel_id, mapping.epg_channel_upstream_id
+      `SELECT mapping.channel_id, mapping.epg_channel_upstream_id,
+              mapping.epg_source_id
          FROM epg_mapping mapping
          JOIN channel c ON c.id = mapping.channel_id
          LEFT JOIN group_policy policy
            ON policy.source_id = c.source_id
           AND policy.provider_group = c.provider_group
          WHERE c.source_id = $1 AND mapping.manually_locked = TRUE
+           AND mapping.epg_source_id IS NOT NULL
            AND c.archived_at IS NULL AND c.enabled = TRUE
            AND c.current_upstream_item_id IS NOT NULL
            AND c.epg_excluded = FALSE
@@ -3764,10 +4121,14 @@ export class PostgresSourceRepository implements SourceRepository {
     const guideChannels: EpgGuideChannel[] = guideResult.rows.map((row) => ({
       id: row.upstream_id,
       displayName: row.display_name,
+      epgSourceId: row.epg_source_id,
+      epgSourceName: row.epg_source_name,
+      ownGuide: row.own_guide,
     }));
     const lockedMappings: LockedEpgMapping[] = lockedResult.rows.map((row) => ({
       channelId: row.channel_id,
       epgChannelId: row.epg_channel_upstream_id,
+      epgSourceId: row.epg_source_id,
     }));
     return {
       channels,
@@ -3810,7 +4171,7 @@ export class PostgresSourceRepository implements SourceRepository {
        FROM channel c, epg_channel guide
        WHERE mapping.channel_id = c.id AND c.source_id = $1
          AND mapping.manually_locked = TRUE
-         AND guide.source_id = c.source_id
+         AND guide.epg_source_id = mapping.epg_source_id
          AND guide.upstream_id = mapping.epg_channel_upstream_id`,
       [sourceId],
     );
@@ -3822,26 +4183,29 @@ export class PostgresSourceRepository implements SourceRepository {
     const values = automaticMatches.map((match) => ({
       channel_id: match.channelId,
       epg_channel_upstream_id: match.epgChannel.id,
+      epg_source_id: match.epgChannel.epgSourceId,
       confidence: match.confidence,
     }));
     await client.query(
       `INSERT INTO epg_mapping
-        (channel_id, epg_channel_id, epg_channel_upstream_id, confidence,
-         manually_locked)
+        (channel_id, epg_channel_id, epg_channel_upstream_id, epg_source_id,
+         confidence, manually_locked)
        SELECT item.channel_id, guide.id, item.epg_channel_upstream_id,
-              item.confidence, FALSE
+              item.epg_source_id, item.confidence, FALSE
        FROM jsonb_to_recordset($2::jsonb) AS item(
          channel_id UUID,
          epg_channel_upstream_id TEXT,
+         epg_source_id UUID,
          confidence NUMERIC
        )
        JOIN channel c ON c.id = item.channel_id AND c.source_id = $1
        JOIN epg_channel guide
-         ON guide.source_id = c.source_id
+         ON guide.epg_source_id = item.epg_source_id
         AND guide.upstream_id = item.epg_channel_upstream_id
        ON CONFLICT (channel_id) DO UPDATE SET
          epg_channel_id = EXCLUDED.epg_channel_id,
          epg_channel_upstream_id = EXCLUDED.epg_channel_upstream_id,
+         epg_source_id = EXCLUDED.epg_source_id,
          confidence = EXCLUDED.confidence,
          manually_locked = FALSE,
          updated_at = NOW()`,
