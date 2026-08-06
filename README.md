@@ -16,6 +16,10 @@ URLs, so playback traffic never passes through IPTVMaster.
 
 - Rename provider groups, build custom categories, and reorder groups and
   channels with drag or keyboard/touch-friendly arrow buttons.
+- Every group that reaches the playlist — provider, live-event, or custom —
+  is published or hidden from one list. A custom category is a slice of a
+  provider group, so it carries its own visibility rather than following the
+  group it was carved from.
 - Per-channel renames, logos, visibility, and ordering, with bulk selection
   tools for large playlists.
 - Provider changes are reconciled conservatively: safe matches follow

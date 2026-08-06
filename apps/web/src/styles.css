@@ -1429,7 +1429,7 @@ h2 {
   flex: 1;
 }
 .source-workspace-lineup .output-group-order-row {
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
 }
 .source-workspace-lineup .channel-editor-order > :not(.output-group-order) {
   display: none !important;
@@ -1505,7 +1505,7 @@ h2 {
 }
 .output-group-order-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   gap: 7px;
   align-items: center;
   min-height: 39px;
@@ -2656,7 +2656,9 @@ button:disabled {
     grid-template-columns: 1fr;
   }
   .output-group-order-row {
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    /* Six controls do not fit a phone: let the badge, toggle, channel button
+       and position wrap under the name instead of squeezing every column. */
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
   .output-group-channels-button {
     grid-column: auto;
