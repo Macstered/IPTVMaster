@@ -9,7 +9,11 @@ import type {
   MediaType,
 } from './types.js';
 
-const ATTRIBUTE_PATTERN = /([A-Za-z0-9_-]+)="([^"]*)"/g;
+// Anchored to a preceding delimiter so a long run of attribute-name
+// characters without a following `="` fails in constant time per position
+// instead of backtracking across the whole line (quadratic on hostile feeds).
+const ATTRIBUTE_PATTERN = /(?:^|\s)([A-Za-z0-9_-]+)="([^"]*)"/g;
+const MAX_LINE_LENGTH = 16 * 1024;
 const VOD_EXTENSIONS = new Set([
   '.avi',
   '.m4v',
@@ -108,6 +112,14 @@ export async function parseM3u(
 
   for await (const rawLine of lines) {
     lineNumber += 1;
+    if (rawLine.length > MAX_LINE_LENGTH) {
+      issues.push({
+        lineNumber,
+        code: 'invalid-extinf',
+        message: `Line ${lineNumber} exceeds ${MAX_LINE_LENGTH} characters and was skipped`,
+      });
+      continue;
+    }
     const line = rawLine.trim();
     if (!line) continue;
 

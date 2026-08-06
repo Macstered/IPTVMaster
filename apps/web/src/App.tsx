@@ -35,6 +35,26 @@ interface PreviewResult {
 
 const initialEvent = '17:00 Montreal ATP Tennis 8/4';
 
+const browserTimeZone =
+  Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+const timeZoneChoices: string[] =
+  (
+    Intl as { supportedValuesOf?: (key: string) => string[] }
+  ).supportedValuesOf?.('timeZone') ?? [];
+
+function todayInBrowserZone(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+  return `${value['year']}-${value['month']}-${value['day']}`;
+}
+
 const workspaceDetails: Record<
   WorkspaceView,
   { label: string; title: string; subtitle: string; icon: ReactNode }
@@ -200,7 +220,8 @@ export function App({ authUsername, onLogout }: AppProps) {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
   const [name, setName] = useState(initialEvent);
-  const [referenceDate, setReferenceDate] = useState('2026-08-04');
+  const [previewSourceZone, setPreviewSourceZone] = useState('UTC');
+  const [referenceDate, setReferenceDate] = useState(todayInBrowserZone());
   const [result, setResult] = useState<PreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -268,8 +289,8 @@ export function App({ authUsername, onLogout }: AppProps) {
         body: JSON.stringify({
           name,
           policy: {
-            sourceTimeZone: 'Europe/Stockholm',
-            displayTimeZone: 'Europe/Helsinki',
+            sourceTimeZone: previewSourceZone,
+            displayTimeZone: browserTimeZone,
             numericDateOrder: 'month-day',
             referenceDate,
           },
@@ -433,7 +454,7 @@ export function App({ authUsername, onLogout }: AppProps) {
                   <p className="eyebrow">QUICK PREVIEW</p>
                   <h2>Event time preview</h2>
                 </div>
-                <span className="pill">Europe/Helsinki</span>
+                <span className="pill">{browserTimeZone}</span>
               </div>
 
               <p className="panel-copy">
@@ -449,6 +470,21 @@ export function App({ authUsername, onLogout }: AppProps) {
                   onChange={(event) => setName(event.target.value)}
                   autoComplete="off"
                 />
+
+                <label htmlFor="preview-source-zone">Provider timezone</label>
+                <input
+                  id="preview-source-zone"
+                  list="preview-timezone-choices"
+                  value={previewSourceZone}
+                  onChange={(event) => setPreviewSourceZone(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <datalist id="preview-timezone-choices">
+                  {timeZoneChoices.map((zone) => (
+                    <option value={zone} key={zone} />
+                  ))}
+                </datalist>
 
                 <label htmlFor="reference-date">Provider schedule date</label>
                 <input
@@ -478,11 +514,11 @@ export function App({ authUsername, onLogout }: AppProps) {
                   </div>
                   <dl>
                     <div>
-                      <dt>Source instant</dt>
+                      <dt>Provider instant</dt>
                       <dd>
                         {displayInstant(
                           result.sourceDateTime,
-                          'Europe/Stockholm',
+                          previewSourceZone,
                         )}
                       </dd>
                     </div>
@@ -491,7 +527,7 @@ export function App({ authUsername, onLogout }: AppProps) {
                       <dd>
                         {displayInstant(
                           result.displayDateTime,
-                          'Europe/Helsinki',
+                          browserTimeZone,
                         )}
                       </dd>
                     </div>

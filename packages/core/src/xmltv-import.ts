@@ -7,6 +7,7 @@ import {
   type XmltvProgramme,
 } from './xmltv.js';
 import { ProviderHttpError } from './provider-error.js';
+import { assertAllowedRequestUrl, guardedFetch } from './safe-fetch.js';
 
 export interface XmltvInspection {
   fingerprint: string;
@@ -53,12 +54,10 @@ export async function inspectRemoteXmltv(
   options: XmltvInspectionOptions = {},
 ): Promise<XmltvInspection> {
   const url = new URL(epgUrl);
-  if (!['http:', 'https:'].includes(url.protocol)) {
-    throw new Error('XMLTV URL must use HTTP or HTTPS');
-  }
+  assertAllowedRequestUrl(url);
   const timeoutMs = options.timeoutMs ?? 120_000;
   const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
-  const response = await (options.fetchImplementation ?? fetch)(url, {
+  const response = await (options.fetchImplementation ?? guardedFetch)(url, {
     redirect: 'follow',
     signal: AbortSignal.timeout(timeoutMs),
     headers: {

@@ -4,11 +4,24 @@ const VERSION = 'v1';
 const ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12;
 const KEY_BYTES = 32;
+const TAG_BYTES = 16;
+
+const KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
 
 function decodeKey(encodedKey: string): Buffer {
+  // Node's base64 decoder silently drops invalid characters, so a passphrase
+  // of the right length would decode to 32 bytes and look like a valid key.
+  // Require canonical base64 that round-trips exactly.
   const key = Buffer.from(encodedKey, 'base64');
-  if (key.length !== KEY_BYTES) {
-    throw new Error('Master key must be a base64-encoded 32-byte value');
+  if (
+    key.length !== KEY_BYTES ||
+    !KEY_PATTERN.test(encodedKey) ||
+    key.toString('base64') !== encodedKey
+  ) {
+    throw new Error(
+      'Master key must be a canonical base64-encoded 32-byte value, ' +
+        'for example the output of: openssl rand -base64 32',
+    );
   }
   return key;
 }
@@ -45,12 +58,15 @@ export function decryptSecret(envelope: string, encodedKey: string): string {
   }
 
   const key = decodeKey(encodedKey);
-  const decipher = createDecipheriv(
-    ALGORITHM,
-    key,
-    Buffer.from(ivText, 'base64url'),
-  );
-  decipher.setAuthTag(Buffer.from(tagText, 'base64url'));
+  const iv = Buffer.from(ivText, 'base64url');
+  const tag = Buffer.from(tagText, 'base64url');
+  if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES) {
+    // GCM accepts short tags, which would weaken forgery resistance for an
+    // attacker who can write to the database.
+    throw new Error('Unsupported or malformed encrypted secret');
+  }
+  const decipher = createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([
     decipher.update(Buffer.from(ciphertextText, 'base64url')),
     decipher.final(),

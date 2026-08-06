@@ -264,6 +264,9 @@ async function readJson<T>(response: Response): Promise<T> {
   return value as T;
 }
 
+const BROWSER_TIME_ZONE =
+  Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
 const TIMEZONE_CHOICES: string[] =
   (
     Intl as { supportedValuesOf?: (key: string) => string[] }
@@ -296,6 +299,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [name, setName] = useState('Home provider');
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [epgUrl, setEpgUrl] = useState('');
+  const [providerTimezone, setProviderTimezone] = useState(BROWSER_TIME_ZONE);
   const [saving, setSaving] = useState(false);
   const [removingSourceId, setRemovingSourceId] = useState<string | null>(null);
   const [confirmingRemoval, setConfirmingRemoval] = useState<string | null>(
@@ -354,10 +358,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [permanentGroupNames, setPermanentGroupNames] = useState<
     Record<string, string>
-  >({});
+  >(() => Object.create(null) as Record<string, string>);
   const [permanentGroupRenames, setPermanentGroupRenames] = useState<
     Record<string, string>
-  >({});
+  >(() => Object.create(null) as Record<string, string>);
   const [outputGroupFilter, setOutputGroupFilter] = useState('');
   const [draggedOutputGroup, setDraggedOutputGroup] = useState<string | null>(
     null,
@@ -388,7 +392,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [savingCustomCategory, setSavingCustomCategory] = useState(false);
   const [review, setReview] = useState<ReconciliationReview | null>(null);
   const [reviewMatches, setReviewMatches] = useState<Record<string, string>>(
-    {},
+    () => Object.create(null) as Record<string, string>,
   );
   const [resolvingChannel, setResolvingChannel] = useState<string | null>(null);
   const [sourceHistory, setSourceHistory] = useState<SourceHistory | null>(
@@ -697,8 +701,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           sourceType: 'm3u',
           playlistUrl,
           ...(epgUrl ? { epgUrl } : {}),
-          sourceTimezone: 'Europe/Stockholm',
-          displayTimezone: 'Europe/Helsinki',
+          sourceTimezone: providerTimezone.trim() || BROWSER_TIME_ZONE,
+          displayTimezone: BROWSER_TIME_ZONE,
         }),
       });
       const payload = await readJson<{ source: SafeSource }>(response);
@@ -844,8 +848,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             behavior,
             enabled: true,
             hidePlaceholders: true,
-            sourceTimeZone: 'Europe/Stockholm',
-            displayTimeZone: 'Europe/Helsinki',
+            sourceTimeZone: source.sourceTimezone,
+            displayTimeZone: source.displayTimezone,
             numericDateOrder: 'month-day',
           }),
         },
@@ -1802,6 +1806,17 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             />
           </div>
           <div>
+            <label htmlFor="provider-timezone">Provider timezone</label>
+            <input
+              id="provider-timezone"
+              list="timezone-choices"
+              value={providerTimezone}
+              onChange={(event) => setProviderTimezone(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div>
             <label htmlFor="epg-url">XMLTV URL (optional)</label>
             <input
               id="epg-url"
@@ -1862,6 +1877,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               Cancel
             </button>
           ) : null}
+          <datalist id="timezone-choices">
+            {TIMEZONE_CHOICES.map((zone) => (
+              <option value={zone} key={zone} />
+            ))}
+          </datalist>
           <p className="secret-note">
             {editingConnection
               ? 'URL fields are intentionally blank. Enter only values you want to replace; saved URLs remain encrypted and are never shown again.'
@@ -2703,13 +2723,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                               {formatEventTime(
                                 entry.sourceDateTime,
                                 activeEventReview.timePolicy?.sourceTimeZone ??
-                                  'Europe/Stockholm',
+                                  BROWSER_TIME_ZONE,
                               )}{' '}
                               →{' '}
                               {formatEventTime(
                                 entry.displayDateTime,
                                 activeEventReview.timePolicy?.displayTimeZone ??
-                                  'Europe/Helsinki',
+                                  BROWSER_TIME_ZONE,
                               )}
                             </small>
                           </div>

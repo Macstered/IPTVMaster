@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 
 import { parseM3u } from './m3u.js';
 import { ProviderHttpError } from './provider-error.js';
+import { assertAllowedRequestUrl, guardedFetch } from './safe-fetch.js';
 import type { M3uEntry, M3uParseIssue, MediaType } from './types.js';
 
 export interface PlaylistInspection {
@@ -50,14 +51,12 @@ export async function inspectRemotePlaylist(
   options: PlaylistInspectionOptions = {},
 ): Promise<PlaylistInspection> {
   const url = new URL(playlistUrl);
-  if (!['http:', 'https:'].includes(url.protocol)) {
-    throw new Error('Playlist URL must use HTTP or HTTPS');
-  }
+  assertAllowedRequestUrl(url);
 
   const timeoutMs = options.timeoutMs ?? 90_000;
   const maxBytes = options.maxBytes ?? 128 * 1024 * 1024;
   const maxLiveEntries = options.maxLiveEntries ?? 100_000;
-  const fetchImplementation = options.fetchImplementation ?? fetch;
+  const fetchImplementation = options.fetchImplementation ?? guardedFetch;
   const response = await fetchImplementation(url, {
     redirect: 'follow',
     signal: AbortSignal.timeout(timeoutMs),

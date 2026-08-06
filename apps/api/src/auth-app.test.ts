@@ -276,6 +276,7 @@ describe('administrator authentication API', () => {
     const setup = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/setup',
+      headers: { origin: 'http://localhost' },
       payload: { username: 'admin', password: 'rate-limit-password' },
     });
     expect(setup.statusCode).toBe(201);
@@ -285,6 +286,7 @@ describe('administrator authentication API', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/login',
+        headers: { origin: 'http://localhost' },
         payload: { username: 'admin', password: `wrong-password-${attempt}` },
       });
       statuses.push(response.statusCode);
@@ -294,6 +296,7 @@ describe('administrator authentication API', () => {
     const blockedCorrectPassword = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
+      headers: { origin: 'http://localhost' },
       payload: { username: 'admin', password: 'rate-limit-password' },
     });
     expect(blockedCorrectPassword.statusCode).toBe(429);

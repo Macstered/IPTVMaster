@@ -11,6 +11,7 @@ import {
   serializeM3u,
   serializeXmltv,
   SnapshotRejectedError,
+  BlockedAddressError,
   type EventGroupPolicy,
   type M3uEntry,
   type PlaylistInspection,
@@ -19,6 +20,7 @@ import {
   type XmltvProgramme,
 } from '@iptvmaster/core';
 import Fastify, {
+  type FastifyError,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
@@ -59,8 +61,8 @@ const SESSION_COOKIE = 'iptvmaster_session';
 const CSRF_COOKIE = 'iptvmaster_csrf';
 
 const timePolicySchema = z.object({
-  sourceTimeZone: z.string().min(1).default('Europe/Stockholm'),
-  displayTimeZone: z.string().min(1).default('Europe/Helsinki'),
+  sourceTimeZone: z.string().min(1).default('UTC'),
+  displayTimeZone: z.string().min(1).default('UTC'),
   numericDateOrder: z.enum(['month-day', 'day-month']).default('month-day'),
   referenceDate: z.iso.date(),
 });
@@ -91,8 +93,8 @@ const createSourceSchema = z.object({
   sourceType: z.enum(['m3u', 'xtream']).default('m3u'),
   playlistUrl: z.url().max(4_000),
   epgUrl: z.url().max(4_000).optional(),
-  sourceTimezone: z.string().min(1).default('Europe/Stockholm'),
-  displayTimezone: z.string().min(1).default('Europe/Helsinki'),
+  sourceTimezone: z.string().min(1).default('UTC'),
+  displayTimezone: z.string().min(1).default('UTC'),
 });
 
 const updateSourceSchema = z
@@ -102,8 +104,8 @@ const updateSourceSchema = z
     epgUrl: z.url().max(4_000).optional(),
     deriveEpgUrl: z.boolean().default(false),
     clearEpgUrl: z.boolean().default(false),
-    sourceTimezone: z.string().min(1).default('Europe/Stockholm'),
-    displayTimezone: z.string().min(1).default('Europe/Helsinki'),
+    sourceTimezone: z.string().min(1).default('UTC'),
+    displayTimezone: z.string().min(1).default('UTC'),
   })
   .superRefine((value, context) => {
     if (value.epgUrl && value.deriveEpgUrl) {
@@ -132,8 +134,8 @@ const groupPolicySchema = z.object({
     .array(z.string().trim().min(1).max(200))
     .max(100)
     .optional(),
-  sourceTimeZone: z.string().min(1).default('Europe/Stockholm'),
-  displayTimeZone: z.string().min(1).default('Europe/Helsinki'),
+  sourceTimeZone: z.string().min(1).default('UTC'),
+  displayTimeZone: z.string().min(1).default('UTC'),
   numericDateOrder: z.enum(['month-day', 'day-month']).default('month-day'),
 });
 
@@ -461,19 +463,20 @@ function clearSessionCookies(reply: FastifyReply, secure: boolean): void {
   ]);
 }
 
-function isSameOrigin(
-  request: FastifyRequest,
-  allowDevelopmentLoopback: boolean,
-): boolean {
+/**
+ * Both sides are parsed as URLs so default ports normalize the same way
+ * (`http://host:80` and a `host:80` Host header both reduce to `host`).
+ * A missing Origin is rejected for state-changing requests: browsers always
+ * send one, so its absence means the request did not come from the app.
+ */
+function isSameOrigin(request: FastifyRequest): boolean {
   const origin = request.headers.origin;
-  if (!origin) return true;
+  const host = request.headers.host;
+  if (!origin || !host) return false;
   try {
     const originUrl = new URL(origin);
-    const host = request.headers.host;
-    if (host && originUrl.host === host) return true;
-    if (!allowDevelopmentLoopback) return false;
-    const loopback = new Set(['localhost', '127.0.0.1', '::1']);
-    return loopback.has(originUrl.hostname) && loopback.has(request.hostname);
+    const requestUrl = new URL(`${originUrl.protocol}//${host}`);
+    return originUrl.host === requestUrl.host;
   } catch {
     return false;
   }
@@ -533,7 +536,7 @@ export async function buildApp(
     options.secureCookies ??
     process.env['IPTVMASTER_SECURE_COOKIES'] === 'true';
   const developmentMode =
-    options.developmentMode ?? process.env['NODE_ENV'] !== 'production';
+    options.developmentMode ?? process.env['NODE_ENV'] === 'development';
   const authService = authRepository
     ? new AuthService(authRepository, sessionTtlMs)
     : undefined;
@@ -691,7 +694,7 @@ export async function buildApp(
       const csrfHeader = request.headers['x-iptvmaster-csrf'];
       const csrfCookie = cookies[CSRF_COOKIE];
       if (
-        !isSameOrigin(request, developmentMode) ||
+        !isSameOrigin(request) ||
         typeof csrfHeader !== 'string' ||
         !csrfCookie ||
         csrfHeader !== csrfCookie ||
@@ -700,6 +703,19 @@ export async function buildApp(
         return reply.code(403).send({ error: 'CSRF validation failed' });
       }
     }
+  });
+
+  // Fastify's default handler serializes error.message to the client, which
+  // would expose database driver and decryption details to unauthenticated
+  // callers. Client errors keep their message; server errors are logged and
+  // answered generically.
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    const statusCode = error.statusCode ?? 500;
+    if (statusCode >= 400 && statusCode < 500) {
+      return reply.code(statusCode).send({ error: error.message });
+    }
+    request.log.error({ err: error }, 'Unhandled request error');
+    return reply.code(500).send({ error: 'Internal server error' });
   });
 
   app.get('/health', async () => ({
@@ -769,7 +785,7 @@ export async function buildApp(
     if (!authService) {
       return reply.code(404).send({ error: 'Authentication is not enabled' });
     }
-    if (!isSameOrigin(request, developmentMode)) {
+    if (!isSameOrigin(request)) {
       return reply.code(403).send({ error: 'Origin validation failed' });
     }
     const parsed = administratorSetupSchema.safeParse(request.body);
@@ -810,7 +826,7 @@ export async function buildApp(
     if (!authService) {
       return reply.code(404).send({ error: 'Authentication is not enabled' });
     }
-    if (!isSameOrigin(request, developmentMode)) {
+    if (!isSameOrigin(request)) {
       return reply.code(403).send({ error: 'Origin validation failed' });
     }
     const parsed = administratorLoginSchema.safeParse(request.body);
@@ -828,6 +844,10 @@ export async function buildApp(
         .code(429)
         .send({ error: 'Too many login attempts; try again later' });
     }
+    // Counted before the password is verified. Verification is deliberately
+    // slow, so counting afterwards would let a burst of concurrent requests
+    // all pass the gate and each start a scrypt hash.
+    const blockedFor = loginRateLimiter.recordFailure(rateLimitKey);
     try {
       const session = await authService.login(
         parsed.data.username,
@@ -843,7 +863,6 @@ export async function buildApp(
       };
     } catch (error) {
       if (error instanceof InvalidCredentialsError) {
-        const blockedFor = loginRateLimiter.recordFailure(rateLimitKey);
         if (blockedFor > 0) reply.header('retry-after', blockedFor);
         return reply
           .code(blockedFor > 0 ? 429 : 401)
@@ -861,7 +880,7 @@ export async function buildApp(
     const csrfCookie = cookies[CSRF_COOKIE];
     if (
       !session ||
-      !isSameOrigin(request, developmentMode) ||
+      !isSameOrigin(request) ||
       typeof csrfHeader !== 'string' ||
       !csrfCookie ||
       csrfHeader !== csrfCookie ||
@@ -1122,6 +1141,9 @@ export async function buildApp(
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
         }
+        if (error instanceof BlockedAddressError) {
+          return reply.code(400).send({ error: error.message });
+        }
         throw error;
       }
     },
@@ -1185,6 +1207,9 @@ export async function buildApp(
         }
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
+        }
+        if (error instanceof BlockedAddressError) {
+          return reply.code(400).send({ error: error.message });
         }
         throw error;
       }
@@ -1263,6 +1288,9 @@ export async function buildApp(
         }
         if (error instanceof SnapshotRejectedError) {
           return reply.code(422).send({ error: error.message });
+        }
+        if (error instanceof BlockedAddressError) {
+          return reply.code(400).send({ error: error.message });
         }
         throw error;
       }
@@ -1354,8 +1382,13 @@ export async function buildApp(
     if (!query.success) {
       return reply.code(400).send({ error: validationMessage(query.error) });
     }
+    const sources = await sourceRepository.listSources();
+    const eventSource = sources.find(
+      (candidate) => candidate.id === sourceId.data,
+    );
     const referenceDate =
-      query.data.referenceDate ?? currentDateInZone('Europe/Stockholm');
+      query.data.referenceDate ??
+      currentDateInZone(eventSource?.sourceTimezone ?? 'UTC');
     const [entries, policies] = await Promise.all([
       sourceRepository.getLatestPlaylistEntries(sourceId.data),
       sourceRepository.listOutputGroupPolicies(sourceId.data, referenceDate),
@@ -2052,13 +2085,17 @@ export async function buildApp(
     const profile = await sourceRepository.resolveOutputProfile(accessToken);
     if (!profile) return reply.code(404).send({ error: 'Playlist not found' });
 
+    const profileSources = await sourceRepository.listSources();
     const sourceOutputs = await Promise.all(
       profile.sourceIds.map(async (sourceId) => {
         const [entries, policies] = await Promise.all([
           sourceRepository.getLatestPlaylistEntries(sourceId),
           sourceRepository.listOutputGroupPolicies(
             sourceId,
-            currentDateInZone('Europe/Stockholm'),
+            currentDateInZone(
+              profileSources.find((candidate) => candidate.id === sourceId)
+                ?.sourceTimezone ?? 'UTC',
+            ),
           ),
         ]);
         return { sourceId, entries, policies };
