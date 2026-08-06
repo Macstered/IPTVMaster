@@ -22,6 +22,21 @@ Authentication is an additional layer, not permission to expose the service publ
 
 The application must not be used to relay or redistribute streams. Playback should go directly from the authorized player to the configured provider.
 
+## Feed handling
+
+Provider playlists and XMLTV guides are untrusted input. A compromised or
+malicious provider is treated as an attacker in this project's threat model,
+because its feed reaches the parser, the database, the published output, and
+the administrator's browser.
+
+Outbound feed requests refuse private, loopback, link-local, and reserved
+addresses, and revalidate on every redirect hop, so a feed cannot redirect the
+server into scanning the network it runs on. Set
+`IPTVMASTER_ALLOW_PRIVATE_SOURCE_ADDRESSES=true` only if you deliberately host
+a playlist or XMLTV generator on your own network. Downloads are size- and
+time-bounded, parsing is linear in input size, and channel logo URLs supplied
+by a feed are only rendered when they point at public hosts.
+
 ## Reporting a vulnerability
 
-Do not include credentials or playable URLs in a report. In a private personal repository, open a private security advisory or contact the repository owner directly.
+Do not include credentials or playable URLs in a report. Open a private security advisory through the repository's Security tab rather than a public issue, and expect an initial response within a few days. This is a hobby project maintained in spare time: there is no paid support and no guaranteed patch window, but security reports are prioritized over features.
