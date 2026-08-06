@@ -32,6 +32,27 @@ and 443 are taken. If you change them, browse to the HTTPS port directly: the
 automatic redirect from HTTP points at the standard port, because the proxy
 cannot know how the ports were remapped outside its container.
 
+## Keeping players working during the switch
+
+Output URLs are served by the same application, so once the overlay is in
+place they move from `http://<address>:8080/m/<token>` to
+`https://<hostname>/m/<token>`. Many IPTV players refuse a privately issued
+certificate, and some ignore custom DNS, so a player can stop working the
+moment the plain port disappears.
+
+To avoid that, set `IPTVMASTER_PLAIN_OUTPUT_PATHS` while migrating:
+
+```sh
+IPTVMASTER_PLAIN_OUTPUT_PATHS=/m/* /e/* /p/*
+```
+
+The editor, its session cookie, and the whole API then remain HTTPS-only,
+while the tokenized playlist and guide continue to answer over plain HTTP on
+port 80 at whatever address the player already uses. Those URLs are bearer
+tokens, so this is a trusted-network trade-off, not a permanent posture: once
+the player is happy with HTTPS, remove the setting and everything is
+redirected.
+
 ## Choosing a certificate
 
 **A local certificate authority (`IPTVMASTER_TLS=internal`)** suits a home
@@ -70,9 +91,11 @@ skip this overlay.
   is gone.
 - Sign in again. The old session cookie was issued without the `Secure` flag,
   so a fresh sign-in replaces it.
-- Recreate your output URLs and update your players. The addresses embed the
-  origin you used when creating them, so URLs made over HTTP still say `http`
-  and will keep working — replace them, then revoke the old ones.
+- Recreate your output URLs and update your players, then revoke the old
+  ones. Addresses embed the origin used when creating them, so a URL created
+  over HTTP still says `http`. If a player cannot use HTTPS, keep
+  `IPTVMASTER_PLAIN_OUTPUT_PATHS` set rather than reverting the whole
+  deployment.
 - Verify HSTS is present: `curl -sI https://<hostname> | grep -i strict`.
 - Keep the service off the public internet regardless. TLS protects the
   connection; it is not an argument for exposing the application.

@@ -25,6 +25,9 @@ services:
     environment:
       IPTVMASTER_HOSTNAME: ${IPTVMASTER_HOSTNAME:?Set IPTVMASTER_HOSTNAME in .env}
       IPTVMASTER_TLS: ${IPTVMASTER_TLS:?Set IPTVMASTER_TLS in .env}
+      # Empty is not the same as unset for the proxy, so an unused value is
+      # substituted with a path that never matches.
+      IPTVMASTER_PLAIN_OUTPUT_PATHS: ${IPTVMASTER_PLAIN_OUTPUT_PATHS:-/__plain_output_disabled__}
     ports:
       - '${IPTVMASTER_HTTP_PORT:-80}:80'
       - '${IPTVMASTER_HTTPS_PORT:-443}:443'

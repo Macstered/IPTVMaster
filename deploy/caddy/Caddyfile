@@ -8,6 +8,9 @@
 #
 {
 	admin off
+	# Port 80 is handled entirely by the site below, so that the plain-output
+	# exception applies to the host name as well as to bare addresses.
+	auto_https disable_redirects
 }
 
 {$IPTVMASTER_HOSTNAME} {
@@ -25,5 +28,23 @@
 	}
 }
 
-# Caddy redirects plain HTTP to HTTPS for this site automatically, preserving
-# the configured port, so a session cookie is never sent in the clear.
+# Plain HTTP, for any host name or address that reaches port 80.
+#
+# Everything is redirected to HTTPS, so the editor and its session cookie are
+# never served in the clear. The one exception is opt-in: many IPTV players
+# reject a privately issued certificate, so IPTVMASTER_PLAIN_OUTPUT_PATHS may
+# be set to `/m/* /e/* /p/*` to keep serving the tokenized playlist and guide
+# over HTTP while players catch up. Those URLs carry a bearer token, so use it
+# only on a trusted network. Left unset, nothing matches and everything is
+# redirected.
+http://{$IPTVMASTER_HOSTNAME}, http:// {
+	@outputs path {$IPTVMASTER_PLAIN_OUTPUT_PATHS:/__plain_output_disabled__}
+
+	handle @outputs {
+		reverse_proxy app:8080
+	}
+
+	handle {
+		redir https://{$IPTVMASTER_HOSTNAME}{uri} permanent
+	}
+}
