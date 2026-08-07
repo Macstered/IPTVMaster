@@ -79,4 +79,58 @@ describe('output group policies', () => {
       'Schedule pending',
     ]);
   });
+
+  it('interleaves event groups that share one output group by start time', () => {
+    const secondGroup: OutputGroupPolicy = {
+      ...(policies[0] as OutputGroupPolicy),
+      groupName: 'Elite Sports Events FI',
+    };
+
+    const result = applyOutputGroupPolicies(
+      [
+        entry('20:00 Late match 8/4', 'MTV Urheilu Events FI'),
+        entry('16:00 Afternoon match 8/4', 'MTV Urheilu Events FI'),
+        entry('18:00 Evening match 8/4', 'Elite Sports Events FI'),
+        entry('14:00 Lunch match 8/4', 'Elite Sports Events FI'),
+      ],
+      [...policies, secondGroup],
+    );
+
+    // Both groups publish as "Today's Finnish Sports", so the result is one
+    // schedule rather than one group's block followed by the other's.
+    expect(result.entries.map((value) => value.name)).toEqual([
+      '15:00 Lunch match 8/4',
+      '17:00 Afternoon match 8/4',
+      '19:00 Evening match 8/4',
+      '21:00 Late match 8/4',
+    ]);
+    expect(
+      new Set(result.entries.map((value) => value.attributes['group-title'])),
+    ).toEqual(new Set(["Today's Finnish Sports"]));
+  });
+
+  it('keeps event groups separate when they publish under different names', () => {
+    const secondGroup: OutputGroupPolicy = {
+      ...(policies[0] as OutputGroupPolicy),
+      groupName: 'Elite Sports Events FI',
+      outputGroupName: 'Elite Sports',
+    };
+
+    const result = applyOutputGroupPolicies(
+      [
+        entry('20:00 Late match 8/4', 'MTV Urheilu Events FI'),
+        entry('16:00 Afternoon match 8/4', 'MTV Urheilu Events FI'),
+        entry('18:00 Evening match 8/4', 'Elite Sports Events FI'),
+        entry('14:00 Lunch match 8/4', 'Elite Sports Events FI'),
+      ],
+      [...policies, secondGroup],
+    );
+
+    expect(result.entries.map((value) => value.name)).toEqual([
+      '17:00 Afternoon match 8/4',
+      '21:00 Late match 8/4',
+      '15:00 Lunch match 8/4',
+      '19:00 Evening match 8/4',
+    ]);
+  });
 });

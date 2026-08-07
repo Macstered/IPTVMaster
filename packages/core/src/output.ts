@@ -44,7 +44,12 @@ export function applyOutputGroupPolicies(
           : Number.NaN;
         output.push({
           entry: applied.entry,
-          eventGroup: groupName,
+          // Pooled by the name the entry is published under, not the provider
+          // group it came from. Several event groups can be renamed into one
+          // output group, and there they are a single schedule: sorting them
+          // separately would list one group's evening before the next
+          // group's afternoon.
+          eventGroup: policy.outputGroupName ?? groupName,
           ...(Number.isNaN(parsedStart) ? {} : { startsAt: parsedStart }),
           originalIndex,
         });
