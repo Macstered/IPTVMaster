@@ -2709,14 +2709,29 @@ export class PostgresSourceRepository implements SourceRepository {
         id: string;
         sort_order: number;
       }>(
+        // The policy is read through subqueries rather than an outer join,
+        // because FOR UPDATE cannot lock the nullable side of one and only
+        // the channel rows are being reordered. The name must resolve the
+        // same way the playlist does, or a renamed group matches nothing.
         `SELECT c.id, c.sort_order
          FROM channel c
-         LEFT JOIN group_policy p
-           ON p.source_id = c.source_id AND p.provider_group = c.provider_group
          WHERE c.source_id = $1 AND c.archived_at IS NULL
            AND c.current_upstream_item_id IS NOT NULL
-           AND COALESCE(p.behavior, 'permanent') = 'permanent'
-           AND COALESCE(c.custom_group, c.provider_group) = $2
+           AND COALESCE(
+                 (SELECT p.behavior
+                  FROM group_policy p
+                  WHERE p.source_id = c.source_id
+                    AND p.provider_group = c.provider_group),
+                 'permanent'
+               ) = 'permanent'
+           AND COALESCE(
+                 c.custom_group,
+                 (SELECT p.output_group
+                  FROM group_policy p
+                  WHERE p.source_id = c.source_id
+                    AND p.provider_group = c.provider_group),
+                 c.provider_group
+               ) = $2
          ORDER BY c.sort_order, c.provider_group, c.provider_name, c.id
          FOR UPDATE`,
         [sourceId, outputGroup],
@@ -2838,8 +2853,11 @@ export class PostgresSourceRepository implements SourceRepository {
     }
     if (filters.outputGroup !== undefined) {
       values.push(filters.outputGroup);
+      // Resolved the way the playlist resolves it, so a renamed group is
+      // found under the name it is actually published as.
       conditions.push(
-        `COALESCE(c.custom_group, c.provider_group) = $${values.length}`,
+        `COALESCE(c.custom_group, p.output_group, c.provider_group)
+           = $${values.length}`,
       );
     }
     if (filters.status) {
