@@ -299,6 +299,10 @@ const automationSettingsSchema = z
     message: 'At least one automation field is required',
   });
 
+const automationRefreshSchema = z.object({
+  target: z.enum(['playlist', 'epg']),
+});
+
 const epgSourceCreateSchema = z.object({
   name: z.string().trim().min(1).max(200),
   url: z.url().max(4_000),
@@ -985,24 +989,21 @@ export async function buildApp(
     };
   });
 
-  app.get('/api/v1/automation/settings', async (_request, reply) => {
-    if (!sourceRepository) {
-      return reply
-        .code(503)
-        .send({ error: 'Source persistence is not configured' });
-    }
+  function automationSettingsPayload() {
     const playlist = playlistScheduler?.status();
     const epg = epgScheduler?.status();
     return {
       playlist: {
         available: playlistScheduler !== undefined,
         enabled: playlist?.enabled ?? false,
+        running: playlist?.running ?? false,
         intervalMinutes: playlist?.intervalMinutes ?? 0,
         ...(playlist?.nextRunAt ? { nextRunAt: playlist.nextRunAt } : {}),
       },
       epg: {
         available: epgScheduler !== undefined,
         enabled: epg?.enabled ?? false,
+        running: epg?.running ?? false,
         intervalMinutes: epg?.intervalMinutes ?? 0,
         ...(epg?.nextRunAt ? { nextRunAt: epg.nextRunAt } : {}),
       },
@@ -1012,6 +1013,49 @@ export async function buildApp(
         maximumMinutes: 10_080,
       },
     };
+  }
+
+  app.get('/api/v1/automation/settings', async (_request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    return automationSettingsPayload();
+  });
+
+  /**
+   * Runs a scheduled refresh immediately. The cycle can take minutes on a
+   * large playlist, so it is started and left running: the reported state
+   * tells the caller when it is over. Pausing automatic refreshes does not
+   * disable this — an on-demand update is exactly what a paused setup needs.
+   */
+  app.post('/api/v1/automation/refresh', async (request, reply) => {
+    if (!sourceRepository) {
+      return reply
+        .code(503)
+        .send({ error: 'Source persistence is not configured' });
+    }
+    const parsed = automationRefreshSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: validationMessage(parsed.error) });
+    }
+    const scheduler =
+      parsed.data.target === 'playlist' ? playlistScheduler : epgScheduler;
+    if (!scheduler) {
+      return reply
+        .code(503)
+        .send({ error: 'Automatic refresh is not configured' });
+    }
+    const alreadyRunning = scheduler.status().running;
+    if (!alreadyRunning) {
+      void scheduler.runNow().catch((error: unknown) => {
+        app.log.warn({ err: error }, 'On-demand refresh cycle failed');
+      });
+    }
+    return reply
+      .code(202)
+      .send({ started: !alreadyRunning, ...automationSettingsPayload() });
   });
 
   app.put('/api/v1/automation/settings', async (request, reply) => {

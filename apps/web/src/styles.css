@@ -3135,6 +3135,12 @@ strong {
   padding-top: 20px;
   border-top: 1px solid var(--border);
 }
+.automation-now {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 13px;
+}
 .automation-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(140px, 220px)) auto;

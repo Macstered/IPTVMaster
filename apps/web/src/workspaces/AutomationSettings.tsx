@@ -5,6 +5,7 @@ import { showToast } from '../toast.js';
 interface SchedulerState {
   available: boolean;
   enabled: boolean;
+  running: boolean;
   intervalMinutes: number;
   nextRunAt?: string;
 }
@@ -35,6 +36,7 @@ async function readJson<T>(response: Response): Promise<T> {
 }
 
 function describeNextRun(state: SchedulerState): string {
+  if (state.running) return 'updating now';
   if (!state.enabled) return 'paused';
   if (!state.nextRunAt) return 'running now';
   const dueInMs = new Date(state.nextRunAt).getTime() - Date.now();
@@ -59,6 +61,7 @@ export function AutomationSettings({ active }: AutomationSettingsProps) {
   const [playlistMinutes, setPlaylistMinutes] = useState('');
   const [epgMinutes, setEpgMinutes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [starting, setStarting] = useState<'playlist' | 'epg' | null>(null);
 
   const load = useCallback(async () => {
     const response = await fetch('/api/v1/automation/settings');
@@ -74,6 +77,18 @@ export function AutomationSettings({ active }: AutomationSettingsProps) {
       // The overview stays usable without the schedule card.
     });
   }, [active, load]);
+
+  // A cycle finishes on the server, so while one runs the card polls to notice
+  // it ending. The interval is cleared as soon as nothing is running.
+  const refreshing =
+    settings?.playlist.running === true || settings?.epg.running === true;
+  useEffect(() => {
+    if (!active || !refreshing) return;
+    const timer = setInterval(() => {
+      void load().catch(() => undefined);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [active, refreshing, load]);
 
   async function save(update: Record<string, number | boolean>) {
     setSaving(true);
@@ -100,6 +115,39 @@ export function AutomationSettings({ active }: AutomationSettingsProps) {
       await load().catch(() => undefined);
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Starts a scheduled cycle right now. It covers every enabled provider, and
+   * for the guide the custom XMLTV sources too, which is what makes this
+   * different from importing on a single provider card.
+   */
+  async function refreshNow(target: 'playlist' | 'epg') {
+    setStarting(target);
+    try {
+      const response = await fetch('/api/v1/automation/refresh', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+      const payload = await readJson<
+        AutomationSettingsResponse & { started: boolean }
+      >(response);
+      setSettings(payload);
+      showToast(
+        'success',
+        payload.started
+          ? `${target === 'playlist' ? 'Playlist' : 'Guide'} update started`
+          : `${target === 'playlist' ? 'Playlist' : 'Guide'} update already running`,
+      );
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error ? caught.message : 'Could not start the update',
+      );
+    } finally {
+      setStarting(null);
     }
   }
 
@@ -136,9 +184,36 @@ export function AutomationSettings({ active }: AutomationSettingsProps) {
       <p className="secret-note">
         Provider feeds change slowly and frequent polling is unwelcome, so
         prefer the longest interval you are comfortable with. A change applies
-        immediately and is remembered across restarts. You can still import at
-        any time from a provider card.
+        immediately and is remembered across restarts. “Update now” runs a full
+        cycle over every provider straight away, whether or not automatic
+        refresh is paused.
       </p>
+      <div className="automation-now">
+        <button
+          type="button"
+          className="secondary-button compact"
+          disabled={
+            !settings.playlist.available ||
+            settings.playlist.running ||
+            starting !== null
+          }
+          onClick={() => void refreshNow('playlist')}
+        >
+          {settings.playlist.running
+            ? 'Updating playlist…'
+            : 'Update playlist now'}
+        </button>
+        <button
+          type="button"
+          className="secondary-button compact"
+          disabled={
+            !settings.epg.available || settings.epg.running || starting !== null
+          }
+          onClick={() => void refreshNow('epg')}
+        >
+          {settings.epg.running ? 'Updating guide…' : 'Update guide now'}
+        </button>
+      </div>
       <form className="automation-form" onSubmit={submit}>
         <div>
           <label htmlFor="playlist-interval">Playlist every (minutes)</label>
