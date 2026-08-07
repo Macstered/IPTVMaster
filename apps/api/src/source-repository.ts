@@ -2363,53 +2363,73 @@ export class PostgresSourceRepository implements SourceRepository {
     providerGroup: string,
     input: UpdatePermanentGroupInput,
   ): Promise<BulkUpdateChannelResult> {
-    const values: unknown[] = [sourceId, providerGroup];
-    const updates: string[] = [];
-    const addUpdate = (column: string, value: unknown) => {
-      values.push(value);
-      updates.push(`${column} = $${values.length}`);
+    // Visibility and category are properties of the group, so they apply to
+    // every channel in it. Channels the provider dropped are still members: if
+    // they kept the old flag they would resurface visible the moment their
+    // identifier came back, which is how a hidden group used to reappear.
+    // Renumbering is different — only published channels have a position.
+    const memberValues: unknown[] = [sourceId, providerGroup];
+    const memberUpdates: string[] = [];
+    const addMemberUpdate = (column: string, value: unknown) => {
+      memberValues.push(value);
+      memberUpdates.push(`${column} = $${memberValues.length}`);
     };
-    if (input.enabled !== undefined) addUpdate('enabled', input.enabled);
+    if (input.enabled !== undefined) addMemberUpdate('enabled', input.enabled);
     if (input.customGroup !== undefined)
-      addUpdate('custom_group', input.customGroup);
-    if (input.startSortOrder !== undefined) {
-      values.push(input.startSortOrder);
-      updates.push(`sort_order = $${values.length} + selected.sort_offset`);
+      addMemberUpdate('custom_group', input.customGroup);
+    if (memberUpdates.length === 0 && input.startSortOrder === undefined) {
+      return { updatedCount: 0 };
     }
-    if (updates.length === 0) return { updatedCount: 0 };
+
+    const notAnEventGroup = `NOT EXISTS (
+             SELECT 1
+             FROM group_policy p
+             WHERE p.source_id = c.source_id
+               AND p.provider_group = c.provider_group
+               AND p.behavior = 'event'
+           )`;
 
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const result = await client.query(
-        `WITH selected AS (
-           SELECT c.id,
-                  ROW_NUMBER() OVER (
-                    ORDER BY c.sort_order, c.provider_name, c.id
-                  ) - 1 AS sort_offset
-           FROM channel c
+      let touched = 0;
+      if (memberUpdates.length > 0) {
+        const result = await client.query(
+          `UPDATE channel c
+           SET ${memberUpdates.join(', ')}, updated_at = NOW()
            WHERE c.source_id = $1 AND c.provider_group = $2
              AND c.archived_at IS NULL
-             AND c.current_upstream_item_id IS NOT NULL
-             AND NOT EXISTS (
-               SELECT 1
-               FROM group_policy p
-               WHERE p.source_id = c.source_id
-                 AND p.provider_group = c.provider_group
-                 AND p.behavior = 'event'
-             )
-         )
-         UPDATE channel c
-         SET ${updates.join(', ')}, updated_at = NOW()
-         FROM selected
-         WHERE c.id = selected.id`,
-        values,
-      );
-      if ((result.rowCount ?? 0) > 0) {
+             AND ${notAnEventGroup}`,
+          memberValues,
+        );
+        touched = result.rowCount ?? 0;
+      }
+      if (input.startSortOrder !== undefined) {
+        const result = await client.query(
+          `WITH selected AS (
+             SELECT c.id,
+                    ROW_NUMBER() OVER (
+                      ORDER BY c.sort_order, c.provider_name, c.id
+                    ) - 1 AS sort_offset
+             FROM channel c
+             WHERE c.source_id = $1 AND c.provider_group = $2
+               AND c.archived_at IS NULL
+               AND c.current_upstream_item_id IS NOT NULL
+               AND ${notAnEventGroup}
+           )
+           UPDATE channel c
+           SET sort_order = $3 + selected.sort_offset, updated_at = NOW()
+           FROM selected
+           WHERE c.id = selected.id`,
+          [sourceId, providerGroup, input.startSortOrder],
+        );
+        touched = Math.max(touched, result.rowCount ?? 0);
+      }
+      if (touched > 0) {
         await this.#reconcileEpgMappings(client, sourceId);
       }
       await client.query('COMMIT');
-      return { updatedCount: result.rowCount ?? 0 };
+      return { updatedCount: touched };
     } catch (error) {
       await this.#safeRollback(client);
       throw error;
@@ -4423,7 +4443,17 @@ export class PostgresSourceRepository implements SourceRepository {
                 -- without this a hidden group reappears on every refresh.
                 -- A group that does not exist yet is visible, so genuinely
                 -- new content is noticed.
+                -- Prefer the channels currently being published: they are the
+                -- ones whose visibility the operator can see and set. Rows the
+                -- provider has dropped are a poor sample, because a stale
+                -- visible one would re-enable the whole group.
                 COALESCE(
+                  (SELECT BOOL_OR(existing.enabled)
+                   FROM channel existing
+                   WHERE existing.source_id = $1
+                     AND existing.provider_group = item.provider_group
+                     AND existing.archived_at IS NULL
+                     AND existing.current_upstream_item_id IS NOT NULL),
                   (SELECT BOOL_OR(existing.enabled)
                    FROM channel existing
                    WHERE existing.source_id = $1
