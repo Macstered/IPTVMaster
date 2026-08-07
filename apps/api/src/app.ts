@@ -130,6 +130,11 @@ const groupRemovalSchema = z.object({
   groupName: z.string().min(1).max(500),
 });
 
+const outputGroupUpdateSchema = z.object({
+  groupName: z.string().min(1).max(500),
+  update: z.object({ enabled: z.boolean() }),
+});
+
 const groupPolicySchema = z.object({
   groupName: z.string().min(1).max(500),
   behavior: z.enum(['permanent', 'event']),
@@ -1945,6 +1950,30 @@ export async function buildApp(
         order.data.outputGroups,
       );
       return reply.code(204).send();
+    },
+  );
+
+  app.patch<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/output-groups',
+    async (request, reply) => {
+      if (!sourceRepository?.updateOutputGroup) {
+        return reply
+          .code(503)
+          .send({ error: 'Output group management is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const update = outputGroupUpdateSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!update.success) {
+        return reply.code(400).send({ error: validationMessage(update.error) });
+      }
+      return sourceRepository.updateOutputGroup(
+        sourceId.data,
+        update.data.groupName,
+        update.data.update,
+      );
     },
   );
 

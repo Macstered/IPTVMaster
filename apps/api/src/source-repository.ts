@@ -476,6 +476,11 @@ export interface SourceRepository {
   ): Promise<ChannelListPage>;
   listOutputGroups?(sourceId: string): Promise<OutputGroupSummary[]>;
   listPermanentGroups?(sourceId: string): Promise<PermanentGroupSummary[]>;
+  updateOutputGroup?(
+    sourceId: string,
+    outputGroup: string,
+    input: { enabled: boolean },
+  ): Promise<BulkUpdateChannelResult>;
   listRemovedGroups?(sourceId: string): Promise<RemovedGroupSummary[]>;
   removeGroup?(
     sourceId: string,
@@ -2495,6 +2500,66 @@ export class PostgresSourceRepository implements SourceRepository {
         );
       }
       await client.query('COMMIT');
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Shows or hides a group as it appears in the published playlist. Provider
+   * groups can be reached through their own editor, but a custom group is a
+   * slice of one — several can come from a single provider group — so it needs
+   * a control of its own. Event entries carry visibility on the policy rather
+   * than on channels, and a group can hold both kinds, so both are updated.
+   */
+  async updateOutputGroup(
+    sourceId: string,
+    outputGroup: string,
+    input: { enabled: boolean },
+  ): Promise<BulkUpdateChannelResult> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const channels = await client.query(
+        `UPDATE channel c
+         SET enabled = $3, updated_at = NOW()
+         WHERE c.source_id = $1
+           AND c.archived_at IS NULL
+           AND COALESCE(
+                 c.custom_group,
+                 (SELECT p.output_group
+                  FROM group_policy p
+                  WHERE p.source_id = c.source_id
+                    AND p.provider_group = c.provider_group),
+                 c.provider_group
+               ) = $2
+           AND COALESCE(
+                 (SELECT p.behavior
+                  FROM group_policy p
+                  WHERE p.source_id = c.source_id
+                    AND p.provider_group = c.provider_group),
+                 'permanent'
+               ) = 'permanent'`,
+        [sourceId, outputGroup, input.enabled],
+      );
+      const policies = await client.query(
+        `UPDATE group_policy p
+         SET enabled = $3, updated_at = NOW()
+         WHERE p.source_id = $1
+           AND p.behavior = 'event'
+           AND NOT p.excluded
+           AND COALESCE(p.output_group, p.provider_group) = $2`,
+        [sourceId, outputGroup, input.enabled],
+      );
+      const updatedCount = (channels.rowCount ?? 0) + (policies.rowCount ?? 0);
+      if (updatedCount > 0) {
+        await this.#reconcileEpgMappings(client, sourceId);
+      }
+      await client.query('COMMIT');
+      return { updatedCount };
     } catch (error) {
       await this.#safeRollback(client);
       throw error;

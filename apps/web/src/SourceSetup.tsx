@@ -387,6 +387,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [savingOutputGroupOrder, setSavingOutputGroupOrder] = useState<
     string | null
   >(null);
+  const [savingOutputGroupVisibility, setSavingOutputGroupVisibility] =
+    useState<string | null>(null);
   const [outputGroupCategories, setOutputGroupCategories] = useState<
     OutputGroupSummary[]
   >([]);
@@ -1315,6 +1317,45 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       await loadChannels(source.id, expandedPermanentGroup);
     } finally {
       setSavingChannel(null);
+    }
+  }
+
+  /**
+   * Hides or shows a playlist group by its published name. A custom group is
+   * a slice of a provider group, so this is the only place its visibility can
+   * be set — the provider-group editor would move every sibling with it.
+   */
+  async function setOutputGroupVisible(
+    source: SafeSource,
+    name: string,
+    enabled: boolean,
+  ) {
+    setSavingOutputGroupVisibility(name);
+    try {
+      const response = await fetch(
+        `/api/v1/sources/${source.id}/output-groups`,
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ groupName: name, update: { enabled } }),
+        },
+      );
+      await readJson<{ updatedCount: number }>(response);
+      showToast('success', `${name} ${enabled ? 'published' : 'hidden'}`);
+      await Promise.all([
+        loadOutputGroupCategories(source.id),
+        loadPermanentGroups(source.id),
+        loadGroups(source.id),
+      ]);
+    } catch (caught) {
+      showToast(
+        'error',
+        caught instanceof Error
+          ? caught.message
+          : 'Could not change group visibility',
+      );
+    } finally {
+      setSavingOutputGroupVisibility(null);
     }
   }
 
@@ -3036,8 +3077,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 hidden={collapsedSections['output-group-order']}
               >
                 <p className="secret-note">
-                  Drag groups into their final playlist order. TV, live-event,
-                  and custom groups all share this list.
+                  Drag groups into their final playlist order, and publish or
+                  hide any of them here. TV, live-event, and custom groups all
+                  share this list. Hiding a group removes it from the list
+                  unless “Show hidden groups” is ticked.
                 </p>
                 <div className="channel-search output-group-search">
                   <input
@@ -3168,6 +3211,33 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                               ? 'TV + events'
                               : 'TV'}
                         </span>
+                        <label
+                          className="permanent-visibility-toggle"
+                          title={`Publish ${group.name || 'this group'} in the generated playlist`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={group.visibleEntryCount > 0}
+                            disabled={
+                              group.entryCount === 0 ||
+                              savingOutputGroupVisibility !== null
+                            }
+                            onChange={(event) =>
+                              void setOutputGroupVisible(
+                                primarySource,
+                                group.name,
+                                event.target.checked,
+                              )
+                            }
+                          />
+                          {savingOutputGroupVisibility === group.name
+                            ? 'Saving…'
+                            : group.visibleEntryCount === 0
+                              ? 'Hidden'
+                              : group.visibleEntryCount === group.entryCount
+                                ? 'Visible'
+                                : `${group.visibleEntryCount.toLocaleString()} of ${group.entryCount.toLocaleString()}`}
+                        </label>
                         <button
                           className="secondary-button compact output-group-channels-button"
                           type="button"
