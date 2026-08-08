@@ -7,6 +7,10 @@ IPTVMaster releases use one semantic version across the root package and all wor
 
 No floating `latest` image is published. The application exposes the embedded version and revision at `/health`, and the image carries matching OCI labels.
 
+Both tags are multi-architecture manifests covering `linux/amd64` and `linux/arm64`, so the same version installs on ordinary servers, ARM boards, and the NAS models whose container runtime is ARM. The `linux/amd64` image is built and checked first, and nothing is pushed until the backup and restore verification passes against it; the ARM build then runs under emulation, which is why a tagged release takes noticeably longer than a CI run. After pushing, the workflow re-reads the published manifest and fails if either architecture is missing, since a half-published tag fails at install time instead of at release time.
+
+The SSH deploy flow in [DEPLOY.md](./DEPLOY.md) is unrelated to this: it builds a `linux/amd64` image on the workstation and streams it straight to the host, never touching the registry.
+
 ## Prepare and publish a release
 
 Do the version change through a pull request:

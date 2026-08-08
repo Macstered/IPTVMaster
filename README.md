@@ -113,6 +113,7 @@ npm run check    # format, lint, versions, typecheck, tests, build
   (backups, upgrades, rollback)
 - [docs/HTTPS.md](./docs/HTTPS.md) — optional TLS deployment
 - [docs/DEPLOY.md](./docs/DEPLOY.md) — pushing a build to a LAN host over SSH
+- [docs/SYNOLOGY.md](./docs/SYNOLOGY.md) — running on a Synology NAS
 - [docs/RELEASES.md](./docs/RELEASES.md) — versioned images and GHCR releases
 - [SECURITY.md](./SECURITY.md) — threat model and reporting
 

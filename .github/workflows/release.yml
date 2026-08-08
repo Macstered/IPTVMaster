@@ -22,6 +22,12 @@ jobs:
       - name: Verify tag and release version
         run: node scripts/verify-release-tag.mjs "$GITHUB_REF_NAME"
       - run: npm run check
+      # ARM64 covers Raspberry Pi class hardware and the NAS models whose
+      # container runtimes are ARM, so images are published for both.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
       - name: Sign in to GitHub Container Registry
         run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
         env:
@@ -31,14 +37,38 @@ jobs:
           image_name=$(printf '%s' "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           release_version=${GITHUB_REF_NAME#v}
           revision_tag="sha-${GITHUB_SHA}"
-          docker build \
+
+          # A multi-platform build cannot be loaded into the Docker daemon, so
+          # the native image is built and loaded first and the backup and
+          # restore check runs against that. Nothing is published until it
+          # passes.
+          docker buildx build \
+            --platform linux/amd64 \
             --build-arg "IPTVMASTER_VERSION=$release_version" \
             --build-arg "IPTVMASTER_REVISION=$GITHUB_SHA" \
             --tag "$image_name:$release_version" \
-            --tag "$image_name:$revision_tag" \
+            --load \
             .
           IPTVMASTER_IMAGE="$image_name:$release_version" \
             VERIFY_SKIP_BUILD=true \
             bash scripts/verify-backup-restore.sh
-          docker push "$image_name:$release_version"
-          docker push "$image_name:$revision_tag"
+
+          # Same source and builder, so the verified amd64 layers come from
+          # cache and only arm64 is built here, under emulation.
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "IPTVMASTER_VERSION=$release_version" \
+            --build-arg "IPTVMASTER_REVISION=$GITHUB_SHA" \
+            --tag "$image_name:$release_version" \
+            --tag "$image_name:$revision_tag" \
+            --push \
+            .
+
+          # A published tag that is missing an architecture is worse than a
+          # failed release, because it fails at install time instead.
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx imagetools inspect "$image_name:$release_version" \
+              --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}' \
+              | grep -qx "$platform" \
+              || { echo "Published image is missing $platform"; exit 1; }
+          done
