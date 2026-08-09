@@ -25,12 +25,13 @@ your model cannot run this.
 
    ```yaml
    app:
-     image: ghcr.io/macstered/iptvmaster:<version>
+     image: ghcr.io/macstered/iptvmaster:0.2.0
    ```
 
-   Pin a real version rather than tracking a moving tag, so an upgrade is
-   something you choose. Available versions are listed under the repository's
-   Packages page.
+   The image is public, so Container Manager pulls it without any registry
+   sign-in. Pin a real version rather than tracking a moving tag, so an
+   upgrade is something you choose — no `latest` is published. Available
+   versions are listed on the repository's Packages page.
 
 4. Create a `.env` beside it, following `.env.example`. Two values have no
    defaults and must be set:
