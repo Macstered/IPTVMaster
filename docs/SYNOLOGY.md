@@ -74,7 +74,24 @@ before a version jump.
 
 ## A native Package Center package
 
-There is no SynoCommunity `.spk` for IPTVMaster, and none is planned right
-now. Container Manager covers every model that could run one, and a native
-package would add a second distribution channel to maintain for the same
-result.
+There is no SynoCommunity `.spk` for IPTVMaster. Nothing above depends on
+one: Container Manager runs the published image on every model that could
+install a native package anyway, so a `.spk` would be a convenience, not new
+capability.
+
+If someone wants to build one, it is a reasonable amount of work rather than
+a research project. The `uptime-kuma` package is a close template — a Node
+application that declares `SPK_DEPENDS = "Node.js_v22"` for Synology's own
+runtime instead of bundling one — and SynoCommunity ships a PostgreSQL 17
+package this can depend on. Nothing in the runtime dependency tree is a
+native module, so there is no cross-compiling.
+
+Two changes here would be needed first, and are worth doing anyway:
+`scripts/migrate-postgres.sh` runs `psql` inside a container and would have
+to become a Node script using `pg`, and the built web assets would need
+publishing as a release artifact so packaging does not run Vite on the NAS.
+Open an issue if you intend to package it and those can be done.
+
+The packager would need to be the maintainer. SynoCommunity requires a fresh
+install and an upgrade to be verified on real hardware for every submission,
+and this project's author does not own a Synology.
