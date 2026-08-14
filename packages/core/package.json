@@ -21,7 +21,7 @@
     "ipaddr.js": "^2.5.0",
     "luxon": "^3.7.1",
     "saxes": "^6.0.0",
-    "undici": "^7.29.0"
+    "undici": "^8.10.0"
   },
   "devDependencies": {
     "@types/luxon": "^3.6.2"

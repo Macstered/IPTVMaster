@@ -1,6 +1,6 @@
 # Release, upgrade, and rollback runbook
 
-IPTVMaster releases use one semantic version across the root package and all workspaces. A Git tag must be exactly `vVERSION`. The tag workflow validates this contract, runs the full verification suite, and publishes two private GitHub Container Registry tags:
+IPTVMaster releases use one semantic version across the root package and all workspaces. A Git tag must be exactly `vVERSION`. The tag workflow validates this contract, runs the full verification suite, and publishes two public GitHub Container Registry tags:
 
 - `ghcr.io/macstered/iptvmaster:VERSION`
 - `ghcr.io/macstered/iptvmaster:sha-FULL_COMMIT_SHA`
@@ -50,12 +50,19 @@ Never edit an applied migration. Add the next numbered file. Migrations are forw
 
 ## First pinned deployment
 
-Check out the same release tag as the image. For a private GHCR package, sign Docker in with a personal access token (classic) limited to `read:packages`, then pin `.env`:
+Check out the same release tag as the image. The GHCR package is public, so no
+registry sign-in is needed:
 
 ```sh
 cd /opt/iptvmaster
 git fetch --tags --force
 git switch --detach v0.1.0
+```
+
+If you fork this project and keep your own package private, sign Docker in
+first with a personal access token (classic) limited to `read:packages`:
+
+```sh
 read -rsp 'GHCR token: ' CR_PAT
 printf '%s' "$CR_PAT" | docker login ghcr.io --username YOUR_GITHUB_USERNAME --password-stdin
 unset CR_PAT
