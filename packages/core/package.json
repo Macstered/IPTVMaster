@@ -1,6 +1,6 @@
 {
   "name": "@iptvmaster/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -21,7 +21,7 @@
     "ipaddr.js": "^2.5.0",
     "luxon": "^3.7.1",
     "saxes": "^6.0.0",
-    "undici": "^7.29.0"
+    "undici": "^8.10.0"
   },
   "devDependencies": {
     "@types/luxon": "^3.6.2"
