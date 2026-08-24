@@ -109,8 +109,8 @@ npm run check    # format, lint, versions, typecheck, tests, build
 ## Documentation
 
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — how the pieces fit together
-- [docs/PROXMOX_INSTALL.md](./docs/PROXMOX_INSTALL.md) — production VM runbook
-  (backups, upgrades, rollback)
+- [docs/PROXMOX_INSTALL.md](./docs/PROXMOX_INSTALL.md) — production runbook
+  (VM or LXC, backups, upgrades, rollback)
 - [docs/HTTPS.md](./docs/HTTPS.md) — optional TLS deployment
 - [docs/DEPLOY.md](./docs/DEPLOY.md) — pushing a build to a LAN host over SSH
 - [docs/SYNOLOGY.md](./docs/SYNOLOGY.md) — running on a Synology NAS

@@ -13,6 +13,9 @@ import {
   SnapshotRejectedError,
   fetchImage,
   findBlockedAddressError,
+  normalizeXtreamServer,
+  xtreamGuideUrl,
+  xtreamPlaylistUrl,
   type EventGroupPolicy,
   type M3uEntry,
   type PlaylistInspection,
@@ -90,14 +93,44 @@ const playlistPreviewSchema = z.object({
     .default([]),
 });
 
-const createSourceSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  sourceType: z.enum(['m3u', 'xtream']).default('m3u'),
-  playlistUrl: z.url().max(4_000),
-  epgUrl: z.url().max(4_000).optional(),
-  sourceTimezone: z.string().min(1).default('UTC'),
-  displayTimezone: z.string().min(1).default('UTC'),
-});
+const createSourceSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    sourceType: z.enum(['m3u', 'xtream']).default('m3u'),
+    playlistUrl: z.url().max(4_000).optional(),
+    epgUrl: z.url().max(4_000).optional(),
+    // Panel credentials are trimmed because they are nearly always pasted,
+    // and a trailing newline would otherwise be sent to the provider as part
+    // of the password.
+    xtream: z
+      .object({
+        server: z.string().trim().min(1).max(4_000),
+        username: z.string().trim().min(1).max(200),
+        password: z.string().trim().min(1).max(200),
+      })
+      .optional(),
+    sourceTimezone: z.string().min(1).default('UTC'),
+    displayTimezone: z.string().min(1).default('UTC'),
+  })
+  .superRefine((value, context) => {
+    if (value.sourceType === 'xtream') {
+      if (!value.xtream) {
+        context.addIssue({
+          code: 'custom',
+          message: 'xtream requires server, username, and password',
+          path: ['xtream'],
+        });
+      }
+      return;
+    }
+    if (!value.playlistUrl) {
+      context.addIssue({
+        code: 'custom',
+        message: 'playlistUrl is required',
+        path: ['playlistUrl'],
+      });
+    }
+  });
 
 const updateSourceSchema = z
   .object({
@@ -1153,9 +1186,35 @@ export async function buildApp(
       return reply.code(400).send({ error: validationMessage(parsed.error) });
     }
 
+    // A panel is described by an address and a login; the URLs it serves
+    // are derived here so everything downstream stays a plain playlist and
+    // guide fetch, with no second import path to keep working.
+    let playlistUrl = parsed.data.playlistUrl;
+    let epgUrl = parsed.data.epgUrl;
+    if (parsed.data.sourceType === 'xtream' && parsed.data.xtream) {
+      try {
+        const account = {
+          ...parsed.data.xtream,
+          server: normalizeXtreamServer(parsed.data.xtream.server),
+        };
+        playlistUrl = xtreamPlaylistUrl(account);
+        epgUrl = epgUrl ?? xtreamGuideUrl(account);
+      } catch (error) {
+        return reply.code(400).send({
+          error:
+            error instanceof Error
+              ? error.message
+              : 'The panel address is not usable',
+        });
+      }
+    }
+    if (!playlistUrl) {
+      return reply.code(400).send({ error: 'playlistUrl is required' });
+    }
+
     for (const [label, value] of [
-      ['playlistUrl', parsed.data.playlistUrl],
-      ['epgUrl', parsed.data.epgUrl],
+      ['playlistUrl', playlistUrl],
+      ['epgUrl', epgUrl],
     ] as const) {
       if (value && !['http:', 'https:'].includes(new URL(value).protocol)) {
         return reply
@@ -1168,8 +1227,8 @@ export async function buildApp(
       name: parsed.data.name,
       sourceType: parsed.data.sourceType,
       credentials: {
-        playlistUrl: parsed.data.playlistUrl,
-        ...(parsed.data.epgUrl ? { epgUrl: parsed.data.epgUrl } : {}),
+        playlistUrl,
+        ...(epgUrl ? { epgUrl } : {}),
       },
       sourceTimezone: parsed.data.sourceTimezone,
       displayTimezone: parsed.data.displayTimezone,

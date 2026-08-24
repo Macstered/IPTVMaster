@@ -78,7 +78,7 @@ Expired session rows are removed when a session is issued and by an independent 
 
 Application-level backups use PostgreSQL's custom archive format with owner and privilege metadata omitted, then validate the archive and write a SHA-256 sidecar before retention is applied. Restore validates both checksum and archive before stopping the application, terminates stale database sessions, and uses `pg_restore --single-transaction` so a failed restore does not leave a partially replaced schema. The app restarts only after the restore command returns, followed by an internal health check.
 
-Database archives contain encrypted upstream URLs but intentionally exclude the environment-held master key. Production recovery therefore requires two separately protected assets: a recent database archive and the matching `IPTVMASTER_MASTER_KEY`. Proxmox VM backups remain a second recovery layer outside this application boundary.
+Database archives contain encrypted upstream URLs but intentionally exclude the environment-held master key. Production recovery therefore requires two separately protected assets: a recent database archive and the matching `IPTVMASTER_MASTER_KEY`. Proxmox guest backups remain a second recovery layer outside this application boundary.
 
 ## Release and migration boundary
 
