@@ -3308,3 +3308,12 @@ strong {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+.source-type-choice {
+  display: grid;
+  gap: 6px;
+}
+.source-type-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}

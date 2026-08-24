@@ -2,24 +2,28 @@
 
 This is the target production procedure once a tagged IPTVMaster release is available. Do not use real provider credentials until the application setup flow and secret storage are complete.
 
-## 1. Create the VM
+## 1. Create the guest
 
-Create a minimal supported Debian VM with:
+Create a minimal Debian guest with:
 
 - 2 vCPU
 - 4 GB RAM
 - 32 GB disk on reliable storage
-- VirtIO disk and network devices
-- QEMU guest agent enabled
 - A DHCP reservation or stable address on the trusted LAN
 
-Use a normal VM rather than Docker inside an LXC for straightforward isolation, Docker compatibility, backup, and rollback behavior.
+Either guest type works, and the rest of this runbook applies to both.
+
+A **VM** is the simpler choice: Docker is supported without qualification, and the guest is isolated by its own kernel. Use VirtIO disk and network devices and enable the QEMU guest agent.
+
+An **LXC container** is lighter and starts faster, at the cost of sharing the host kernel, so it isolates the workload less than a VM does. Docker inside LXC needs `nesting=1` on the container, and `keyctl=1` as well if the container is unprivileged. Both are set in the container's options on the Proxmox host, not inside the guest.
+
+To confirm which one you are on, run `systemd-detect-virt` inside the guest: a VM reports `kvm` or `qemu`, a container reports `lxc`.
 
 ## 2. Prepare Debian
 
 1. Install security updates.
 2. Set the system timezone to `Europe/Helsinki`; application data remains UTC.
-3. Install and enable the QEMU guest agent.
+3. On a VM, install and enable the QEMU guest agent. An LXC container does not use it.
 4. Create a non-root administrator and install an SSH public key.
 5. Disable password-based remote root login.
 6. Install Docker Engine and the Compose plugin from Docker's official Debian repository.
@@ -43,7 +47,7 @@ The one-shot `migrate` service must exit successfully before the app starts. It 
 
 The app is initially published on TCP port 8080. Restrict it to trusted LAN clients using the Proxmox firewall, guest firewall, or both. Do not forward the port on the internet router.
 
-On the first browser visit, create the single local administrator account. Store that password in the same private password manager used for the VM administration credentials. Sessions last seven days by default; adjust `IPTVMASTER_SESSION_HOURS` if needed. Leave `IPTVMASTER_SECURE_COOKIES=false` for direct LAN HTTP. Set it to `true` only after an HTTPS reverse proxy is in place and HTTP access is no longer used.
+On the first browser visit, create the single local administrator account. Store that password in the same private password manager used for the guest's administration credentials. Sessions last seven days by default; adjust `IPTVMASTER_SESSION_HOURS` if needed. Leave `IPTVMASTER_SECURE_COOKIES=false` for direct LAN HTTP. Set it to `true` only after an HTTPS reverse proxy is in place and HTTP access is no longer used.
 
 Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be used directly in the player if local DNS is unavailable.
 
@@ -51,25 +55,25 @@ Prefer a DHCP reservation and a `home.arpa` DNS name. A stable IP address can be
 
 - `http://VM_ADDRESS:8080/health` reports healthy.
 - The health response reports the expected pinned version and Git revision.
-- `http://VM_ADDRESS:8080/ready` reports ready and shows whether first-run administrator setup is still required.
+- `http://GUEST_ADDRESS:8080/ready` reports ready and shows whether first-run administrator setup is still required.
 - The browser UI loads from a trusted LAN computer.
 - Unauthenticated editor API requests return `401`, while a signed-in administrator can complete the workflow.
-- The container and VM recover after separate reboots.
+- The Docker containers and the guest itself recover after separate reboots.
 - The provider secret does not appear in container logs.
 - A generated M3U URL loads from another trusted LAN device and stops loading after revocation.
 - The paired XMLTV URL loads in an IPTV player, contains guide programmes, and is also blocked by the same revocation.
-- A test playlist refresh does not relay playback through the VM.
+- A test playlist refresh does not relay playback through the guest.
 
-When creating output URLs, open the setup UI using the VM's stable LAN hostname or address, not `localhost`. The generated address uses the browser origin and must be reachable from your playback devices.
+When creating output URLs, open the setup UI using the guest's stable LAN hostname or address, not `localhost`. The generated address uses the browser origin and must be reachable from your playback devices.
 
 ## 5. Back up
 
 Use two backup layers:
 
 1. Daily application-level PostgreSQL backups with tested restore instructions.
-2. Regular Proxmox VM backups to storage outside the VM disk.
+2. Regular Proxmox backups of the guest, to storage outside the guest's own disk. `vzdump` covers both VMs and LXC containers.
 
-Do not assume a VM snapshot on the same physical disk is a sufficient backup. Test at least one restore before making IPTVMaster the primary playlist source.
+Do not assume a snapshot on the same physical disk is a sufficient backup. Test at least one restore before making IPTVMaster the primary playlist source.
 
 The repository includes a daily systemd timer. Install it after choosing storage outside the application checkout:
 
@@ -83,7 +87,7 @@ sudo systemctl start iptvmaster-backup.service
 sudo systemctl status iptvmaster-backup.service
 ```
 
-The supplied unit assumes the checkout is `/opt/iptvmaster`, writes to `/var/backups/iptvmaster`, runs at about 03:30 local time with a randomized delay, and keeps 14 days. Use `systemctl edit iptvmaster-backup.service` to override the directory or retention. Copy completed archives and their `.sha256` files to storage outside the VM disk.
+The supplied unit assumes the checkout is `/opt/iptvmaster`, writes to `/var/backups/iptvmaster`, runs at about 03:30 local time with a randomized delay, and keeps 14 days. Use `systemctl edit iptvmaster-backup.service` to override the directory or retention. Copy completed archives and their `.sha256` files to storage outside the guest's disk.
 
 Backups include encrypted provider data but do not include `.env` or `IPTVMASTER_MASTER_KEY`. Store the production `.env` or at minimum the master key in a separate secure location.
 

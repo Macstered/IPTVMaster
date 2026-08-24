@@ -311,6 +311,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   );
   const [name, setName] = useState('Home provider');
   const [playlistUrl, setPlaylistUrl] = useState('');
+  const [newSourceType, setNewSourceType] = useState<'m3u' | 'xtream'>('m3u');
+  const [xtreamServer, setXtreamServer] = useState('');
+  const [xtreamUsername, setXtreamUsername] = useState('');
+  const [xtreamPassword, setXtreamPassword] = useState('');
   const [epgUrl, setEpgUrl] = useState('');
   const [providerTimezone, setProviderTimezone] = useState(BROWSER_TIME_ZONE);
   const [saving, setSaving] = useState(false);
@@ -676,6 +680,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setName('Home provider');
     setPlaylistUrl('');
     setEpgUrl('');
+    setNewSourceType('m3u');
+    setXtreamServer('');
+    setXtreamUsername('');
+    setXtreamPassword('');
     setShowSourceForm(false);
   }
 
@@ -744,8 +752,18 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name,
-          sourceType: 'm3u',
-          playlistUrl,
+          sourceType: newSourceType,
+          // A panel is described by its address and login; the server derives
+          // the playlist and guide URLs from them.
+          ...(newSourceType === 'xtream'
+            ? {
+                xtream: {
+                  server: xtreamServer,
+                  username: xtreamUsername,
+                  password: xtreamPassword,
+                },
+              }
+            : { playlistUrl }),
           ...(epgUrl ? { epgUrl } : {}),
           sourceTimezone: providerTimezone.trim() || BROWSER_TIME_ZONE,
           displayTimezone: BROWSER_TIME_ZONE,
@@ -1981,25 +1999,86 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               required
             />
           </div>
-          <div>
-            <label htmlFor="playlist-url">
-              M3U playlist URL{editingConnection ? ' (optional)' : ''}
-            </label>
-            <input
-              id="playlist-url"
-              type="password"
-              value={playlistUrl}
-              onChange={(event) => setPlaylistUrl(event.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={
-                editingConnection
-                  ? 'Leave blank to keep the saved playlist URL'
-                  : undefined
-              }
-              required={!editingConnection}
-            />
-          </div>
+          {editingConnection ? null : (
+            <div className="source-type-choice">
+              <span className="source-type-label">How to connect</span>
+              <div className="epg-chips">
+                <button
+                  type="button"
+                  className={`epg-chip ${newSourceType === 'm3u' ? 'active' : ''}`}
+                  onClick={() => setNewSourceType('m3u')}
+                >
+                  M3U URL
+                </button>
+                <button
+                  type="button"
+                  className={`epg-chip ${newSourceType === 'xtream' ? 'active' : ''}`}
+                  onClick={() => setNewSourceType('xtream')}
+                >
+                  Xtream panel
+                </button>
+              </div>
+            </div>
+          )}
+          {editingConnection || newSourceType === 'm3u' ? (
+            <div>
+              <label htmlFor="playlist-url">
+                M3U playlist URL{editingConnection ? ' (optional)' : ''}
+              </label>
+              <input
+                id="playlist-url"
+                type="password"
+                value={playlistUrl}
+                onChange={(event) => setPlaylistUrl(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={
+                  editingConnection
+                    ? 'Leave blank to keep the saved playlist URL'
+                    : undefined
+                }
+                required={!editingConnection}
+              />
+            </div>
+          ) : (
+            <>
+              <div>
+                <label htmlFor="xtream-server">Panel address</label>
+                <input
+                  id="xtream-server"
+                  value={xtreamServer}
+                  onChange={(event) => setXtreamServer(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="http://panel.example:2095"
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor="xtream-username">Panel username</label>
+                <input
+                  id="xtream-username"
+                  value={xtreamUsername}
+                  onChange={(event) => setXtreamUsername(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor="xtream-password">Panel password</label>
+                <input
+                  id="xtream-password"
+                  type="password"
+                  value={xtreamPassword}
+                  onChange={(event) => setXtreamPassword(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                />
+              </div>
+            </>
+          )}
           <div>
             <label htmlFor="provider-timezone">Provider timezone</label>
             <input
@@ -2012,7 +2091,12 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             />
           </div>
           <div>
-            <label htmlFor="epg-url">XMLTV URL (optional)</label>
+            <label htmlFor="epg-url">
+              XMLTV URL (optional)
+              {!editingConnection && newSourceType === 'xtream'
+                ? ' — leave blank to use the panel guide'
+                : ''}
+            </label>
             <input
               id="epg-url"
               type="password"

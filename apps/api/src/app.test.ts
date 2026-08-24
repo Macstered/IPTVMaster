@@ -1519,6 +1519,136 @@ describe('IPTVMaster API', () => {
     );
   });
 
+  it('builds both provider URLs from panel credentials', async () => {
+    const repository = new MemorySourceRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources',
+      payload: {
+        name: 'Panel provider',
+        sourceType: 'xtream',
+        xtream: {
+          server: 'panel.example:2095',
+          username: 'panel-user',
+          password: 'panel-secret',
+        },
+        sourceTimezone: 'Europe/Stockholm',
+        displayTimezone: 'Europe/Helsinki',
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    // The reply describes the source; it never carries the credentials back.
+    expect(response.body).not.toContain('panel-secret');
+    expect(response.json().source).toEqual(
+      expect.objectContaining({ sourceType: 'xtream', hasEpgUrl: true }),
+    );
+
+    const credentials = repository.inputs[0]?.credentials;
+    expect(credentials?.playlistUrl).toBe(
+      'http://panel.example:2095/get.php?username=panel-user&password=panel-secret&type=m3u_plus&output=ts',
+    );
+    expect(credentials?.epgUrl).toBe(
+      'http://panel.example:2095/xmltv.php?username=panel-user&password=panel-secret',
+    );
+  });
+
+  it('keeps an explicit guide URL instead of deriving one', async () => {
+    const repository = new MemorySourceRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources',
+      payload: {
+        name: 'Panel provider',
+        sourceType: 'xtream',
+        xtream: {
+          server: 'http://panel.example:2095',
+          username: 'panel-user',
+          password: 'panel-secret',
+        },
+        epgUrl: 'http://guides.example/custom.xml',
+        sourceTimezone: 'UTC',
+        displayTimezone: 'UTC',
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(repository.inputs[0]?.credentials.epgUrl).toBe(
+      'http://guides.example/custom.xml',
+    );
+  });
+
+  it('refuses a panel source that is missing its login', async () => {
+    const repository = new MemorySourceRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources',
+      payload: {
+        name: 'Panel provider',
+        sourceType: 'xtream',
+        sourceTimezone: 'UTC',
+        displayTimezone: 'UTC',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(repository.inputs).toHaveLength(0);
+  });
+
+  it('refuses a panel address that is not HTTP', async () => {
+    const repository = new MemorySourceRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources',
+      payload: {
+        name: 'Panel provider',
+        sourceType: 'xtream',
+        xtream: {
+          server: 'ftp://panel.example',
+          username: 'panel-user',
+          password: 'panel-secret',
+        },
+        sourceTimezone: 'UTC',
+        displayTimezone: 'UTC',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(repository.inputs).toHaveLength(0);
+  });
+
+  it('still requires a playlist URL for a plain M3U source', async () => {
+    const repository = new MemorySourceRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources',
+      payload: {
+        name: 'Home provider',
+        sourceType: 'm3u',
+        sourceTimezone: 'UTC',
+        displayTimezone: 'UTC',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(repository.inputs).toHaveLength(0);
+  });
+
   it('derives and securely saves an XMLTV URL for an existing provider', async () => {
     const repository = new MemorySourceRepository();
     const source = await repository.createSource({
