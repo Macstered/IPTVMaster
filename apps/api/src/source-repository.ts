@@ -516,6 +516,7 @@ export interface SourceRepository {
   ): Promise<BulkUpdateChannelResult>;
   listRemovedGroups?(sourceId: string): Promise<RemovedGroupSummary[]>;
   getImportPlan?(sourceId: string): Promise<SourceImportPlan>;
+  pruneSnapshots?(): Promise<number>;
   listVodCategories?(sourceId: string): Promise<VodCategorySummary[]>;
   setVodCategoryEnabled?(
     sourceId: string,
@@ -883,6 +884,24 @@ function describeSourceAuditEvent(row: SourceAuditHistoryRow): {
             : 'The selected retained snapshot became current.',
       };
   }
+}
+
+/**
+ * Deleting one snapshot cascades to tens of thousands of upstream items, so
+ * batches stay small: an instance that has never pruned has hundreds to clear,
+ * and doing that in a few enormous transactions would stall every refresh
+ * waiting behind it.
+ */
+const SNAPSHOT_PRUNE_BATCH = 5;
+
+/**
+ * Retained snapshots per source, beyond the current one. Restoring a snapshot
+ * is a rescue for a bad refresh, so a handful covers the realistic need while
+ * keeping the largest table proportional to the lineup rather than to uptime.
+ */
+function snapshotRetentionCount(): number {
+  const configured = Number(process.env['SNAPSHOT_RETENTION_COUNT']);
+  return Number.isInteger(configured) && configured >= 0 ? configured : 10;
 }
 
 function outputProfileSourceIds(configuration: unknown): string[] {
@@ -1355,6 +1374,17 @@ export class PostgresSourceRepository implements SourceRepository {
       );
       const existingSnapshot = existing.rows[0];
       if (existingSnapshot) {
+        // A provider whose playlist does not change returns this same
+        // fingerprint forever. Without recording the catalogue here, one
+        // imported before categories existed would never gain an index and
+        // the catalogue would look permanently empty.
+        if (inspection.categories.length > 0) {
+          await this.#saveVodCategories(
+            client,
+            sourceId,
+            inspection.categories,
+          );
+        }
         if (!existingSnapshot.is_last_known_good) {
           await this.#activateStoredSnapshot(
             client,
@@ -2537,6 +2567,42 @@ export class PostgresSourceRepository implements SourceRepository {
          updated_at = NOW()`,
       [sourceId, JSON.stringify(values)],
     );
+  }
+
+  /**
+   * Drops snapshot history beyond the retention limit. Every accepted refresh
+   * writes a full copy of the provider's entries, so without this the table
+   * grows without bound and each import pays more index maintenance than the
+   * last — the practical symptom is refreshes that get slower every week.
+   *
+   * The current snapshot is always kept, whatever its age, and deletion is
+   * batched so a long-neglected instance does not take one enormous lock.
+   */
+  async pruneSnapshots(): Promise<number> {
+    const keep = snapshotRetentionCount();
+    let removed = 0;
+    for (;;) {
+      const result = await this.#pool.query(
+        `DELETE FROM source_snapshot
+         WHERE id IN (
+           SELECT id FROM (
+             SELECT id,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY source_id ORDER BY imported_at DESC
+                    ) AS position
+             FROM source_snapshot
+             WHERE NOT is_last_known_good
+           ) AS ranked
+           WHERE ranked.position > $1
+           LIMIT $2
+         )`,
+        [keep, SNAPSHOT_PRUNE_BATCH],
+      );
+      const batch = result.rowCount ?? 0;
+      removed += batch;
+      if (batch < SNAPSHOT_PRUNE_BATCH) break;
+    }
+    return removed;
   }
 
   async listPermanentGroups(

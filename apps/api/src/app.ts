@@ -707,18 +707,36 @@ export async function buildApp(
       (ownsAuthRepository && process.env['MAINTENANCE_ENABLED'] !== 'false'));
   const maintenanceScheduler =
     maintenanceSchedulerEnabled && authService
-      ? new MaintenanceScheduler(authService, app.log, {
-          intervalMs:
-            options.maintenanceIntervalMs ??
-            positiveEnvironmentNumber('MAINTENANCE_INTERVAL_MINUTES', 1_440) *
-              60_000,
-          initialDelayMs:
-            options.maintenanceInitialDelayMs ??
-            positiveEnvironmentNumber(
-              'MAINTENANCE_INITIAL_DELAY_SECONDS',
-              300,
-            ) * 1_000,
-        })
+      ? new MaintenanceScheduler(
+          {
+            cleanupExpiredSessions: () => authService.cleanupExpiredSessions(),
+            // Snapshot history lives in the source repository, which the
+            // maintenance task otherwise knows nothing about.
+            ...(sourceRepository?.pruneSnapshots
+              ? {
+                  pruneSnapshots: () =>
+                    (
+                      sourceRepository as Required<
+                        Pick<SourceRepository, 'pruneSnapshots'>
+                      >
+                    ).pruneSnapshots(),
+                }
+              : {}),
+          },
+          app.log,
+          {
+            intervalMs:
+              options.maintenanceIntervalMs ??
+              positiveEnvironmentNumber('MAINTENANCE_INTERVAL_MINUTES', 1_440) *
+                60_000,
+            initialDelayMs:
+              options.maintenanceInitialDelayMs ??
+              positiveEnvironmentNumber(
+                'MAINTENANCE_INITIAL_DELAY_SECONDS',
+                300,
+              ) * 1_000,
+          },
+        )
       : undefined;
   maintenanceScheduler?.start();
 
