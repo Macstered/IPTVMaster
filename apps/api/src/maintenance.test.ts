@@ -21,9 +21,33 @@ describe('database maintenance automation', () => {
         lastExpiredSessionsRemoved: 4,
       }),
     );
+    // A task without snapshot history still reports the pruning it did not do,
+    // so the log line has one shape whatever is configured.
     expect(logger.info).toHaveBeenCalledWith(
-      { expiredSessionsRemoved: 4 },
+      { expiredSessionsRemoved: 4, prunedSnapshots: 0 },
       'Database maintenance finished',
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('prunes snapshot history alongside expired sessions', async () => {
+    const task = {
+      cleanupExpiredSessions: vi
+        .fn<() => Promise<number>>()
+        .mockResolvedValue(1),
+      pruneSnapshots: vi.fn<() => Promise<number>>().mockResolvedValue(478),
+    };
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const scheduler = new MaintenanceScheduler(task, logger, {
+      intervalMs: 86_400_000,
+      initialDelayMs: 300_000,
+    });
+
+    await scheduler.runNow();
+
+    expect(task.pruneSnapshots).toHaveBeenCalledTimes(1);
+    expect(scheduler.status()).toEqual(
+      expect.objectContaining({ lastPrunedSnapshots: 478 }),
     );
     expect(logger.warn).not.toHaveBeenCalled();
   });

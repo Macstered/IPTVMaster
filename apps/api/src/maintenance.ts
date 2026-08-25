@@ -2,6 +2,8 @@ import { safeRefreshError } from './playlist-refresh.js';
 
 export interface MaintenanceTask {
   cleanupExpiredSessions(): Promise<number>;
+  /** Older snapshots beyond the retention limit, with their upstream items. */
+  pruneSnapshots?(): Promise<number>;
 }
 
 export interface MaintenanceLogger {
@@ -17,6 +19,7 @@ export interface MaintenanceStatus {
   lastRunStartedAt?: string;
   lastRunFinishedAt?: string;
   lastExpiredSessionsRemoved?: number;
+  lastPrunedSnapshots?: number;
   lastSafeError?: string;
 }
 
@@ -33,6 +36,7 @@ export class MaintenanceScheduler {
   #lastRunStartedAt?: string;
   #lastRunFinishedAt?: string;
   #lastExpiredSessionsRemoved?: number;
+  #lastPrunedSnapshots?: number;
   #lastSafeError?: string;
 
   constructor(
@@ -75,6 +79,9 @@ export class MaintenanceScheduler {
       ...(this.#lastExpiredSessionsRemoved !== undefined
         ? { lastExpiredSessionsRemoved: this.#lastExpiredSessionsRemoved }
         : {}),
+      ...(this.#lastPrunedSnapshots !== undefined
+        ? { lastPrunedSnapshots: this.#lastPrunedSnapshots }
+        : {}),
       ...(this.#lastSafeError ? { lastSafeError: this.#lastSafeError } : {}),
     };
   }
@@ -87,8 +94,13 @@ export class MaintenanceScheduler {
     try {
       const expiredSessionsRemoved = await this.#task.cleanupExpiredSessions();
       this.#lastExpiredSessionsRemoved = expiredSessionsRemoved;
+      // Every accepted refresh writes a full copy of the provider's entries.
+      // Without pruning, that table grows without limit and each import pays
+      // more index maintenance than the last.
+      const prunedSnapshots = (await this.#task.pruneSnapshots?.()) ?? 0;
+      this.#lastPrunedSnapshots = prunedSnapshots;
       this.#logger.info(
-        { expiredSessionsRemoved },
+        { expiredSessionsRemoved, prunedSnapshots },
         'Database maintenance finished',
       );
     } catch (error) {
