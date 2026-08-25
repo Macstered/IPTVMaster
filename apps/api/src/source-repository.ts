@@ -894,6 +894,15 @@ function describeSourceAuditEvent(row: SourceAuditHistoryRow): {
  */
 const SNAPSHOT_PRUNE_BATCH = 5;
 
+/** PostgreSQL reports a lock_timeout expiry as lock_not_available. */
+function isLockTimeout(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '55P03'
+  );
+}
+
 /**
  * Retained snapshots per source, beyond the current one. Restoring a snapshot
  * is a rescue for a bad refresh, so a handful covers the realistic need while
@@ -2580,12 +2589,19 @@ export class PostgresSourceRepository implements SourceRepository {
    */
   async pruneSnapshots(): Promise<number> {
     const keep = snapshotRetentionCount();
+    const client = await this.#pool.connect();
     let removed = 0;
-    for (;;) {
-      const result = await this.#pool.query(
-        `DELETE FROM source_snapshot
-         WHERE id IN (
-           SELECT id FROM (
+    try {
+      // Never queue behind a running import. Deleting a snapshot needs a key
+      // share lock on its source row, which an import holds FOR UPDATE for its
+      // whole transaction; without this the prune sat blocked for seventeen
+      // minutes while the import it was waiting for stayed slow for want of
+      // the pruning.
+      await client.query("SET lock_timeout = '5s'");
+
+      for (;;) {
+        const targets = await client.query<{ id: string }>(
+          `SELECT id FROM (
              SELECT id,
                     ROW_NUMBER() OVER (
                       PARTITION BY source_id ORDER BY imported_at DESC
@@ -2594,13 +2610,38 @@ export class PostgresSourceRepository implements SourceRepository {
              WHERE NOT is_last_known_good
            ) AS ranked
            WHERE ranked.position > $1
-           LIMIT $2
-         )`,
-        [keep, SNAPSHOT_PRUNE_BATCH],
-      );
-      const batch = result.rowCount ?? 0;
-      removed += batch;
-      if (batch < SNAPSHOT_PRUNE_BATCH) break;
+           LIMIT $2`,
+          [keep, SNAPSHOT_PRUNE_BATCH],
+        );
+        const ids = targets.rows.map((row) => row.id);
+        if (ids.length === 0) break;
+
+        try {
+          // The upstream items are the bulk of the work and reference only the
+          // snapshot, so clearing them first keeps the expensive part clear of
+          // the source row entirely. What remains for the snapshot delete —
+          // and its brief lock on the source — is a handful of rows.
+          await client.query(
+            `DELETE FROM upstream_item WHERE snapshot_id = ANY($1::uuid[])`,
+            [ids],
+          );
+          const result = await client.query(
+            `DELETE FROM source_snapshot WHERE id = ANY($1::uuid[])`,
+            [ids],
+          );
+          removed += result.rowCount ?? 0;
+        } catch (error) {
+          // A refresh is mid-flight. Stopping leaves the remaining history for
+          // the next run rather than fighting for the lock.
+          if (isLockTimeout(error)) break;
+          throw error;
+        }
+
+        if (ids.length < SNAPSHOT_PRUNE_BATCH) break;
+      }
+    } finally {
+      await client.query('RESET lock_timeout').catch(() => undefined);
+      client.release();
     }
     return removed;
   }
