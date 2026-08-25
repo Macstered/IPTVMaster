@@ -28,6 +28,8 @@ export interface PlaylistInspectionOptions {
   fetchImplementation?: typeof fetch;
   /** Film and series categories to retain, keyed by `mediaCategoryKey`. */
   selectiveGroups?: ReadonlySet<string>;
+  /** Off for a provider kept only for its catalogue. Defaults to on. */
+  includeLive?: boolean;
 }
 
 const REJECTED_CONTENT_TYPES = ['text/html', 'application/json'];
@@ -97,7 +99,7 @@ export async function inspectRemotePlaylist(
   const result = await parseM3u(
     Readable.from(limitedBody(response.body, maxBytes, state, hash)),
     {
-      includeMediaTypes: ['live'],
+      includeMediaTypes: options.includeLive === false ? [] : ['live'],
       // Films and series are counted always but retained only for the
       // categories the operator has switched on.
       ...(options.selectiveGroups
@@ -112,7 +114,11 @@ export async function inspectRemotePlaylist(
     throw new Error('Provider response is not an M3U playlist');
   }
   if (result.entries.length === 0) {
-    throw new Error('Playlist contains no live entries');
+    throw new Error(
+      options.includeLive === false
+        ? 'Playlist contains none of the selected catalogue categories'
+        : 'Playlist contains no live entries',
+    );
   }
 
   return {

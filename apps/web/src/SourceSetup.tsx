@@ -36,6 +36,8 @@ interface SafeSource {
   displayTimezone: string;
   enabled: boolean;
   hasEpgUrl: boolean;
+  importLive: boolean;
+  importCatalogue: boolean;
 }
 
 interface ImportSummary {
@@ -68,6 +70,11 @@ interface GroupSummary {
   sourceTimeZone: string;
   displayTimeZone: string;
   numericDateOrder: 'month-day' | 'day-month';
+}
+
+interface SourceImportScope {
+  importLive: boolean;
+  importCatalogue: boolean;
 }
 
 interface RemovedGroupSummary {
@@ -316,6 +323,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [xtreamServer, setXtreamServer] = useState('');
   const [xtreamUsername, setXtreamUsername] = useState('');
   const [xtreamPassword, setXtreamPassword] = useState('');
+  const [importScope, setImportScope] = useState<SourceImportScope>({
+    importLive: true,
+    importCatalogue: true,
+  });
   const [epgUrl, setEpgUrl] = useState('');
   const [providerTimezone, setProviderTimezone] = useState(BROWSER_TIME_ZONE);
   const [saving, setSaving] = useState(false);
@@ -697,6 +708,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setName(source.name);
     setPlaylistUrl('');
     setEpgUrl('');
+    setImportScope({
+      importLive: source.importLive,
+      importCatalogue: source.importCatalogue,
+    });
     await selectSource(source);
   }
 
@@ -717,6 +732,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             : {}),
           ...(options.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
           ...(options.clearEpgUrl ? { clearEpgUrl: true } : {}),
+          importLive: importScope.importLive,
+          importCatalogue: importScope.importCatalogue,
           sourceTimezone: source.sourceTimezone,
           displayTimezone: source.displayTimezone,
         }),
@@ -2084,6 +2101,47 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               </div>
             </>
           )}
+          {editingConnection ? (
+            <div className="source-type-choice">
+              <span className="source-type-label">
+                Import from this provider
+              </span>
+              <div className="automation-toggles">
+                <label className="permanent-visibility-toggle">
+                  <input
+                    type="checkbox"
+                    checked={importScope.importLive}
+                    onChange={(event) =>
+                      setImportScope((current) => ({
+                        ...current,
+                        importLive: event.target.checked,
+                      }))
+                    }
+                  />
+                  Live TV channels
+                </label>
+                <label className="permanent-visibility-toggle">
+                  <input
+                    type="checkbox"
+                    checked={importScope.importCatalogue}
+                    onChange={(event) =>
+                      setImportScope((current) => ({
+                        ...current,
+                        importCatalogue: event.target.checked,
+                      }))
+                    }
+                  />
+                  Films and series
+                </label>
+              </div>
+              <small className="channel-limit-note">
+                Turning off live leaves a provider you keep only for its
+                catalogue. Films and series are still chosen category by
+                category under Movies &amp; series; this only decides whether
+                the catalogue is looked at during a refresh.
+              </small>
+            </div>
+          ) : null}
           <div>
             <label htmlFor="provider-timezone">Provider timezone</label>
             <input

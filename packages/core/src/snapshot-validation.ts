@@ -23,11 +23,25 @@ export function validateSnapshotCandidate(
   const minimumPreviousRatio = options.minimumPreviousRatio ?? 0.5;
   const maximumIssueRatio = options.maximumIssueRatio ?? 0.1;
   const issueAllowance = options.issueAllowance ?? 100;
-  const liveCount = inspection.entries.length;
+  // Counted by kind rather than by retained length: a snapshot also carries
+  // whichever film and series categories are switched on, and letting those
+  // inflate the live count would make turning a category off look like the
+  // provider had dropped half the channels.
+  const liveCount = inspection.entries.filter(
+    (entry) => entry.mediaType === 'live',
+  ).length;
 
   if (liveCount < minimumLiveEntries) {
     throw new SnapshotRejectedError(
       `Snapshot has ${liveCount} live entries; at least ${minimumLiveEntries} are required`,
+    );
+  }
+
+  // With live import switched off the snapshot is legitimately channel-free,
+  // but something has to be in it or there is nothing to publish.
+  if (minimumLiveEntries === 0 && inspection.entries.length === 0) {
+    throw new SnapshotRejectedError(
+      'Snapshot is empty; enable live import or at least one catalogue category',
     );
   }
 

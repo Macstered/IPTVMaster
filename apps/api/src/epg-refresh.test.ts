@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+﻿import { describe, expect, it, vi } from 'vitest';
 
 import { ProviderHttpError, type XmltvInspection } from '@iptvmaster/core';
 
@@ -49,6 +49,8 @@ function repository(): SourceRepository {
         displayTimezone: 'Europe/Helsinki',
         enabled: true,
         hasEpgUrl: true,
+        importLive: true,
+        importCatalogue: true,
         createdAt: summary.importedAt,
         updatedAt: summary.importedAt,
       },

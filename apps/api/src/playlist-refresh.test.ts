@@ -23,6 +23,8 @@ function source(): SafeSource {
     displayTimezone: 'Europe/Helsinki',
     enabled: true,
     hasEpgUrl: false,
+    importLive: true,
+    importCatalogue: true,
     createdAt: '2026-08-04T00:00:00.000Z',
     updatedAt: '2026-08-04T00:00:00.000Z',
   };
