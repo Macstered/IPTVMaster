@@ -4,9 +4,12 @@ import {
   encryptSecret,
   isSeparatorChannelName,
   looksLikeEventTitle,
+  mediaCategoryKey,
   SnapshotRejectedError,
   validateSnapshotCandidate,
   type M3uEntry,
+  type MediaCategoryCount,
+  type MediaType,
   type NumericDateOrder,
   type OutputGroupPolicy,
   type PlaylistInspection,
@@ -185,6 +188,17 @@ export interface RemovedGroupSummary {
   removedAt: string;
   /** The provider still lists it, so restoring brings the channels straight back. */
   stillOffered: boolean;
+}
+
+export interface VodCategorySummary {
+  mediaType: 'vod' | 'series';
+  providerGroup: string;
+  /** Titles the provider last offered, whether or not any were stored. */
+  itemCount: number;
+  enabled: boolean;
+  /** Titles actually held for this category right now. */
+  storedCount: number;
+  lastSeenAt: string;
 }
 
 export interface UpdatePermanentGroupInput {
@@ -425,6 +439,7 @@ export interface ActiveOutputProfile {
   id: string;
   name: string;
   sourceIds: string[];
+  mediaType: MediaType;
   createdAt: string;
   recoverable: boolean;
   accessToken?: string;
@@ -434,6 +449,7 @@ export interface ResolvedOutputProfile {
   id: string;
   name: string;
   sourceIds: string[];
+  mediaType: MediaType;
 }
 
 export interface SourceRepository {
@@ -459,7 +475,10 @@ export interface SourceRepository {
     inspection: XmltvInspection,
   ): Promise<StoredEpgSummary>;
   getLatestEpg(sourceId: string): Promise<StoredEpgGuide>;
-  getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]>;
+  getLatestPlaylistEntries(
+    sourceId: string,
+    mediaType?: MediaType,
+  ): Promise<M3uEntry[]>;
   listGroups(sourceId: string): Promise<GroupSummary[]>;
   saveGroupPolicy(
     sourceId: string,
@@ -482,6 +501,14 @@ export interface SourceRepository {
     input: { enabled: boolean },
   ): Promise<BulkUpdateChannelResult>;
   listRemovedGroups?(sourceId: string): Promise<RemovedGroupSummary[]>;
+  enabledVodCategoryKeys?(sourceId: string): Promise<Set<string>>;
+  listVodCategories?(sourceId: string): Promise<VodCategorySummary[]>;
+  setVodCategoryEnabled?(
+    sourceId: string,
+    mediaType: 'vod' | 'series',
+    providerGroup: string,
+    enabled: boolean,
+  ): Promise<boolean>;
   removeGroup?(
     sourceId: string,
     providerGroup: string,
@@ -587,6 +614,7 @@ export interface SourceRepository {
   createOutputProfile(
     sourceIds: string[],
     name: string,
+    mediaType?: MediaType,
   ): Promise<CreatedOutputProfile>;
   listOutputProfiles(): Promise<ActiveOutputProfile[]>;
   resolveOutputProfile(
@@ -854,6 +882,18 @@ function outputProfileSourceIds(configuration: unknown): string[] {
   }
   const legacySourceId = record['sourceId'];
   return typeof legacySourceId === 'string' ? [legacySourceId] : [];
+}
+
+/**
+ * Profiles created before films and series existed carry no media type, and
+ * they publish live TV, so an absent value has to keep meaning exactly that.
+ */
+function outputProfileMediaType(configuration: unknown): MediaType {
+  if (typeof configuration !== 'object' || configuration === null) {
+    return 'live';
+  }
+  const value = (configuration as Record<string, unknown>)['mediaType'];
+  return value === 'vod' || value === 'series' ? value : 'live';
 }
 
 export function deriveXmltvUrl(playlistUrl: string): string | null {
@@ -1398,6 +1438,10 @@ export class PostgresSourceRepository implements SourceRepository {
         );
       }
 
+      // The catalogue index is refreshed from every accepted import, so the
+      // operator always browses what the provider currently offers.
+      await this.#saveVodCategories(client, sourceId, inspection.categories);
+
       const removedChannels = await this.#reconcileChannels(
         client,
         sourceId,
@@ -1603,7 +1647,15 @@ export class PostgresSourceRepository implements SourceRepository {
     }
   }
 
-  async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
+  /**
+   * Entries for one kind of content. Films and series are published through
+   * their own output profiles, so a live playlist never grows by a quarter of
+   * a million titles because the catalogue was switched on.
+   */
+  async getLatestPlaylistEntries(
+    sourceId: string,
+    mediaType: MediaType = 'live',
+  ): Promise<M3uEntry[]> {
     const result = await this.#pool.query<StoredEntryRow>(
       `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata,
               c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order,
@@ -1611,7 +1663,8 @@ export class PostgresSourceRepository implements SourceRepository {
               mapping.epg_source_id AS mapping_epg_source_id,
               group_order.sort_order AS group_sort_order
        FROM source_snapshot s
-       JOIN upstream_item i ON i.snapshot_id = s.id
+       JOIN upstream_item i
+         ON i.snapshot_id = s.id AND i.media_type = $2
        LEFT JOIN channel c
          ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN epg_mapping mapping ON mapping.channel_id = c.id
@@ -1640,7 +1693,7 @@ export class PostgresSourceRepository implements SourceRepository {
                 i.provider_group,
                 COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
                 COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
-      [sourceId],
+      [sourceId, mediaType],
     );
     return result.rows.map((row) => {
       const attributes = { ...(row.metadata.attributes ?? {}) };
@@ -2002,7 +2055,8 @@ export class PostgresSourceRepository implements SourceRepository {
               COALESCE(p.numeric_date_order, 'month-day') AS numeric_date_order
        FROM source_snapshot s
        JOIN source src ON src.id = s.source_id
-       JOIN upstream_item i ON i.snapshot_id = s.id
+       JOIN upstream_item i
+         ON i.snapshot_id = s.id AND i.media_type = 'live'
        LEFT JOIN channel c
          ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN group_policy p
@@ -2122,7 +2176,8 @@ export class PostgresSourceRepository implements SourceRepository {
            AND EXISTS (
              SELECT 1
              FROM source_snapshot snap
-             JOIN upstream_item item ON item.snapshot_id = snap.id
+             JOIN upstream_item item
+               ON item.snapshot_id = snap.id AND item.media_type = 'live'
              WHERE snap.source_id = s.id AND snap.is_last_known_good = TRUE
                AND item.provider_group = name.value
            )
@@ -2258,7 +2313,8 @@ export class PostgresSourceRepository implements SourceRepository {
               EXISTS (
                 SELECT 1
                 FROM source_snapshot s
-                JOIN upstream_item i ON i.snapshot_id = s.id
+                JOIN upstream_item i
+                  ON i.snapshot_id = s.id AND i.media_type = 'live'
                 WHERE s.source_id = p.source_id
                   AND s.is_last_known_good = TRUE
                   AND i.provider_group = p.provider_group
@@ -2273,6 +2329,153 @@ export class PostgresSourceRepository implements SourceRepository {
       removedAt: row.removed_at.toISOString(),
       stillOffered: row.available,
     }));
+  }
+
+  /**
+   * The categories whose titles should be retained on the next refresh. Read
+   * before the playlist is fetched, because the parser filters as it streams.
+   */
+  async enabledVodCategoryKeys(sourceId: string): Promise<Set<string>> {
+    const result = await this.#pool.query<{
+      media_type: 'vod' | 'series';
+      provider_group: string;
+    }>(
+      `SELECT media_type, provider_group
+       FROM vod_category
+       WHERE source_id = $1 AND enabled`,
+      [sourceId],
+    );
+    return new Set(
+      result.rows.map((row) =>
+        mediaCategoryKey(row.media_type, row.provider_group),
+      ),
+    );
+  }
+
+  /**
+   * Counts come from the last refresh and describe the whole catalogue;
+   * `storedCount` is what is actually held, which stays zero for a category
+   * enabled since the last refresh.
+   */
+  async listVodCategories(sourceId: string): Promise<VodCategorySummary[]> {
+    const result = await this.#pool.query<{
+      media_type: 'vod' | 'series';
+      provider_group: string;
+      item_count: number;
+      enabled: boolean;
+      stored_count: string | number;
+      last_seen_at: Date;
+    }>(
+      `SELECT c.media_type, c.provider_group, c.item_count, c.enabled,
+              c.last_seen_at,
+              COALESCE(stored.count, 0) AS stored_count
+       FROM vod_category c
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS count
+         FROM source_snapshot s
+         JOIN upstream_item i ON i.snapshot_id = s.id
+         WHERE s.source_id = c.source_id
+           AND s.is_last_known_good
+           AND i.media_type = c.media_type
+           AND i.provider_group = c.provider_group
+       ) AS stored ON TRUE
+       WHERE c.source_id = $1
+       ORDER BY c.media_type, c.provider_group`,
+      [sourceId],
+    );
+    return result.rows.map((row) => ({
+      mediaType: row.media_type,
+      providerGroup: row.provider_group,
+      itemCount: row.item_count,
+      enabled: row.enabled,
+      storedCount: Number(row.stored_count),
+      lastSeenAt: row.last_seen_at.toISOString(),
+    }));
+  }
+
+  /**
+   * Switching a category on does not fetch anything; its titles arrive with
+   * the next refresh. Switching one off drops what is stored immediately,
+   * because that content should stop being published at once.
+   */
+  async setVodCategoryEnabled(
+    sourceId: string,
+    mediaType: 'vod' | 'series',
+    providerGroup: string,
+    enabled: boolean,
+  ): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const updated = await client.query(
+        `UPDATE vod_category
+         SET enabled = $4, updated_at = NOW()
+         WHERE source_id = $1 AND media_type = $2 AND provider_group = $3`,
+        [sourceId, mediaType, providerGroup, enabled],
+      );
+      if ((updated.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      if (!enabled) {
+        await client.query(
+          `DELETE FROM upstream_item i
+           USING source_snapshot s
+           WHERE i.snapshot_id = s.id
+             AND s.source_id = $1
+             AND i.media_type = $2
+             AND i.provider_group = $3`,
+          [sourceId, mediaType, providerGroup],
+        );
+      }
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await this.#safeRollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Refreshes the catalogue index from an import. A category the operator has
+   * chosen keeps that choice even if the provider stops offering it for a
+   * while, so a provider blip does not silently discard the selection.
+   */
+  async #saveVodCategories(
+    client: PoolClient,
+    sourceId: string,
+    categories: readonly MediaCategoryCount[],
+  ): Promise<void> {
+    if (categories.length === 0) return;
+    const values = categories
+      .filter(
+        (category) =>
+          category.mediaType === 'vod' || category.mediaType === 'series',
+      )
+      .map((category) => ({
+        media_type: category.mediaType,
+        provider_group: category.providerGroup,
+        item_count: category.itemCount,
+      }));
+    if (values.length === 0) return;
+
+    await client.query(
+      `INSERT INTO vod_category
+         (source_id, media_type, provider_group, item_count, last_seen_at)
+       SELECT $1, item.media_type, item.provider_group, item.item_count, NOW()
+       FROM jsonb_to_recordset($2::jsonb) AS item(
+         media_type TEXT,
+         provider_group TEXT,
+         item_count INTEGER
+       )
+       ON CONFLICT (source_id, media_type, provider_group) DO UPDATE SET
+         item_count = EXCLUDED.item_count,
+         last_seen_at = NOW(),
+         updated_at = NOW()`,
+      [sourceId, JSON.stringify(values)],
+    );
   }
 
   async listPermanentGroups(
@@ -2316,7 +2519,8 @@ export class PostgresSourceRepository implements SourceRepository {
                 COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0)
                   AS item_sort_order
          FROM source_snapshot s
-         JOIN upstream_item i ON i.snapshot_id = s.id
+         JOIN upstream_item i
+           ON i.snapshot_id = s.id AND i.media_type = 'live'
          LEFT JOIN channel c
            ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
          LEFT JOIN group_policy p
@@ -2585,7 +2789,8 @@ export class PostgresSourceRepository implements SourceRepository {
            SELECT DISTINCT COALESCE(c.custom_group, p.output_group, i.provider_group)
              AS output_group
            FROM source_snapshot s
-           JOIN upstream_item i ON i.snapshot_id = s.id
+           JOIN upstream_item i
+             ON i.snapshot_id = s.id AND i.media_type = 'live'
            LEFT JOIN channel c
              ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
            LEFT JOIN group_policy p
@@ -4109,6 +4314,7 @@ export class PostgresSourceRepository implements SourceRepository {
   async createOutputProfile(
     sourceIds: string[],
     name: string,
+    mediaType: MediaType = 'live',
   ): Promise<CreatedOutputProfile> {
     const uniqueSourceIds = [...new Set(sourceIds)];
     if (uniqueSourceIds.length === 0) {
@@ -4133,13 +4339,17 @@ export class PostgresSourceRepository implements SourceRepository {
            access_token_encrypted,
            configuration
          )
-         VALUES ($1, $2, $3, jsonb_build_object('sourceIds', $4::jsonb))
+         VALUES ($1, $2, $3, jsonb_build_object(
+           'sourceIds', $4::jsonb,
+           'mediaType', $5::text
+         ))
          RETURNING id, name`,
         [
           name,
           accessTokenHash(accessToken),
           encryptSecret(accessToken, this.#masterKey),
           JSON.stringify(uniqueSourceIds),
+          mediaType,
         ],
       );
       profile = result.rows[0];
@@ -4169,12 +4379,14 @@ export class PostgresSourceRepository implements SourceRepository {
     );
     return result.rows.reduce<ActiveOutputProfile[]>((profiles, row) => {
       const sourceIds = outputProfileSourceIds(row.configuration);
+      const mediaType = outputProfileMediaType(row.configuration);
       if (sourceIds.length === 0 || !row.created_at) return profiles;
       if (!row.access_token_encrypted) {
         profiles.push({
           id: row.id,
           name: row.name,
           sourceIds,
+          mediaType,
           createdAt: row.created_at.toISOString(),
           recoverable: false,
         });
@@ -4184,6 +4396,7 @@ export class PostgresSourceRepository implements SourceRepository {
         id: row.id,
         name: row.name,
         sourceIds,
+        mediaType,
         createdAt: row.created_at.toISOString(),
         recoverable: true,
         accessToken: decryptSecret(row.access_token_encrypted, this.#masterKey),
@@ -4205,7 +4418,12 @@ export class PostgresSourceRepository implements SourceRepository {
     if (!row) return null;
     const sourceIds = outputProfileSourceIds(row.configuration);
     return sourceIds.length > 0
-      ? { id: row.id, name: row.name, sourceIds }
+      ? {
+          id: row.id,
+          name: row.name,
+          sourceIds,
+          mediaType: outputProfileMediaType(row.configuration),
+        }
       : null;
   }
 

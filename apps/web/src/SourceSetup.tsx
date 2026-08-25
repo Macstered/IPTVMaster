@@ -4,11 +4,12 @@ import { channelLogoSource, ChannelLogo } from './components/ChannelLogo.js';
 import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
 import { showToast } from './toast.js';
 import { AutomationSettings } from './workspaces/AutomationSettings.js';
+import { CataloguePanel } from './workspaces/CataloguePanel.js';
 import { EpgSourcesPanel } from './workspaces/EpgSourcesPanel.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
 
 export type WorkspaceView =
-  'overview' | 'lineup' | 'events' | 'epg' | 'updates';
+  'overview' | 'lineup' | 'catalogue' | 'events' | 'epg' | 'updates';
 export type LineupView = 'order' | 'channels';
 
 interface SourceSetupProps {
@@ -431,6 +432,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputSourceIds, setOutputSourceIds] = useState<string[]>([]);
   const [outputName, setOutputName] = useState('My playlist');
+  const [outputMediaType, setOutputMediaType] = useState<
+    'live' | 'vod' | 'series'
+  >('live');
   const [outputProfiles, setOutputProfiles] = useState<ActiveOutputProfile[]>(
     [],
   );
@@ -1834,6 +1838,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         body: JSON.stringify({
           sourceIds: outputSourceIds,
           name: outputName.trim() || 'My playlist',
+          mediaType: outputMediaType,
         }),
       });
       await readJson<{ profile: CreatedOutputProfile }>(response);
@@ -3131,6 +3136,11 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             }}
           />
 
+          <CataloguePanel
+            active={workspace === 'catalogue'}
+            {...(primarySource ? { sourceId: primarySource.id } : {})}
+          />
+
           <div
             className={`channel-editor channel-editor-${lineupView}`}
             id="channels"
@@ -4318,6 +4328,31 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                     onChange={(event) => setOutputName(event.target.value)}
                   />
                 </label>
+                <div className="source-type-choice">
+                  <span className="source-type-label">This URL carries</span>
+                  <div className="epg-chips">
+                    {(
+                      [
+                        ['live', 'Live TV'],
+                        ['vod', 'Movies'],
+                        ['series', 'Series'],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`epg-chip ${outputMediaType === value ? 'active' : ''}`}
+                        onClick={() => setOutputMediaType(value)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <small className="channel-limit-note">
+                    Each kind gets its own URL, so a live playlist never grows
+                    by a catalogue your player would download and ignore.
+                  </small>
+                </div>
                 <div className="output-provider-list">
                   {sources.map((source) => (
                     <label key={source.id}>

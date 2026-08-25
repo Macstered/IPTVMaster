@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 
 import type { PlaylistInspection } from './source-import.js';
 import {
@@ -25,6 +25,7 @@ function inspection(liveCount: number, issueCount = 0): PlaylistInspection {
     })),
     mediaCounts: { live: liveCount, vod: 0, series: 0, unknown: 0 },
     skippedEntries: 0,
+    categories: [],
   };
 }
 

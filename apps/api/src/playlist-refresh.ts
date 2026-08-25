@@ -48,7 +48,10 @@ export function safeRefreshError(error: unknown): string {
 
 export class PlaylistRefreshCoordinator {
   readonly #repository: SourceRepository;
-  readonly #inspector: (playlistUrl: string) => Promise<PlaylistInspection>;
+  readonly #inspector: (
+    playlistUrl: string,
+    selectiveGroups?: ReadonlySet<string>,
+  ) => Promise<PlaylistInspection>;
   readonly #retryOptions: Partial<ProviderRetryOptions>;
   readonly #running = new Map<string, Promise<PlaylistRefreshResult>>();
   readonly #states = new Map<string, PlaylistRefreshState>();
@@ -57,7 +60,12 @@ export class PlaylistRefreshCoordinator {
     repository: SourceRepository,
     inspector: (
       playlistUrl: string,
-    ) => Promise<PlaylistInspection> = inspectRemotePlaylist,
+      selectiveGroups?: ReadonlySet<string>,
+    ) => Promise<PlaylistInspection> = (playlistUrl, selectiveGroups) =>
+      inspectRemotePlaylist(
+        playlistUrl,
+        selectiveGroups ? { selectiveGroups } : {},
+      ),
     retryOptions: Partial<ProviderRetryOptions> = {},
   ) {
     this.#repository = repository;
@@ -97,9 +105,14 @@ export class PlaylistRefreshCoordinator {
     try {
       const credentials = await this.#repository.getSourceCredentials(sourceId);
       if (!credentials) throw new SourceNotFoundError('Source not found');
+      // Read before fetching: the parser needs to know which film and series
+      // categories to retain while it streams, because holding the whole
+      // catalogue to filter afterwards is what this design avoids.
+      const selectiveGroups =
+        await this.#repository.enabledVodCategoryKeys?.(sourceId);
       const inspection = await withProviderRetry(() => {
         attempts += 1;
-        return this.#inspector(credentials.playlistUrl);
+        return this.#inspector(credentials.playlistUrl, selectiveGroups);
       }, this.#retryOptions);
       const snapshot = await this.#repository.savePlaylistSnapshot(
         sourceId,

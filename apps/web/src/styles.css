@@ -3317,3 +3317,39 @@ strong {
   font-size: 12px;
   font-weight: 600;
 }
+
+.catalogue-section {
+  margin-top: 18px;
+}
+.catalogue-list {
+  display: grid;
+  gap: 7px;
+  max-height: 420px;
+  margin-top: 12px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+.catalogue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 52px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+.catalogue-row strong,
+.catalogue-row small {
+  display: block;
+}
+.catalogue-row strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+.catalogue-row small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+}

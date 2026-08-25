@@ -56,6 +56,16 @@ XMLTV follows the same bounded refresh model on an independent schedule. The SAX
 
 EPG reconciliation runs after playlist, group-policy, channel-edit, and XMLTV changes. Exact TVG IDs take priority, followed by a unique normalized display-name match; duplicate candidates remain ambiguous instead of being guessed. Manual mappings store the provider's stable XMLTV channel ID separately from the replaceable `epg_channel` row, so a full guide refresh can reconnect the lock transactionally. Published M3U entries receive the canonical mapped `tvg-id`, while XMLTV IDs remain provider-native. Manual map/unlock actions are audited and exposed in source activity.
 
+## Film and series catalogue
+
+A provider's catalogue is an order of magnitude larger than its live lineup; one real account offers 260,076 titles against 24,096 channels. Retaining all of it on every refresh would multiply snapshot size, import time, and per-item stream-URL encryption for content that is mostly never published, so the catalogue is handled by category rather than by title.
+
+Every accepted refresh counts each film and series category while the playlist streams and upserts those counts into `vod_category`, which is what the operator browses. Titles are retained only for categories marked enabled: the refresh reads the enabled set before fetching and passes it to the parser, which keeps matching entries and discards the rest as it goes. Enabling a category therefore takes effect at the next refresh, while disabling one deletes its stored items immediately, because that content must stop being published at once. A category the provider stops offering keeps its row and the operator's choice, so a provider blip does not silently discard a selection.
+
+Categories are keyed by media type as well as name because a film category and a live group can share one, and they are configured independently. For the same reason every query that means "live" joins `upstream_item` on `media_type = 'live'` in the join itself rather than a later filter. Films and series get no channel rows, so they are outside permanent reconciliation, retention, and EPG matching entirely.
+
+Publication is per media type: an output profile records which kind it carries, and profiles created before this existed carry none, which continues to mean live. Each kind therefore has its own token URL rather than one playlist carrying everything.
+
 ## Time handling
 
 All instants are stored as UTC. Provider source and output display zones are stored as IANA timezone names. Event-title localization is applied through selected event-group policies and never as a global EPG offset.

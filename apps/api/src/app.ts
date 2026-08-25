@@ -168,6 +168,14 @@ const outputGroupUpdateSchema = z.object({
   update: z.object({ enabled: z.boolean() }),
 });
 
+const vodCategoryUpdateSchema = z.object({
+  mediaType: z.enum(['vod', 'series']),
+  // A category with no group-title is legitimate, so an empty name is allowed
+  // here where group policies require one.
+  providerGroup: z.string().max(500),
+  enabled: z.boolean(),
+});
+
 const groupPolicySchema = z.object({
   groupName: z.string().min(1).max(500),
   behavior: z.enum(['permanent', 'event']),
@@ -186,6 +194,9 @@ const groupPolicySchema = z.object({
 const outputProfileSchema = z.object({
   sourceIds: z.array(z.uuid()).min(1).max(20),
   name: z.string().trim().min(1).max(120).default('My playlist'),
+  // Each kind of content gets its own URL, so a live playlist is never
+  // enlarged by a catalogue the player has to download to ignore.
+  mediaType: z.enum(['live', 'vod', 'series']).default('live'),
 });
 
 const channelListSchema = z.object({
@@ -364,7 +375,10 @@ const administratorLoginSchema = z.object({
 export interface BuildAppOptions {
   sourceRepository?: SourceRepository;
   authRepository?: AuthRepository;
-  playlistInspector?: (playlistUrl: string) => Promise<PlaylistInspection>;
+  playlistInspector?: (
+    playlistUrl: string,
+    selectiveGroups?: ReadonlySet<string>,
+  ) => Promise<PlaylistInspection>;
   epgInspector?: (epgUrl: string) => Promise<XmltvInspection>;
   enablePlaylistScheduler?: boolean;
   enableEpgScheduler?: boolean;
@@ -574,7 +588,13 @@ export async function buildApp(
   });
 
   let sourceRepository = options.sourceRepository;
-  const playlistInspector = options.playlistInspector ?? inspectRemotePlaylist;
+  const playlistInspector =
+    options.playlistInspector ??
+    ((playlistUrl: string, selectiveGroups?: ReadonlySet<string>) =>
+      inspectRemotePlaylist(
+        playlistUrl,
+        selectiveGroups ? { selectiveGroups } : {},
+      ));
   const epgInspector = options.epgInspector;
   let ownsSourceRepository = false;
   const databaseUrl = process.env['DATABASE_URL'];
@@ -1685,6 +1705,57 @@ export async function buildApp(
   );
 
   app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/vod-categories',
+    async (request, reply) => {
+      if (!sourceRepository?.listVodCategories) {
+        return reply
+          .code(503)
+          .send({ error: 'Catalogue browsing is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      return {
+        categories: await sourceRepository.listVodCategories(sourceId.data),
+      };
+    },
+  );
+
+  app.patch<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/vod-categories',
+    async (request, reply) => {
+      if (!sourceRepository?.setVodCategoryEnabled) {
+        return reply
+          .code(503)
+          .send({ error: 'Catalogue browsing is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      const update = vodCategoryUpdateSchema.safeParse(request.body);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      if (!update.success) {
+        return reply.code(400).send({ error: validationMessage(update.error) });
+      }
+      const changed = await sourceRepository.setVodCategoryEnabled(
+        sourceId.data,
+        update.data.mediaType,
+        update.data.providerGroup,
+        update.data.enabled,
+      );
+      if (!changed) {
+        return reply.code(404).send({ error: 'Category not found' });
+      }
+      return {
+        categories: sourceRepository.listVodCategories
+          ? await sourceRepository.listVodCategories(sourceId.data)
+          : [],
+      };
+    },
+  );
+
+  app.get<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/removed-groups',
     async (request, reply) => {
       if (!sourceRepository?.listRemovedGroups) {
@@ -2460,6 +2531,7 @@ export async function buildApp(
     const profile = await sourceRepository.createOutputProfile(
       parsed.data.sourceIds,
       parsed.data.name,
+      parsed.data.mediaType,
     );
     return reply.code(201).send({ profile });
   });
@@ -2504,7 +2576,10 @@ export async function buildApp(
     const sourceOutputs = await Promise.all(
       profile.sourceIds.map(async (sourceId) => {
         const [entries, policies] = await Promise.all([
-          sourceRepository.getLatestPlaylistEntries(sourceId),
+          sourceRepository.getLatestPlaylistEntries(
+            sourceId,
+            profile.mediaType,
+          ),
           sourceRepository.listOutputGroupPolicies(
             sourceId,
             currentDateInZone(

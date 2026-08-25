@@ -4,7 +4,12 @@ import { Readable } from 'node:stream';
 import { parseM3u } from './m3u.js';
 import { ProviderHttpError } from './provider-error.js';
 import { assertAllowedRequestUrl, guardedFetch } from './safe-fetch.js';
-import type { M3uEntry, M3uParseIssue, MediaType } from './types.js';
+import type {
+  M3uEntry,
+  M3uParseIssue,
+  MediaCategoryCount,
+  MediaType,
+} from './types.js';
 
 export interface PlaylistInspection {
   fingerprint: string;
@@ -13,6 +18,7 @@ export interface PlaylistInspection {
   issues: M3uParseIssue[];
   mediaCounts: Record<MediaType, number>;
   skippedEntries: number;
+  categories: MediaCategoryCount[];
 }
 
 export interface PlaylistInspectionOptions {
@@ -20,6 +26,8 @@ export interface PlaylistInspectionOptions {
   maxBytes?: number;
   maxLiveEntries?: number;
   fetchImplementation?: typeof fetch;
+  /** Film and series categories to retain, keyed by `mediaCategoryKey`. */
+  selectiveGroups?: ReadonlySet<string>;
 }
 
 const REJECTED_CONTENT_TYPES = ['text/html', 'application/json'];
@@ -90,6 +98,11 @@ export async function inspectRemotePlaylist(
     Readable.from(limitedBody(response.body, maxBytes, state, hash)),
     {
       includeMediaTypes: ['live'],
+      // Films and series are counted always but retained only for the
+      // categories the operator has switched on.
+      ...(options.selectiveGroups
+        ? { selectiveGroups: options.selectiveGroups }
+        : {}),
       maxRetainedEntries: maxLiveEntries,
     },
   );
@@ -109,5 +122,6 @@ export async function inspectRemotePlaylist(
     issues: result.issues,
     mediaCounts: result.mediaCounts,
     skippedEntries: result.skippedEntries,
+    categories: result.categories,
   };
 }
