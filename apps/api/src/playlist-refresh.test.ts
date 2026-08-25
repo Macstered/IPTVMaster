@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+﻿import { describe, expect, it, vi } from 'vitest';
 
 import { ProviderHttpError, type PlaylistInspection } from '@iptvmaster/core';
 
@@ -36,6 +36,7 @@ function inspection(): PlaylistInspection {
     issues: [],
     mediaCounts: { live: 0, vod: 0, series: 0, unknown: 0 },
     skippedEntries: 0,
+    categories: [],
   };
 }
 
@@ -156,7 +157,9 @@ describe('playlist refresh automation', () => {
     const first = coordinator.refresh(source().id);
     const second = await coordinator.refresh(source().id);
     expect(second.status).toBe('already-running');
-    expect(inspector).toHaveBeenCalledTimes(1);
+    // The coordinator reads the enabled catalogue categories before fetching,
+    // so the inspection starts a tick later than the second request returns.
+    await vi.waitFor(() => expect(inspector).toHaveBeenCalledTimes(1));
     releaseInspection?.();
     await expect(first).resolves.toEqual(
       expect.objectContaining({ status: 'completed' }),

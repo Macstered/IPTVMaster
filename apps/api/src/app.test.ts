@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+﻿import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   SnapshotRejectedError,
   type M3uEntry,
+  type MediaType,
   type OutputGroupPolicy,
   type PlaylistInspection,
   type XmltvInspection,
@@ -1351,12 +1352,14 @@ class MemorySourceRepository implements SourceRepository {
   async createOutputProfile(
     sourceIds: string[],
     name: string,
+    mediaType: MediaType = 'live',
   ): Promise<CreatedOutputProfile> {
     const accessToken = 'synthetic_output_token_1234567890';
     this.outputProfile = {
       id: '00000000-0000-4000-8000-000000000003',
       name,
       sourceIds,
+      mediaType,
     };
     return {
       id: this.outputProfile.id,
@@ -1751,6 +1754,7 @@ describe('IPTVMaster API', () => {
       issues: [],
       mediaCounts: { live: 1, vod: 2, series: 0, unknown: 0 },
       skippedEntries: 2,
+      categories: [],
     };
     let inspectedUrl = '';
     const app = await buildApp({
@@ -1803,6 +1807,7 @@ describe('IPTVMaster API', () => {
       issues: [],
       mediaCounts: { live: 1, vod: 0, series: 0, unknown: 0 },
       skippedEntries: 0,
+      categories: [],
     };
     const app = await buildApp({
       sourceRepository: repository,
@@ -1839,6 +1844,7 @@ describe('IPTVMaster API', () => {
         issues: [],
         mediaCounts: { live: 0, vod: 0, series: 0, unknown: 0 },
         skippedEntries: 0,
+        categories: [],
       }),
     });
     applications.push(app);
@@ -1880,6 +1886,7 @@ describe('IPTVMaster API', () => {
       issues: [],
       mediaCounts: { live: 1, vod: 0, series: 0, unknown: 0 },
       skippedEntries: 0,
+      categories: [],
     });
     const older = await repository.savePlaylistSnapshot(
       source.id,

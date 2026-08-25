@@ -1,11 +1,13 @@
 import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
 
+import { mediaCategoryKey } from './types.js';
 import type {
   M3uEntry,
   M3uParseIssue,
   M3uParseOptions,
   M3uParseResult,
+  MediaCategoryCount,
   MediaType,
 } from './types.js';
 
@@ -103,6 +105,10 @@ export async function parseM3u(
   const includedMediaTypes = options.includeMediaTypes
     ? new Set(options.includeMediaTypes)
     : null;
+  const selectiveGroups = options.selectiveGroups ?? null;
+  // Counted for every entry, retained or not, so the catalogue can be browsed
+  // without holding a quarter of a million films in memory.
+  const categoryCounts = new Map<string, MediaCategoryCount>();
   const maxRetainedEntries =
     options.maxRetainedEntries ?? Number.POSITIVE_INFINITY;
   let skippedEntries = 0;
@@ -157,10 +163,30 @@ export async function parseM3u(
     pending.url = line;
     pending.mediaType = classifyMediaUrl(line);
     mediaCounts[pending.mediaType] += 1;
-    if (
-      includedMediaTypes === null ||
-      includedMediaTypes.has(pending.mediaType)
-    ) {
+
+    const providerGroup = pending.attributes['group-title'] ?? '';
+    if (pending.mediaType === 'vod' || pending.mediaType === 'series') {
+      const key = mediaCategoryKey(pending.mediaType, providerGroup);
+      const existing = categoryCounts.get(key);
+      if (existing) {
+        existing.itemCount += 1;
+      } else {
+        categoryCounts.set(key, {
+          mediaType: pending.mediaType,
+          providerGroup,
+          itemCount: 1,
+        });
+      }
+    }
+
+    const alwaysIncluded =
+      includedMediaTypes === null || includedMediaTypes.has(pending.mediaType);
+    const chosenCategory =
+      !alwaysIncluded &&
+      selectiveGroups !== null &&
+      selectiveGroups.has(mediaCategoryKey(pending.mediaType, providerGroup));
+
+    if (alwaysIncluded || chosenCategory) {
       if (entries.length >= maxRetainedEntries) {
         throw new Error(
           `Playlist exceeds the ${maxRetainedEntries} retained-entry limit`,
@@ -181,7 +207,17 @@ export async function parseM3u(
     });
   }
 
-  return { entries, issues, mediaCounts, skippedEntries };
+  return {
+    entries,
+    issues,
+    mediaCounts,
+    skippedEntries,
+    categories: [...categoryCounts.values()].sort(
+      (left, right) =>
+        left.mediaType.localeCompare(right.mediaType) ||
+        left.providerGroup.localeCompare(right.providerGroup),
+    ),
+  };
 }
 
 export function parseM3uText(

@@ -72,6 +72,13 @@ const workspaceDetails: Record<
       'Arrange groups and edit the channels that appear in your player.',
     icon: <IconRows />,
   },
+  catalogue: {
+    label: 'Movies & series',
+    title: 'Catalogue',
+    subtitle:
+      'Choose which film and series categories your provider publishes to you.',
+    icon: <IconRows />,
+  },
   events: {
     label: 'Live events',
     title: 'Live event rules',
@@ -105,6 +112,7 @@ function routeFromHash(): { workspace: WorkspaceView; lineupView: LineupView } {
   }
   if (
     head === 'overview' ||
+    head === 'catalogue' ||
     head === 'events' ||
     head === 'epg' ||
     head === 'updates'
@@ -124,6 +132,7 @@ function hashForRoute(
 const workspaceOrder: WorkspaceView[] = [
   'overview',
   'lineup',
+  'catalogue',
   'events',
   'epg',
   'updates',

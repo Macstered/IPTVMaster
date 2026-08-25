@@ -6,9 +6,9 @@ provider's changing M3U and XMLTV feeds on a schedule, preserves your permanent
 edits across those changes, and publishes clean, token-protected playlist and
 guide URLs that any IPTV player can consume.
 
-It is intentionally live-TV only. It does not proxy, relay, transcode, record,
-or redistribute video — published playlists contain direct provider stream
-URLs, so playback traffic never passes through IPTVMaster.
+It does not proxy, relay, transcode, record, or redistribute video — published
+playlists contain direct provider stream URLs, so playback traffic never passes
+through IPTVMaster.
 
 ## What it does
 
@@ -32,6 +32,18 @@ URLs, so playback traffic never passes through IPTVMaster.
 - Groups you do not want at all can be removed outright. Their channels are
   deleted and refreshes will not import them again, but the group is remembered
   and can be restored at any time.
+
+**Films and series, without the bulk**
+
+- A provider's catalogue dwarfs its live lineup — hundreds of thousands of
+  titles against tens of thousands of channels is normal. Every refresh records
+  which categories exist and how large they are, but stores nothing until you
+  ask for a category by name.
+- Movies and series are listed in their own sections and switched on or off
+  like live groups. Switching one on keeps its titles from the next refresh;
+  switching it off removes them at once.
+- Each kind of content is published through its own output URL, so a live
+  playlist never grows by a catalogue your player would download and ignore.
 
 **Daily live-event groups**
 
