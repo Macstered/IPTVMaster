@@ -1,4 +1,4 @@
-import {
+﻿import {
   DEFAULT_PLACEHOLDER_PATTERNS,
   decryptSecret,
   encryptSecret,
@@ -50,6 +50,9 @@ export interface UpdateSourceInput {
   playlistUrl?: string;
   epgUrl?: string;
   deriveEpgUrl?: boolean;
+  /** Left undefined to keep whatever the source already had. */
+  importLive?: boolean;
+  importCatalogue?: boolean;
   clearEpgUrl?: boolean;
   sourceTimezone: string;
   displayTimezone: string;
@@ -67,6 +70,10 @@ export interface SafeSource {
   displayTimezone: string;
   enabled: boolean;
   hasEpgUrl: boolean;
+  /** Whether refreshes import live channels from this provider. */
+  importLive: boolean;
+  /** Whether refreshes index this provider's film and series categories. */
+  importCatalogue: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -188,6 +195,13 @@ export interface RemovedGroupSummary {
   removedAt: string;
   /** The provider still lists it, so restoring brings the channels straight back. */
   stillOffered: boolean;
+}
+
+export interface SourceImportPlan {
+  includeLive: boolean;
+  includeCatalogue: boolean;
+  /** Keyed by `mediaCategoryKey`; empty when the catalogue is not indexed. */
+  selectiveGroups: Set<string>;
 }
 
 export interface VodCategorySummary {
@@ -501,7 +515,7 @@ export interface SourceRepository {
     input: { enabled: boolean },
   ): Promise<BulkUpdateChannelResult>;
   listRemovedGroups?(sourceId: string): Promise<RemovedGroupSummary[]>;
-  enabledVodCategoryKeys?(sourceId: string): Promise<Set<string>>;
+  getImportPlan?(sourceId: string): Promise<SourceImportPlan>;
   listVodCategories?(sourceId: string): Promise<VodCategorySummary[]>;
   setVodCategoryEnabled?(
     sourceId: string,
@@ -632,6 +646,8 @@ interface SourceRow {
   source_timezone: string;
   display_timezone: string;
   enabled: boolean;
+  import_live: boolean;
+  import_catalogue: boolean;
   created_at: Date;
   updated_at: Date;
   encrypted_value?: string;
@@ -922,6 +938,8 @@ function toSafeSource(row: SourceRow, hasEpgUrl: boolean): SafeSource {
     displayTimezone: row.display_timezone,
     enabled: row.enabled,
     hasEpgUrl,
+    importLive: row.import_live,
+    importCatalogue: row.import_catalogue,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -1129,7 +1147,7 @@ export class PostgresSourceRepository implements SourceRepository {
           (name, source_type, credential_ref, source_timezone, display_timezone)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, name, source_type, source_timezone, display_timezone,
-                   enabled, created_at, updated_at`,
+                   enabled, import_live, import_catalogue, created_at, updated_at`,
         [
           input.name,
           input.sourceType,
@@ -1159,7 +1177,8 @@ export class PostgresSourceRepository implements SourceRepository {
       await client.query('BEGIN');
       const sourceResult = await client.query<SourceRow>(
         `SELECT s.id, s.name, s.source_type, s.source_timezone,
-                s.display_timezone, s.enabled, s.created_at, s.updated_at,
+                s.display_timezone, s.enabled, s.import_live,
+                s.import_catalogue, s.created_at, s.updated_at,
                 s.credential_ref, v.encrypted_value
            FROM source s
            JOIN secret_value v ON v.id = s.credential_ref
@@ -1208,11 +1227,21 @@ export class PostgresSourceRepository implements SourceRepository {
       const updatedResult = await client.query<SourceRow>(
         `UPDATE source
             SET name = $2, source_timezone = $3, display_timezone = $4,
+                import_live = COALESCE($5::boolean, import_live),
+                import_catalogue = COALESCE($6::boolean, import_catalogue),
                 updated_at = NOW()
           WHERE id = $1
           RETURNING id, name, source_type, source_timezone, display_timezone,
-                    enabled, created_at, updated_at`,
-        [sourceId, input.name, input.sourceTimezone, input.displayTimezone],
+                    enabled, import_live, import_catalogue, created_at,
+                    updated_at`,
+        [
+          sourceId,
+          input.name,
+          input.sourceTimezone,
+          input.displayTimezone,
+          input.importLive ?? null,
+          input.importCatalogue ?? null,
+        ],
       );
       const updated = updatedResult.rows[0];
       if (!updated) throw new Error('Source update did not return a row');
@@ -1266,7 +1295,8 @@ export class PostgresSourceRepository implements SourceRepository {
   async listSources(): Promise<SafeSource[]> {
     const result = await this.#pool.query<SourceRow>(
       `SELECT s.id, s.name, s.source_type, s.source_timezone, s.display_timezone,
-              s.enabled, s.created_at, s.updated_at, v.encrypted_value
+              s.enabled, s.import_live, s.import_catalogue, s.created_at,
+              s.updated_at, v.encrypted_value
        FROM source s
        JOIN secret_value v ON v.id = s.credential_ref
        ORDER BY s.created_at ASC`,
@@ -1353,8 +1383,18 @@ export class PostgresSourceRepository implements SourceRepository {
          WHERE source_id = $1 AND is_last_known_good = TRUE`,
         [sourceId],
       );
+      const scope = await client.query<{ import_live: boolean }>(
+        `SELECT import_live FROM source WHERE id = $1`,
+        [sourceId],
+      );
       try {
-        validateSnapshotCandidate(inspection, baseline.rows[0]?.live_count);
+        // A provider kept only for its catalogue legitimately has no
+        // channels, so the usual floor of one would reject every import.
+        validateSnapshotCandidate(
+          inspection,
+          baseline.rows[0]?.live_count,
+          scope.rows[0]?.import_live === false ? { minimumLiveEntries: 0 } : {},
+        );
       } catch (error) {
         if (error instanceof SnapshotRejectedError) {
           await client.query('ROLLBACK');
@@ -1384,7 +1424,10 @@ export class PostgresSourceRepository implements SourceRepository {
           sourceId,
           syncRunId,
           inspection.fingerprint,
-          inspection.entries.length,
+          // Channels only. Catalogue titles are counted per category, so
+          // enabling one must not read as the lineup having grown.
+          inspection.entries.filter((entry) => entry.mediaType === 'live')
+            .length,
           inspection.skippedEntries,
           inspection.issues.length,
         ],
@@ -1439,8 +1482,12 @@ export class PostgresSourceRepository implements SourceRepository {
       }
 
       // The catalogue index is refreshed from every accepted import, so the
-      // operator always browses what the provider currently offers.
-      await this.#saveVodCategories(client, sourceId, inspection.categories);
+      // operator always browses what the provider currently offers. A source
+      // with the catalogue switched off reports none, and leaving the stored
+      // index alone keeps any earlier choices intact for when it returns.
+      if (inspection.categories.length > 0) {
+        await this.#saveVodCategories(client, sourceId, inspection.categories);
+      }
 
       const removedChannels = await this.#reconcileChannels(
         client,
@@ -2332,24 +2379,38 @@ export class PostgresSourceRepository implements SourceRepository {
   }
 
   /**
-   * The categories whose titles should be retained on the next refresh. Read
-   * before the playlist is fetched, because the parser filters as it streams.
+   * What a refresh should retain. Read before the playlist is fetched,
+   * because the parser filters as it streams rather than afterwards.
    */
-  async enabledVodCategoryKeys(sourceId: string): Promise<Set<string>> {
-    const result = await this.#pool.query<{
-      media_type: 'vod' | 'series';
-      provider_group: string;
-    }>(
-      `SELECT media_type, provider_group
-       FROM vod_category
-       WHERE source_id = $1 AND enabled`,
-      [sourceId],
-    );
-    return new Set(
-      result.rows.map((row) =>
-        mediaCategoryKey(row.media_type, row.provider_group),
+  async getImportPlan(sourceId: string): Promise<SourceImportPlan> {
+    const [scope, categories] = await Promise.all([
+      this.#pool.query<{ import_live: boolean; import_catalogue: boolean }>(
+        `SELECT import_live, import_catalogue FROM source WHERE id = $1`,
+        [sourceId],
       ),
-    );
+      this.#pool.query<{
+        media_type: 'vod' | 'series';
+        provider_group: string;
+      }>(
+        `SELECT media_type, provider_group
+         FROM vod_category
+         WHERE source_id = $1 AND enabled`,
+        [sourceId],
+      ),
+    ]);
+    const row = scope.rows[0];
+    const includeCatalogue = row?.import_catalogue ?? true;
+    return {
+      includeLive: row?.import_live ?? true,
+      includeCatalogue,
+      selectiveGroups: includeCatalogue
+        ? new Set(
+            categories.rows.map((category) =>
+              mediaCategoryKey(category.media_type, category.provider_group),
+            ),
+          )
+        : new Set<string>(),
+    };
   }
 
   /**
@@ -2571,7 +2632,7 @@ export class PostgresSourceRepository implements SourceRepository {
     // every channel in it. Channels the provider dropped are still members: if
     // they kept the old flag they would resurface visible the moment their
     // identifier came back, which is how a hidden group used to reappear.
-    // Renumbering is different — only published channels have a position.
+    // Renumbering is different â€” only published channels have a position.
     const memberValues: unknown[] = [sourceId, providerGroup];
     const memberUpdates: string[] = [];
     const addMemberUpdate = (column: string, value: unknown) => {
@@ -2715,7 +2776,7 @@ export class PostgresSourceRepository implements SourceRepository {
   /**
    * Shows or hides a group as it appears in the published playlist. Provider
    * groups can be reached through their own editor, but a custom group is a
-   * slice of one — several can come from a single provider group — so it needs
+   * slice of one â€” several can come from a single provider group â€” so it needs
    * a control of its own. Event entries carry visibility on the policy rather
    * than on channels, and a group can hold both kinds, so both are updated.
    */

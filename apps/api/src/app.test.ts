@@ -220,6 +220,8 @@ class MemorySourceRepository implements SourceRepository {
       displayTimezone: input.displayTimezone,
       enabled: true,
       hasEpgUrl: input.credentials.epgUrl !== undefined,
+      importLive: true,
+      importCatalogue: true,
       createdAt: '2026-08-04T00:00:00.000Z',
       updatedAt: '2026-08-04T00:00:00.000Z',
     };
@@ -1515,6 +1517,8 @@ describe('IPTVMaster API', () => {
       expect.objectContaining({
         name: 'Home provider',
         hasEpgUrl: true,
+        importLive: true,
+        importCatalogue: true,
       }),
     );
     expect(repository.inputs[0]?.credentials.playlistUrl).toContain(

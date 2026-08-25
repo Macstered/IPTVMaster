@@ -76,6 +76,20 @@ describe('catalogue categories', () => {
     ]);
   });
 
+  it('keeps only chosen categories when live import is off', async () => {
+    const result = await parseM3uText(playlist, {
+      includeMediaTypes: [],
+      selectiveGroups: new Set([mediaCategoryKey('vod', 'Action')]),
+    });
+
+    // A provider kept purely for its films yields no channels at all.
+    expect(result.entries.map((entry) => entry.name)).toEqual([
+      'Die Hard',
+      'Speed',
+    ]);
+    expect(result.mediaCounts.live).toBe(1);
+  });
+
   it('groups uncategorised titles under an empty name rather than dropping them', async () => {
     const result = await parseM3uText(
       [

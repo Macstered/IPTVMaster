@@ -39,6 +39,7 @@ import {
   SnapshotActivationConflictError,
   XmltvDerivationError,
   type AutomationOverrides,
+  type SourceImportPlan,
   type SourceRepository,
 } from './source-repository.js';
 import {
@@ -138,6 +139,10 @@ const updateSourceSchema = z
     playlistUrl: z.url().max(4_000).optional(),
     epgUrl: z.url().max(4_000).optional(),
     deriveEpgUrl: z.boolean().default(false),
+    // Omitted means unchanged, so an edit that only renames a provider does
+    // not quietly reset what it imports.
+    importLive: z.boolean().optional(),
+    importCatalogue: z.boolean().optional(),
     clearEpgUrl: z.boolean().default(false),
     sourceTimezone: z.string().min(1).default('UTC'),
     displayTimezone: z.string().min(1).default('UTC'),
@@ -377,7 +382,7 @@ export interface BuildAppOptions {
   authRepository?: AuthRepository;
   playlistInspector?: (
     playlistUrl: string,
-    selectiveGroups?: ReadonlySet<string>,
+    plan?: SourceImportPlan,
   ) => Promise<PlaylistInspection>;
   epgInspector?: (epgUrl: string) => Promise<XmltvInspection>;
   enablePlaylistScheduler?: boolean;
@@ -590,10 +595,15 @@ export async function buildApp(
   let sourceRepository = options.sourceRepository;
   const playlistInspector =
     options.playlistInspector ??
-    ((playlistUrl: string, selectiveGroups?: ReadonlySet<string>) =>
+    ((playlistUrl: string, plan?: SourceImportPlan) =>
       inspectRemotePlaylist(
         playlistUrl,
-        selectiveGroups ? { selectiveGroups } : {},
+        plan
+          ? {
+              selectiveGroups: plan.selectiveGroups,
+              includeLive: plan.includeLive,
+            }
+          : {},
       ));
   const epgInspector = options.epgInspector;
   let ownsSourceRepository = false;
@@ -1290,6 +1300,12 @@ export async function buildApp(
             : {}),
           ...(parsed.data.epgUrl ? { epgUrl: parsed.data.epgUrl } : {}),
           ...(parsed.data.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
+          ...(parsed.data.importLive === undefined
+            ? {}
+            : { importLive: parsed.data.importLive }),
+          ...(parsed.data.importCatalogue === undefined
+            ? {}
+            : { importCatalogue: parsed.data.importCatalogue }),
           ...(parsed.data.clearEpgUrl ? { clearEpgUrl: true } : {}),
           sourceTimezone: parsed.data.sourceTimezone,
           displayTimezone: parsed.data.displayTimezone,
