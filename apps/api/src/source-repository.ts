@@ -468,6 +468,7 @@ export interface ResolvedOutputProfile {
 }
 
 export interface SourceRepository {
+  recoverInterruptedSyncRuns?(): Promise<number>;
   createSource(input: CreateSourceInput): Promise<SafeSource>;
   updateSource(
     sourceId: string,
@@ -5163,6 +5164,22 @@ export class PostgresSourceRepository implements SourceRepository {
          updated_at = NOW()`,
       [sourceId, JSON.stringify(values)],
     );
+  }
+
+  /**
+   * A sync row is inserted before snapshot persistence starts. If the process
+   * exits during that transaction, PostgreSQL rolls the snapshot work back but
+   * the earlier row remains `running`. This app has one API process, so every
+   * such row is orphaned when a new process starts.
+   */
+  async recoverInterruptedSyncRuns(): Promise<number> {
+    const result = await this.#pool.query(
+      `UPDATE sync_run
+       SET status = 'failed', finished_at = NOW(),
+           safe_error = 'Refresh interrupted by application restart'
+       WHERE status = 'running' AND finished_at IS NULL`,
+    );
+    return result.rowCount ?? 0;
   }
 
   async close(): Promise<void> {

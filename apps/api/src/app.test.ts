@@ -58,6 +58,8 @@ function syntheticProviderUrl(path: string): string {
 }
 
 class MemorySourceRepository implements SourceRepository {
+  interruptedSyncRuns = 0;
+  recoveryCalls = 0;
   readonly inputs: CreateSourceInput[] = [];
   readonly sources: SafeSource[] = [];
   latestEntries: M3uEntry[] = [];
@@ -87,6 +89,13 @@ class MemorySourceRepository implements SourceRepository {
     }
   >();
   #epgSourceSequence = 0;
+
+  async recoverInterruptedSyncRuns(): Promise<number> {
+    this.recoveryCalls += 1;
+    const recovered = this.interruptedSyncRuns;
+    this.interruptedSyncRuns = 0;
+    return recovered;
+  }
 
   #allGuideChannels(sourceName: string) {
     const own = this.latestEpg.channels.map((channel) => ({
@@ -1453,6 +1462,17 @@ describe('IPTVMaster API', () => {
       version: 'development',
       revision: 'unknown',
     });
+  });
+
+  it('recovers refresh jobs interrupted by a previous app exit', async () => {
+    const repository = new MemorySourceRepository();
+    repository.interruptedSyncRuns = 2;
+
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    expect(repository.recoveryCalls).toBe(1);
+    expect(repository.interruptedSyncRuns).toBe(0);
   });
 
   it('previews Stockholm-to-Helsinki event localization', async () => {

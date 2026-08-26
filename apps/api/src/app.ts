@@ -628,6 +628,22 @@ export async function buildApp(
     sourceRepository = new PostgresSourceRepository(databaseUrl, masterKey);
     ownsSourceRepository = true;
   }
+  if (sourceRepository?.recoverInterruptedSyncRuns) {
+    try {
+      const recoveredRuns = await sourceRepository.recoverInterruptedSyncRuns();
+      if (recoveredRuns > 0) {
+        app.log.warn(
+          { recoveredRuns },
+          'Marked refresh jobs interrupted by the previous app exit as failed',
+        );
+      }
+    } catch (error) {
+      app.log.warn(
+        { err: error },
+        'Could not recover refresh jobs interrupted by the previous app exit',
+      );
+    }
+  }
   let authRepository = options.authRepository;
   let ownsAuthRepository = false;
   if (!authRepository && databaseUrl) {
