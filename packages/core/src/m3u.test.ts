@@ -53,6 +53,9 @@ describe('M3U parsing', () => {
     const generated = serializeM3u(parsed.entries);
     const reparsed = await parseM3uText(generated);
 
+    expect(generated).toBe(
+      '#EXTM3U\r\n#EXTINF:-1 tvg-name="Yle TV1" group-title="Finland",Yle TV1\r\nhttp://provider.test/u/p/1\r\n',
+    );
     expect(reparsed.entries).toHaveLength(1);
     expect(reparsed.entries[0]?.name).toBe('Yle TV1');
     expect(reparsed.entries[0]?.mediaType).toBe('live');
