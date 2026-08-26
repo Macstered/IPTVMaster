@@ -37,13 +37,10 @@ export function validateSnapshotCandidate(
     );
   }
 
-  // With live import switched off the snapshot is legitimately channel-free,
-  // but something has to be in it or there is nothing to publish.
-  if (minimumLiveEntries === 0 && inspection.entries.length === 0) {
-    throw new SnapshotRejectedError(
-      'Snapshot is empty; enable live import or at least one catalogue category',
-    );
-  }
+  // An empty snapshot is deliberately allowed when live import is off: the
+  // first pass over a catalogue-only provider retains nothing and exists to
+  // record which categories are on offer. Rejecting it would leave no way to
+  // ever choose one.
 
   if (
     previousLiveCount !== undefined &&

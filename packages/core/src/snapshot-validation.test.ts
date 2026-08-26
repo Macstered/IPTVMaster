@@ -74,12 +74,14 @@ describe('catalogue titles and the live count', () => {
     ).not.toThrow();
   });
 
-  it('rejects a snapshot that would publish nothing at all', () => {
+  it('accepts an empty snapshot when live import is off', () => {
+    // The first pass over a catalogue-only provider retains nothing; it exists
+    // to record what categories are on offer so one can be chosen.
     expect(() =>
       validateSnapshotCandidate(withCatalogue(0, 0), undefined, {
         minimumLiveEntries: 0,
       }),
-    ).toThrow(/empty/i);
+    ).not.toThrow();
   });
 });
 

@@ -42,6 +42,36 @@ describe('remote playlist inspection', () => {
     expect(result.fingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('indexes the catalogue on a first pass with live import off', async () => {
+    // The case that failed in practice: a provider added for its films only.
+    // Nothing can be selected before an import has found the categories, so
+    // retaining nothing has to succeed or the provider can never be set up.
+    const result = await inspectRemotePlaylist('http://provider.test/get.php', {
+      fetchImplementation: responseFor(mixedPlaylist),
+      includeLive: false,
+    });
+
+    expect(result.entries).toHaveLength(0);
+    expect(result.categories).toEqual([
+      { mediaType: 'vod', providerGroup: 'Movies', itemCount: 1 },
+    ]);
+  });
+
+  it('refuses a catalogue-only import of a playlist with no catalogue', async () => {
+    const liveOnly = [
+      '#EXTM3U',
+      '#EXTINF:-1 group-title="Finland",Yle TV1',
+      'http://provider.test/user/pass/1',
+    ].join('\n');
+
+    await expect(
+      inspectRemotePlaylist('http://provider.test/get.php', {
+        fetchImplementation: responseFor(liveOnly),
+        includeLive: false,
+      }),
+    ).rejects.toThrow(/no films or series/i);
+  });
+
   it('rejects an HTML provider error page', async () => {
     await expect(
       inspectRemotePlaylist('http://provider.test/get.php', {

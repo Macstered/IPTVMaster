@@ -1382,7 +1382,23 @@ export class PostgresSourceRepository implements SourceRepository {
         [sourceId, inspection.fingerprint],
       );
       const existingSnapshot = existing.rows[0];
+      // The fingerprint describes the provider's data, not what was kept from
+      // it. Enabling a catalogue category changes the second without changing
+      // the first, so a count mismatch means this import must be stored even
+      // though the playlist itself is unchanged — otherwise a newly chosen
+      // category would wait for a refresh that never comes.
+      let selectionChanged = false;
       if (existingSnapshot) {
+        const stored = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM upstream_item
+           WHERE snapshot_id = $1`,
+          [existingSnapshot.id],
+        );
+        selectionChanged =
+          Number(stored.rows[0]?.count ?? 0) !== inspection.entries.length;
+      }
+
+      if (existingSnapshot && !selectionChanged) {
         // A provider whose playlist does not change returns this same
         // fingerprint forever. Without recording the catalogue here, one
         // imported before categories existed would never gain an index and
@@ -1446,6 +1462,19 @@ export class PostgresSourceRepository implements SourceRepository {
           syncRunId = undefined;
         }
         throw error;
+      }
+
+      if (existingSnapshot) {
+        // Same provider data, different selection. Replacing the stored copy
+        // keeps one snapshot per fingerprint, so the lookup above stays
+        // unambiguous and history does not fill with duplicates every time a
+        // category is switched on.
+        await client.query('DELETE FROM upstream_item WHERE snapshot_id = $1', [
+          existingSnapshot.id,
+        ]);
+        await client.query('DELETE FROM source_snapshot WHERE id = $1', [
+          existingSnapshot.id,
+        ]);
       }
 
       await client.query(

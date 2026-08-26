@@ -114,11 +114,16 @@ export async function inspectRemotePlaylist(
     throw new Error('Provider response is not an M3U playlist');
   }
   if (result.entries.length === 0) {
-    throw new Error(
-      options.includeLive === false
-        ? 'Playlist contains none of the selected catalogue categories'
-        : 'Playlist contains no live entries',
-    );
+    if (options.includeLive !== false) {
+      throw new Error('Playlist contains no live entries');
+    }
+    // A catalogue-only provider retains nothing until categories are chosen,
+    // and they cannot be chosen before an import has found them. That first
+    // pass exists to build the index, so an empty result is the expected
+    // outcome rather than a failure — unless there was no catalogue at all.
+    if (result.categories.length === 0) {
+      throw new Error('Playlist contains no films or series');
+    }
   }
 
   return {
