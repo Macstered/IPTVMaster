@@ -3259,7 +3259,19 @@ describe('IPTVMaster API', () => {
       },
     ]);
 
-    const app = await buildApp({ sourceRepository: repository });
+    const app = await buildApp({
+      sourceRepository: repository,
+      xtreamSeriesArtworkLoader: async (playlistUrl) => {
+        expect(playlistUrl).toBe('http://provider.test/all');
+        return [
+          {
+            name: 'Example Show',
+            categoryName: 'Drama',
+            cover: 'https://images.test/example-show-poster.jpg',
+          },
+        ];
+      },
+    });
     applications.push(app);
     const profileResponse = await app.inject({
       method: 'POST',
@@ -3344,7 +3356,10 @@ describe('IPTVMaster API', () => {
     const series = seriesResponse.json();
     expect(series).toHaveLength(1);
     expect(series[0]).toEqual(
-      expect.objectContaining({ name: 'Example Show' }),
+      expect.objectContaining({
+        name: 'Example Show',
+        cover: 'https://images.test/example-show-poster.jpg',
+      }),
     );
     const seriesInfoResponse = await app.inject({
       method: 'GET',
@@ -3362,6 +3377,9 @@ describe('IPTVMaster API', () => {
     ).toEqual([1, 2]);
     expect(seriesInfo.episodes['1'][0]).toEqual(
       expect.objectContaining({ id: '101', direct_source: '' }),
+    );
+    expect(seriesInfo.episodes['1'][0].info.movie_image).toBe(
+      'http://logos.test/show.png',
     );
 
     const playbackResponse = await app.inject({
