@@ -251,6 +251,7 @@ function escapeAttribute(value: string): string {
 }
 
 export function serializeM3u(entries: readonly M3uEntry[]): string {
+  const lineEnding = '\r\n';
   const output = ['#EXTM3U'];
 
   for (const entry of entries) {
@@ -263,5 +264,5 @@ export function serializeM3u(entries: readonly M3uEntry[]): string {
     output.push(entry.url);
   }
 
-  return `${output.join('\n')}\n`;
+  return `${output.join(lineEnding)}${lineEnding}`;
 }
