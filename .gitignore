@@ -34,6 +34,10 @@ Thumbs.db
 .tmp/
 tmp/
 
+# Operator notes that name the local host; the repository is public and its
+# history was rewritten to remove LAN addresses.
+*.local.md
+
 
 # Claude Code local session settings
 .claude/
