@@ -45,6 +45,10 @@ through IPTVMaster.
 - An output can carry any combination of content. Combined outputs also expose
   dedicated Live TV, Movies, and Series M3U links under the same revocable
   token for players that cannot reliably split a large mixed playlist.
+- Xtream-compatible login details are generated alongside the URLs. This is
+  the recommended connection for large catalogues: series are published as a
+  compact show list, and a player fetches the episodes for one show only when
+  needed instead of indexing every episode in a 100,000+ row M3U.
 
 **Daily live-event groups**
 
@@ -105,8 +109,10 @@ docker compose up --build -d
 
 Open `http://localhost:8080`, create the administrator account, add your
 provider's M3U (and optional XMLTV) URL, import, and shape the lineup. Then
-create output URLs and point your IPTV player at the generated `/m/<token>`
-playlist and `/e/<token>` guide addresses.
+create an output. For Live TV, use the generated `/m/<token>` playlist and
+`/e/<token>` guide addresses. For Movies and Series, prefer the Xtream login
+shown on the output card: the server is the IPTVMaster address, the username is
+`iptvmaster`, and the password is that output's revocable access token.
 
 Losing `IPTVMASTER_MASTER_KEY` makes stored provider credentials
 unrecoverable; back it up separately and never commit it.

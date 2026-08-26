@@ -64,7 +64,7 @@ Every accepted refresh counts each film and series category while the playlist s
 
 Categories are keyed by media type as well as name because a film category and a live group can share one, and they are configured independently. For the same reason every query that means "live" joins `upstream_item` on `media_type = 'live'` in the join itself rather than a later filter. Films and series get no channel rows, so they are outside permanent reconciliation, retention, and EPG matching entirely.
 
-Publication is per media type: an output profile records which kind it carries, and profiles created before this existed carry none, which continues to mean live. Each kind therefore has its own token URL rather than one playlist carrying everything.
+Publication is selected per media type: an output profile records which kinds it carries, and profiles created before this existed carry none, which continues to mean live. A combined M3U and dedicated Live TV, Movies, and Series M3U paths share the same revocable token. The same profile is also exposed through an Xtream-compatible API: `iptvmaster` is the fixed username and the output token is the password. Series list responses collapse retained episode rows into show summaries, while `get_series_info` returns episodes for the selected show. Short-lived promise caches prevent concurrent catalogue requests from rebuilding the retained index repeatedly.
 
 ## Time handling
 
@@ -72,15 +72,15 @@ All instants are stored as UTC. Provider source and output display zones are sto
 
 ## Published playlist access
 
-An output profile receives a cryptographically random token. PostgreSQL stores only its SHA-256 hash; the plaintext token is returned once when the profile is created. Requests resolve the token, load the current last-known-good data, and serialize M3U or XMLTV. M3U generation applies enabled group policies; XMLTV timestamps are emitted in UTC. Revoking a profile disables both URLs without touching the source or snapshots.
+An output profile receives a cryptographically random token. PostgreSQL stores its SHA-256 hash for request verification and an AES-256-GCM encrypted copy so the signed-in administrator can recover the connection details on another device. Requests resolve the token, load the current last-known-good data, and serialize M3U, XMLTV, or Xtream responses. M3U generation applies enabled group policies; XMLTV timestamps are emitted in UTC. Revoking a profile disables all of its player access without touching the source or snapshots.
 
-Published M3U entries contain the upstream stream URL so the server is not in the playback data path. The endpoint uses private/no-store cache headers until conditional publication and versioning are added.
+Published M3U entries contain the upstream stream URL so the server is not in the playback data path. Xtream catalogue payloads do not expose upstream URLs; their local `/live`, `/movie`, and `/series` playback paths validate the output token and redirect to the current retained upstream stream. Output endpoints use private/no-store cache headers until conditional publication and versioning are added.
 
 ## Administrator boundary
 
 The browser editor and every `/api/v1` route outside the authentication endpoints require a database-backed administrator session. First-run setup is guarded by a database singleton constraint so concurrent requests cannot create multiple administrators. Passwords use scrypt with per-account random salts. Random session and CSRF values are returned only as cookies while PostgreSQL stores their SHA-256 hashes; the session cookie is `HttpOnly`, both are `SameSite=Strict`, and the `Secure` attribute is enabled when HTTPS mode is configured.
 
-Unsafe editor requests require the session, a matching readable CSRF cookie/header pair, the stored CSRF hash, and a same-origin browser request. Login failures are throttled without revealing whether a username exists. Liveness remains public, readiness checks database access, and tokenized `/p/` endpoints remain outside browser authentication so IPTV players can refresh without a session cookie. Security headers deny framing, MIME sniffing, unnecessary browser capabilities, and off-origin scripts.
+Unsafe editor requests require the session, a matching readable CSRF cookie/header pair, the stored CSRF hash, and a same-origin browser request. Login failures are throttled without revealing whether a username exists. Liveness remains public, readiness checks database access, and tokenized M3U, XMLTV, and Xtream player endpoints remain outside browser authentication so IPTV players can refresh without a session cookie. Security headers deny framing, MIME sniffing, unnecessary browser capabilities, and off-origin scripts.
 
 Expired session rows are removed when a session is issued and by an independent daily maintenance scheduler, so cleanup still runs during long periods without administrator logins. Playlist history is not pruned automatically because it is the rollback source of record. Accepted XMLTV imports delete and replace source guide rows in the same transaction, so a separate programme-retention deletion job is unnecessary.
 

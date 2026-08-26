@@ -4630,6 +4630,81 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                             ))}
                           </div>
                         ) : null}
+
+                        <div className="output-variant-list xtream-login">
+                          <strong>
+                            Xtream login
+                            {mediaTypes.includes('vod') ||
+                            mediaTypes.includes('series')
+                              ? ' — recommended'
+                              : ''}
+                          </strong>
+                          <small>
+                            In StreamMate, add an Xtream Codes/API playlist.
+                            Series are sent as a compact show catalogue;
+                            episodes are loaded only when the app asks for a
+                            show.
+                          </small>
+                          {[
+                            {
+                              key: 'server',
+                              label: 'Server URL',
+                              value: window.location.origin,
+                            },
+                            {
+                              key: 'username',
+                              label: 'Username',
+                              value: 'iptvmaster',
+                            },
+                            {
+                              key: 'password',
+                              label: 'Password',
+                              value: profile.accessToken,
+                            },
+                          ].map((field) => (
+                            <div className="output-variant" key={field.key}>
+                              <label
+                                htmlFor={
+                                  'xtream-' + field.key + '-' + profile.id
+                                }
+                              >
+                                {field.label}
+                              </label>
+                              <div className="copy-row">
+                                <input
+                                  id={'xtream-' + field.key + '-' + profile.id}
+                                  readOnly
+                                  value={field.value}
+                                  onFocus={(event) =>
+                                    event.currentTarget.select()
+                                  }
+                                />
+                                <button
+                                  className="secondary-button compact"
+                                  type="button"
+                                  onClick={() =>
+                                    void navigator.clipboard
+                                      .writeText(field.value)
+                                      .then(() =>
+                                        showToast(
+                                          'success',
+                                          field.label + ' copied',
+                                        ),
+                                      )
+                                      .catch(() =>
+                                        showToast(
+                                          'error',
+                                          'Could not copy — select the text instead',
+                                        ),
+                                      )
+                                  }
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                         {mediaTypes.includes('live') ? (
                           <>
                             <label htmlFor={`epg-output-url-${profile.id}`}>
