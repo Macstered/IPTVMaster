@@ -3070,9 +3070,14 @@ describe('IPTVMaster API', () => {
       url: playlistPath,
     });
     const epgResponse = await app.inject({ method: 'GET', url: epgPath });
-    const compressedPlaylistResponse = await app.inject({
+    const gzipAdvertisedPlaylistResponse = await app.inject({
       method: 'GET',
       url: playlistPath,
+      headers: { 'accept-encoding': 'gzip' },
+    });
+    const compressedEpgResponse = await app.inject({
+      method: 'GET',
+      url: epgPath,
       headers: { 'accept-encoding': 'gzip' },
     });
     const legacyPlaylistResponse = await app.inject({
@@ -3100,13 +3105,26 @@ describe('IPTVMaster API', () => {
     });
     expect(playlistResponse.statusCode).toBe(200);
     expect(playlistResponse.headers['content-type']).toContain(
-      'audio/x-mpegurl',
+      'application/octet-stream',
+    );
+    expect(playlistResponse.headers['content-disposition']).toBe(
+      'attachment; filename=playlist.m3u8',
     );
     expect(playlistResponse.body).toContain('Yle TV1');
-    expect(compressedPlaylistResponse.headers['content-encoding']).toBe('gzip');
+    expect(gzipAdvertisedPlaylistResponse.headers['content-encoding']).toBe(
+      undefined,
+    );
+    expect(gzipAdvertisedPlaylistResponse.headers['transfer-encoding']).toBe(
+      undefined,
+    );
+    expect(gzipAdvertisedPlaylistResponse.headers['content-length']).toBe(
+      String(gzipAdvertisedPlaylistResponse.rawPayload.byteLength),
+    );
+    expect(gzipAdvertisedPlaylistResponse.body).toContain('Yle TV1');
+    expect(compressedEpgResponse.headers['content-encoding']).toBe('gzip');
     expect(
-      gunzipSync(compressedPlaylistResponse.rawPayload).toString('utf8'),
-    ).toContain('Yle TV1');
+      gunzipSync(compressedEpgResponse.rawPayload).toString('utf8'),
+    ).toContain('<display-name>Yle TV1</display-name>');
     expect(playlistResponse.body).toContain('18:00 Tennis 8/4');
     expect(playlistResponse.body).toContain(
       'group-title="Today\'s Finnish Sports"',

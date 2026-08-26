@@ -815,10 +815,10 @@ export async function buildApp(
     credentials: developmentMode,
   });
 
-  // Generated playlists and guides can be tens of megabytes of repetitive
-  // text. Compress responses when the player supports it so catalogue-heavy
-  // outputs do not time out on a home Wi-Fi connection. Request decompression
-  // is unnecessary here and stays disabled to keep the input surface small.
+  // Generated guides can be tens of megabytes of repetitive text. Compress
+  // XMLTV when the player supports it. M3U output deliberately stays plain and
+  // length-delimited because some IPTV clients advertise gzip but cannot
+  // consume a large chunked/compressed playlist reliably.
   await app.register(fastifyCompress, {
     encodings: ['gzip', 'deflate'],
     global: false,
@@ -2701,14 +2701,19 @@ export async function buildApp(
       {
         mediaTypes,
         entryCount: entries.length,
-        acceptsEncoding: reply.request.headers['accept-encoding'] ?? 'identity',
+        advertisedCompression: /\b(?:gzip|deflate)\b/i.test(
+          String(reply.request.headers['accept-encoding'] ?? ''),
+        ),
       },
       'playlist output prepared',
     );
+    const body = serializeM3u(entries);
     return reply
-      .type('audio/x-mpegurl; charset=utf-8')
+      .type('application/octet-stream')
       .header('cache-control', 'private, no-store')
-      .compress(serializeM3u(entries));
+      .header('content-disposition', 'attachment; filename=playlist.m3u8')
+      .header('content-length', Buffer.byteLength(body))
+      .send(body);
   }
 
   async function sendEpgOutput(accessToken: string, reply: FastifyReply) {
