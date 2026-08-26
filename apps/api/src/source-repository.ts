@@ -1815,7 +1815,9 @@ export class PostgresSourceRepository implements SourceRepository {
          ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN epg_mapping mapping ON mapping.channel_id = c.id
        LEFT JOIN group_policy p
-         ON p.source_id = s.source_id AND p.provider_group = i.provider_group
+         ON p.source_id = s.source_id
+        AND p.provider_group = i.provider_group
+        AND i.media_type = 'live'
        LEFT JOIN output_group_order group_order
          ON group_order.source_id = s.source_id
         AND group_order.provider_group = i.provider_group

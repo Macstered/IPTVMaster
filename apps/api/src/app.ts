@@ -3,10 +3,12 @@ import fastifyStatic from '@fastify/static';
 import {
   applyEventGroupPolicy,
   applyOutputGroupPolicies,
+  DEFAULT_MAX_RETAINED_ENTRIES,
   DEFAULT_PLACEHOLDER_PATTERNS,
   inspectRemotePlaylist,
   localizeEventName,
   parseM3uText,
+  PlaylistEntryLimitError,
   redactStreamUrl,
   serializeM3u,
   serializeXmltv,
@@ -393,6 +395,7 @@ export interface BuildAppOptions {
   enableEpgScheduler?: boolean;
   playlistRefreshIntervalMs?: number;
   playlistRefreshInitialDelayMs?: number;
+  playlistMaxRetainedEntries?: number;
   epgRefreshIntervalMs?: number;
   epgRefreshInitialDelayMs?: number;
   providerRetryAttempts?: number;
@@ -597,18 +600,24 @@ export async function buildApp(
   });
 
   let sourceRepository = options.sourceRepository;
+  const playlistMaxRetainedEntries =
+    options.playlistMaxRetainedEntries ??
+    positiveEnvironmentNumber(
+      'PLAYLIST_MAX_RETAINED_ENTRIES',
+      DEFAULT_MAX_RETAINED_ENTRIES,
+    );
   const playlistInspector =
     options.playlistInspector ??
     ((playlistUrl: string, plan?: SourceImportPlan) =>
-      inspectRemotePlaylist(
-        playlistUrl,
-        plan
+      inspectRemotePlaylist(playlistUrl, {
+        maxRetainedEntries: playlistMaxRetainedEntries,
+        ...(plan
           ? {
               selectiveGroups: plan.selectiveGroups,
               includeLive: plan.includeLive,
             }
-          : {},
-      ));
+          : {}),
+      }));
   const epgInspector = options.epgInspector;
   let ownsSourceRepository = false;
   const databaseUrl = process.env['DATABASE_URL'];
@@ -1444,6 +1453,9 @@ export async function buildApp(
           return reply.code(422).send({ error: error.message });
         }
         const blocked = findBlockedAddressError(error);
+        if (error instanceof PlaylistEntryLimitError) {
+          return reply.code(422).send({ error: error.message });
+        }
         if (blocked) {
           return reply.code(400).send({ error: blocked.message });
         }

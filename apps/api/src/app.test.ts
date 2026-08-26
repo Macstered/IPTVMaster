@@ -1,6 +1,7 @@
 ﻿import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  PlaylistEntryLimitError,
   SnapshotRejectedError,
   type M3uEntry,
   type MediaType,
@@ -1860,6 +1861,31 @@ describe('IPTVMaster API', () => {
     expect(response.statusCode).toBe(422);
     expect(response.json().error).toContain('suspicious count drop');
     expect(repository.latestEntries).toHaveLength(0);
+  });
+
+  it('reports selected-entry limits as actionable client errors', async () => {
+    const repository = new MemorySourceRepository();
+    await repository.createSource({
+      name: 'Catalogue provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/private-list' },
+      sourceTimezone: 'UTC',
+      displayTimezone: 'UTC',
+    });
+    const app = await buildApp({
+      sourceRepository: repository,
+      playlistInspector: async () => {
+        throw new PlaylistEntryLimitError(100);
+      },
+    });
+    applications.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources/00000000-0000-4000-8000-000000000001/import',
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().error).toContain('PLAYLIST_MAX_RETAINED_ENTRIES');
   });
 
   it('lists retained snapshots and safely restores an older version', async () => {

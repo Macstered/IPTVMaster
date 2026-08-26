@@ -23,7 +23,11 @@ export function applyOutputGroupPolicies(
 
   for (const [originalIndex, entry] of entries.entries()) {
     const groupName = entry.attributes['group-title'] ?? '';
-    const policy = policiesByGroup.get(groupName);
+    // Group policies describe live TV and transient event groups. A movie or
+    // series category can legitimately have the same provider label, but must
+    // not inherit the live group's hide, rename, or time-conversion rules.
+    const policy =
+      entry.mediaType === 'live' ? policiesByGroup.get(groupName) : undefined;
     if (!policy) {
       output.push({ entry, originalIndex });
       continue;

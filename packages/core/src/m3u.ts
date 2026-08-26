@@ -27,6 +27,18 @@ const VOD_EXTENSIONS = new Set([
   '.wmv',
 ]);
 
+export class PlaylistEntryLimitError extends Error {
+  readonly limit: number;
+
+  constructor(limit: number) {
+    super(
+      `Playlist contains more than ${limit} selected entries. Disable some movie or series categories, or increase PLAYLIST_MAX_RETAINED_ENTRIES.`,
+    );
+    this.name = 'PlaylistEntryLimitError';
+    this.limit = limit;
+  }
+}
+
 function pathExtension(path: string): string {
   const finalSegment = path.split('/').at(-1) ?? '';
   const dot = finalSegment.lastIndexOf('.');
@@ -188,9 +200,7 @@ export async function parseM3u(
 
     if (alwaysIncluded || chosenCategory) {
       if (entries.length >= maxRetainedEntries) {
-        throw new Error(
-          `Playlist exceeds the ${maxRetainedEntries} retained-entry limit`,
-        );
+        throw new PlaylistEntryLimitError(maxRetainedEntries);
       }
       entries.push(pending);
     } else {
