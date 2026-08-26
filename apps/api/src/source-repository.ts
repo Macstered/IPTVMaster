@@ -1403,7 +1403,14 @@ export class PostgresSourceRepository implements SourceRepository {
         // fingerprint forever. Without recording the catalogue here, one
         // imported before categories existed would never gain an index and
         // the catalogue would look permanently empty.
-        if (inspection.categories.length > 0) {
+        const indexes = await client.query<{ import_catalogue: boolean }>(
+          `SELECT import_catalogue FROM source WHERE id = $1`,
+          [sourceId],
+        );
+        if (
+          indexes.rows[0]?.import_catalogue !== false &&
+          inspection.categories.length > 0
+        ) {
           await this.#saveVodCategories(
             client,
             sourceId,
@@ -1438,10 +1445,12 @@ export class PostgresSourceRepository implements SourceRepository {
          WHERE source_id = $1 AND is_last_known_good = TRUE`,
         [sourceId],
       );
-      const scope = await client.query<{ import_live: boolean }>(
-        `SELECT import_live FROM source WHERE id = $1`,
-        [sourceId],
-      );
+      const scope = await client.query<{
+        import_live: boolean;
+        import_catalogue: boolean;
+      }>(`SELECT import_live, import_catalogue FROM source WHERE id = $1`, [
+        sourceId,
+      ]);
       try {
         // A provider kept only for its catalogue legitimately has no
         // channels, so the usual floor of one would reject every import.
@@ -1549,11 +1558,16 @@ export class PostgresSourceRepository implements SourceRepository {
         );
       }
 
-      // The catalogue index is refreshed from every accepted import, so the
-      // operator always browses what the provider currently offers. A source
-      // with the catalogue switched off reports none, and leaving the stored
-      // index alone keeps any earlier choices intact for when it returns.
-      if (inspection.categories.length > 0) {
+      // Refreshed from every accepted import so the operator always browses
+      // what the provider currently offers. A provider with the catalogue
+      // switched off records none: listing categories that can never be
+      // retained is what made an earlier selection silently do nothing. The
+      // stored index is left alone rather than cleared, so turning it back on
+      // resumes with the previous choices intact.
+      if (
+        scope.rows[0]?.import_catalogue !== false &&
+        inspection.categories.length > 0
+      ) {
         await this.#saveVodCategories(client, sourceId, inspection.categories);
       }
 
@@ -2526,6 +2540,11 @@ export class PostgresSourceRepository implements SourceRepository {
    * Switching a category on does not fetch anything; its titles arrive with
    * the next refresh. Switching one off drops what is stored immediately,
    * because that content should stop being published at once.
+   *
+   * Choosing a category also switches catalogue import on for the provider.
+   * There is no reading of "include this category" that also means "do not
+   * look at the catalogue", and leaving the two to disagree silently ignored
+   * the choice.
    */
   async setVodCategoryEnabled(
     sourceId: string,
@@ -2546,7 +2565,13 @@ export class PostgresSourceRepository implements SourceRepository {
         await client.query('ROLLBACK');
         return false;
       }
-      if (!enabled) {
+      if (enabled) {
+        await client.query(
+          `UPDATE source SET import_catalogue = TRUE, updated_at = NOW()
+           WHERE id = $1 AND NOT import_catalogue`,
+          [sourceId],
+        );
+      } else {
         await client.query(
           `DELETE FROM upstream_item i
            USING source_snapshot s

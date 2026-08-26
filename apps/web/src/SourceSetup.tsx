@@ -2597,6 +2597,20 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         </div>
       ) : null}
 
+      {/* Deliberately outside the group editor below: that block requires live
+          groups to exist, which is exactly what a provider kept only for its
+          films does not have. */}
+      <CataloguePanel
+        active={workspace === 'catalogue'}
+        {...(primarySource
+          ? {
+              sourceId: primarySource.id,
+              sourceName: primarySource.name,
+              importCatalogue: primarySource.importCatalogue,
+            }
+          : {})}
+      />
+
       {workspace !== 'updates' && groups.length > 0 && primarySource ? (
         <div className="group-policy-editor">
           <div className="subsection-heading" hidden={workspace !== 'events'}>
@@ -3192,11 +3206,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             onActivityChanged={() => {
               if (primarySource) void loadSourceHistory(primarySource.id);
             }}
-          />
-
-          <CataloguePanel
-            active={workspace === 'catalogue'}
-            {...(primarySource ? { sourceId: primarySource.id } : {})}
           />
 
           <div
