@@ -1,4 +1,5 @@
 ﻿import { afterEach, describe, expect, it } from 'vitest';
+import { gunzipSync } from 'node:zlib';
 
 import {
   PlaylistEntryLimitError,
@@ -386,9 +387,15 @@ class MemorySourceRepository implements SourceRepository {
     return activated;
   }
 
-  async getLatestPlaylistEntries(sourceId: string): Promise<M3uEntry[]> {
+  async getLatestPlaylistEntries(
+    sourceId: string,
+    mediaType: MediaType | readonly MediaType[] = 'live',
+  ): Promise<M3uEntry[]> {
     const entries =
       this.latestEntriesBySource.get(sourceId) ?? this.latestEntries;
+    const chosenMediaTypes = new Set(
+      Array.isArray(mediaType) ? mediaType : [mediaType],
+    );
     const policiesByGroup = new Map(
       this.policies.map((policy) => [policy.groupName, policy]),
     );
@@ -399,6 +406,7 @@ class MemorySourceRepository implements SourceRepository {
       ]),
     );
     return entries
+      .filter((entry) => chosenMediaTypes.has(entry.mediaType))
       .map((entry, index) => {
         const providerGroup = entry.attributes['group-title'] ?? '';
         const policy = policiesByGroup.get(providerGroup);
@@ -3042,6 +3050,11 @@ describe('IPTVMaster API', () => {
       url: playlistPath,
     });
     const epgResponse = await app.inject({ method: 'GET', url: epgPath });
+    const compressedPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: playlistPath,
+      headers: { 'accept-encoding': 'gzip' },
+    });
     const legacyPlaylistResponse = await app.inject({
       method: 'GET',
       url: `/p/${accessToken}/playlist.m3u`,
@@ -3070,6 +3083,10 @@ describe('IPTVMaster API', () => {
       'audio/x-mpegurl',
     );
     expect(playlistResponse.body).toContain('Yle TV1');
+    expect(compressedPlaylistResponse.headers['content-encoding']).toBe('gzip');
+    expect(
+      gunzipSync(compressedPlaylistResponse.rawPayload).toString('utf8'),
+    ).toContain('Yle TV1');
     expect(playlistResponse.body).toContain('18:00 Tennis 8/4');
     expect(playlistResponse.body).toContain(
       'group-title="Today\'s Finnish Sports"',
@@ -3163,6 +3180,14 @@ describe('IPTVMaster API', () => {
         mediaType: 'live',
         lineNumber: 1,
       },
+      {
+        duration: 0,
+        attributes: { 'group-title': 'Films' },
+        name: 'Provider two movie',
+        url: 'http://provider.test/movie/user/pass/2.mp4',
+        mediaType: 'vod',
+        lineNumber: 2,
+      },
     ]);
     repository.latestEpgBySource.set(firstSource.id, {
       channels: [{ id: 'shared', displayName: 'Provider one guide' }],
@@ -3203,6 +3228,7 @@ describe('IPTVMaster API', () => {
       payload: {
         sourceIds: [firstSource.id, secondSource.id],
         name: 'Combined room',
+        mediaTypes: ['live', 'vod'],
       },
     });
     const playlistPath = profileResponse.json().profile.playlistPath as string;
@@ -3226,6 +3252,7 @@ describe('IPTVMaster API', () => {
     expect(playlistResponse.body).toContain(
       `tvg-id="${secondSource.id}:shared"`,
     );
+    expect(playlistResponse.body).toContain('Provider two movie');
     expect(epgResponse.body).toContain(`channel id="${firstSource.id}:shared"`);
     expect(epgResponse.body).toContain(
       `channel id="${secondSource.id}:shared"`,

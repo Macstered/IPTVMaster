@@ -2,7 +2,11 @@ import { randomBytes } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { decryptSecret, encryptSecret } from './secrets.js';
+import {
+  createSecretDecryptor,
+  decryptSecret,
+  encryptSecret,
+} from './secrets.js';
 
 describe('secret envelopes', () => {
   it('round-trips a provider configuration without exposing plaintext', () => {
@@ -18,6 +22,15 @@ describe('secret envelopes', () => {
     expect(encrypted).not.toContain('provider.test');
     expect(encrypted).not.toContain('secret');
     expect(decryptSecret(encrypted, key)).toBe(plaintext);
+  });
+
+  it('reuses one validated key across a batch of envelopes', () => {
+    const key = randomBytes(32).toString('base64');
+    const decrypt = createSecretDecryptor(key);
+    const encrypted = ['one', 'two', 'three'].map((value) =>
+      encryptSecret(value, key),
+    );
+    expect(encrypted.map(decrypt)).toEqual(['one', 'two', 'three']);
   });
 
   it('rejects an invalid key length', () => {

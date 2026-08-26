@@ -45,6 +45,10 @@ export function encryptSecret(plaintext: string, encodedKey: string): string {
 }
 
 export function decryptSecret(envelope: string, encodedKey: string): string {
+  return decryptSecretWithKey(envelope, decodeKey(encodedKey));
+}
+
+function decryptSecretWithKey(envelope: string, key: Buffer): string {
   const [version, ivText, tagText, ciphertextText, ...unexpected] =
     envelope.split('.');
   if (
@@ -57,7 +61,6 @@ export function decryptSecret(envelope: string, encodedKey: string): string {
     throw new Error('Unsupported or malformed encrypted secret');
   }
 
-  const key = decodeKey(encodedKey);
   const iv = Buffer.from(ivText, 'base64url');
   const tag = Buffer.from(tagText, 'base64url');
   if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES) {
@@ -72,4 +75,16 @@ export function decryptSecret(envelope: string, encodedKey: string): string {
     decipher.final(),
   ]);
   return plaintext.toString('utf8');
+}
+
+/**
+ * Validates and decodes a master key once for a batch of encrypted values.
+ * Large catalogue outputs can contain hundreds of thousands of URLs, so doing
+ * the same base64 validation for every row adds avoidable latency.
+ */
+export function createSecretDecryptor(
+  encodedKey: string,
+): (envelope: string) => string {
+  const key = decodeKey(encodedKey);
+  return (envelope) => decryptSecretWithKey(envelope, key);
 }
