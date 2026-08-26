@@ -663,6 +663,38 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     };
   }, []);
 
+  // Revalidate page-owned data when a workspace becomes visible. Previously
+  // these requests only ran during the initial application bootstrap, so a
+  // route reached after an import or output-profile change could stay empty
+  // until the whole browser page was refreshed.
+  useEffect(() => {
+    if (capabilities?.sourcePersistence !== true) return;
+    if (workspace === 'overview') {
+      void loadOutputProfiles().catch((caught: unknown) =>
+        showToast(
+          'error',
+          caught instanceof Error
+            ? caught.message
+            : 'Could not refresh output URLs',
+        ),
+      );
+    }
+  }, [capabilities?.sourcePersistence, workspace]);
+
+  useEffect(() => {
+    if (workspace !== 'lineup' || selectedSourceId === null) return;
+    void Promise.all([
+      loadOutputGroupCategories(selectedSourceId),
+      loadPermanentGroups(selectedSourceId),
+      loadCustomCategories(selectedSourceId),
+    ]).catch((caught: unknown) =>
+      showToast(
+        'error',
+        caught instanceof Error ? caught.message : 'Could not refresh lineup',
+      ),
+    );
+  }, [selectedSourceId, workspace]);
+
   async function selectSource(source: SafeSource) {
     if (source.id === selectedSourceId) return;
     setSelectedSourceId(source.id);
@@ -3596,8 +3628,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   })}
                   {visibleOutputGroups.length === 0 ? (
                     <p className="empty-groups">
-                      Import a playlist, change the group filter, or show hidden
-                      groups.
+                      {loadingPermanentGroups
+                        ? 'Loading playlist groups…'
+                        : 'Import a playlist, change the group filter, or show hidden groups.'}
                     </p>
                   ) : null}
                 </div>
@@ -3919,8 +3952,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                     </article>
                   );
                 })}
-                {!loadingPermanentGroups &&
-                visiblePermanentGroups.length === 0 ? (
+                {loadingPermanentGroups ? (
+                  <p className="empty-groups">Loading provider groups…</p>
+                ) : visiblePermanentGroups.length === 0 ? (
                   <p className="empty-groups">
                     Import a playlist or change the group filter.
                   </p>

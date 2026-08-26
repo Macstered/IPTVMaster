@@ -1,5 +1,6 @@
 ﻿import {
   DEFAULT_PLACEHOLDER_PATTERNS,
+  createSecretDecryptor,
   decryptSecret,
   encryptSecret,
   isSeparatorChannelName,
@@ -1843,6 +1844,7 @@ export class PostgresSourceRepository implements SourceRepository {
                 COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
       [sourceId, mediaTypes],
     );
+    const decryptStreamUrl = createSecretDecryptor(this.#masterKey);
     return result.rows.map((row) => {
       const attributes = { ...(row.metadata.attributes ?? {}) };
       if (row.custom_name) attributes['tvg-name'] = row.custom_name;
@@ -1858,7 +1860,7 @@ export class PostgresSourceRepository implements SourceRepository {
         duration: row.metadata.duration ?? null,
         attributes,
         name: row.custom_name ?? row.original_name,
-        url: decryptSecret(row.encrypted_stream_url, this.#masterKey),
+        url: decryptStreamUrl(row.encrypted_stream_url),
         mediaType: row.media_type,
         lineNumber: row.metadata.lineNumber ?? 0,
       };

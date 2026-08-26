@@ -1,4 +1,5 @@
 import cors from '@fastify/cors';
+import fastifyCompress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import {
   applyEventGroupPolicy,
@@ -795,6 +796,18 @@ export async function buildApp(
       ? /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/
       : false,
     credentials: developmentMode,
+  });
+
+  // Generated playlists and guides can be tens of megabytes of repetitive
+  // text. Compress responses when the player supports it so catalogue-heavy
+  // outputs do not time out on a home Wi-Fi connection. Request decompression
+  // is unnecessary here and stays disabled to keep the input surface small.
+  await app.register(fastifyCompress, {
+    encodings: ['gzip', 'deflate'],
+    global: false,
+    globalDecompression: false,
+    threshold: 0,
+    customTypes: /^audio\/x-mpegurl(?:;|$)/i,
   });
 
   app.addHook('onSend', async (request, reply, payload) => {
@@ -2660,7 +2673,7 @@ export async function buildApp(
     return reply
       .type('audio/x-mpegurl; charset=utf-8')
       .header('cache-control', 'private, no-store')
-      .send(serializeM3u(entries));
+      .compress(serializeM3u(entries));
   }
 
   async function sendEpgOutput(accessToken: string, reply: FastifyReply) {
@@ -2695,7 +2708,7 @@ export async function buildApp(
     return reply
       .type('application/xml; charset=utf-8')
       .header('cache-control', 'private, no-store')
-      .send(serializeXmltv(guide.channels, guide.programmes));
+      .compress(serializeXmltv(guide.channels, guide.programmes));
   }
 
   app.get<{ Params: { accessToken: string } }>(
