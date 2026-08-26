@@ -1,5 +1,7 @@
 import type { M3uEntry, MediaType } from '@iptvmaster/core';
 
+import type { XtreamSeriesArtwork } from './xtream-upstream.js';
+
 export const XTREAM_OUTPUT_USERNAME = 'iptvmaster';
 export const XTREAM_STREAM_NAMESPACE_SIZE = 100_000_000;
 
@@ -194,39 +196,60 @@ export function buildXtreamFlatCatalogue(
   mediaType: 'live' | 'vod',
 ): { categories: XtreamCategory[]; streams: XtreamFlatStream[] } {
   const { categories, ids } = categoryContext(entries, mediaType);
-  const selected = entries.filter((item) => item.entry.mediaType === mediaType);
-  const streams = selected.map((item, index): XtreamFlatStream => {
+  const selected: Array<{
+    item: XtreamOutputEntry;
+    categoryIds: string[];
+  }> = [];
+  const moviesByUrl = new Map<string, (typeof selected)[number]>();
+  for (const item of entries) {
+    if (item.entry.mediaType !== mediaType) continue;
     const categoryId = String(ids.get(categoryKey(item, mediaType)));
-    const base = {
-      num: index + 1,
-      name: item.entry.name,
-      stream_type:
-        mediaType === 'live' ? ('live' as const) : ('movie' as const),
-      stream_id: xtreamStreamId(item),
-      stream_icon: item.entry.attributes['tvg-logo'] ?? '',
-      added: '0',
-      is_adult: 0,
-      category_id: categoryId,
-      category_ids: [categoryId],
-      custom_sid: null,
-      direct_source: '',
-    };
-    return mediaType === 'live'
-      ? {
-          ...base,
-          epg_channel_id: item.entry.attributes['tvg-id'] ?? '',
-          tv_archive: 0,
-          tv_archive_duration: '0',
-        }
-      : {
-          ...base,
-          container_extension: containerExtension(item.entry.url),
-          rating: '',
-          rating_5based: 0,
-          tmdb: 0,
-          trailer: '',
-        };
-  });
+    const existing =
+      mediaType === 'vod' ? moviesByUrl.get(item.entry.url) : null;
+    if (existing) {
+      if (!existing.categoryIds.includes(categoryId)) {
+        existing.categoryIds.push(categoryId);
+      }
+      continue;
+    }
+    const record = { item, categoryIds: [categoryId] };
+    selected.push(record);
+    if (mediaType === 'vod') moviesByUrl.set(item.entry.url, record);
+  }
+  const streams = selected.map(
+    ({ item, categoryIds }, index): XtreamFlatStream => {
+      const categoryId = categoryIds[0] ?? '';
+      const base = {
+        num: index + 1,
+        name: item.entry.name,
+        stream_type:
+          mediaType === 'live' ? ('live' as const) : ('movie' as const),
+        stream_id: xtreamStreamId(item),
+        stream_icon: item.entry.attributes['tvg-logo'] ?? '',
+        added: '0',
+        is_adult: 0,
+        category_id: categoryId,
+        category_ids: categoryIds,
+        custom_sid: null,
+        direct_source: '',
+      };
+      return mediaType === 'live'
+        ? {
+            ...base,
+            epg_channel_id: item.entry.attributes['tvg-id'] ?? '',
+            tv_archive: 0,
+            tv_archive_duration: '0',
+          }
+        : {
+            ...base,
+            container_extension: containerExtension(item.entry.url),
+            rating: '',
+            rating_5based: 0,
+            tmdb: 0,
+            trailer: '',
+          };
+    },
+  );
   return { categories, streams };
 }
 
@@ -269,14 +292,117 @@ export function parseSeriesEpisode(name: string): ParsedEpisode | null {
 interface SeriesGroup {
   key: string;
   name: string;
+  sourceId: string;
+  categoryName: string;
   categoryId: string;
   items: Array<{ item: XtreamOutputEntry; parsed: ParsedEpisode | null }>;
 }
 
+interface SeriesArtworkIndex {
+  exact: Map<string, Set<string>>;
+  normalized: Map<string, Set<string>>;
+  byCategory: Map<string, Array<{ name: string; cover: string }>>;
+}
+
+function exactSeriesText(value: string): string {
+  return value.trim().toLocaleLowerCase('en');
+}
+
+function normalizedSeriesText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase('en')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function addArtwork(
+  index: Map<string, Set<string>>,
+  key: string,
+  cover: string,
+): void {
+  const covers = index.get(key) ?? new Set<string>();
+  covers.add(cover);
+  index.set(key, covers);
+}
+
+function uniqueArtwork(
+  index: Map<string, Set<string>>,
+  key: string,
+): string | null {
+  const covers = index.get(key);
+  return covers?.size === 1 ? ([...covers][0] ?? null) : null;
+}
+
+function buildSeriesArtworkIndex(
+  artwork: readonly XtreamSeriesArtwork[],
+): SeriesArtworkIndex {
+  const index: SeriesArtworkIndex = {
+    exact: new Map(),
+    normalized: new Map(),
+    byCategory: new Map(),
+  };
+  for (const item of artwork) {
+    addArtwork(index.exact, exactSeriesText(item.name), item.cover);
+    addArtwork(index.normalized, normalizedSeriesText(item.name), item.cover);
+    const category = normalizedSeriesText(item.categoryName);
+    const candidates = index.byCategory.get(category) ?? [];
+    candidates.push({
+      name: normalizedSeriesText(item.name),
+      cover: item.cover,
+    });
+    index.byCategory.set(category, candidates);
+  }
+  return index;
+}
+
+function seriesArtworkCover(
+  index: SeriesArtworkIndex,
+  seriesName: string,
+  categoryName: string,
+): string | null {
+  const exact = uniqueArtwork(index.exact, exactSeriesText(seriesName));
+  if (exact) return exact;
+
+  const normalizedName = normalizedSeriesText(seriesName);
+  const normalized = uniqueArtwork(index.normalized, normalizedName);
+  if (normalized) return normalized;
+  if (normalizedName.length < 8) return null;
+
+  const covers = new Set<string>();
+  for (const candidate of index.byCategory.get(
+    normalizedSeriesText(categoryName),
+  ) ?? []) {
+    const shorter = Math.min(normalizedName.length, candidate.name.length);
+    const longer = Math.max(normalizedName.length, candidate.name.length);
+    if (
+      shorter >= 8 &&
+      shorter / longer >= 0.68 &&
+      (normalizedName.includes(candidate.name) ||
+        candidate.name.includes(normalizedName))
+    ) {
+      covers.add(candidate.cover);
+      if (covers.size > 1) return null;
+    }
+  }
+  return covers.size === 1 ? ([...covers][0] ?? null) : null;
+}
+
 export function buildXtreamSeriesCatalogue(
   entries: readonly XtreamOutputEntry[],
+  artworkBySource: ReadonlyMap<
+    string,
+    readonly XtreamSeriesArtwork[]
+  > = new Map(),
 ): XtreamSeriesCatalogue {
   const { categories, ids: categoryIds } = categoryContext(entries, 'series');
+  const artworkIndexes = new Map(
+    [...artworkBySource].map(([sourceId, artwork]) => [
+      sourceId,
+      buildSeriesArtworkIndex(artwork),
+    ]),
+  );
   const groups = new Map<string, SeriesGroup>();
   for (const item of entries) {
     if (item.entry.mediaType !== 'series') continue;
@@ -289,6 +415,8 @@ export function buildXtreamSeriesCatalogue(
       record = {
         key,
         name,
+        sourceId: item.sourceId,
+        categoryName: group,
         categoryId: String(categoryIds.get(categoryKey(item, 'series'))),
         items: [],
       };
@@ -303,7 +431,15 @@ export function buildXtreamSeriesCatalogue(
     (group, index): XtreamSeriesSummary => {
       const seriesId = seriesIds.get(group.key) ?? 1;
       const first = group.items[0]?.item.entry;
-      const cover = first?.attributes['tvg-logo'] ?? '';
+      const artworkIndex = artworkIndexes.get(group.sourceId);
+      const providerCover = artworkIndex
+        ? seriesArtworkCover(artworkIndex, group.name, group.categoryName)
+        : null;
+      const cover =
+        providerCover ??
+        (artworkBySource.has(group.sourceId)
+          ? ''
+          : (first?.attributes['tvg-logo'] ?? ''));
       const common = {
         name: group.name,
         cover,

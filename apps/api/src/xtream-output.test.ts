@@ -72,6 +72,83 @@ describe('Xtream-compatible output', () => {
     expect(xtreamStreamId(first)).toBe(42);
   });
 
+  it('deduplicates identical movie streams while preserving their categories', () => {
+    const duplicateUrl = 'http://provider.test/movie/user/pass/42.mkv';
+    const catalogue = buildXtreamFlatCatalogue(
+      [
+        item('First film', duplicateUrl, 'vod', 'Films'),
+        item('First film', duplicateUrl, 'vod', 'Nordic'),
+      ],
+      'vod',
+    );
+
+    expect(catalogue.categories).toHaveLength(2);
+    expect(catalogue.streams).toHaveLength(1);
+    expect(catalogue.streams[0]?.category_ids).toHaveLength(2);
+  });
+
+  it('uses provider series posters without replacing episode stills', () => {
+    const episode = item(
+      'Example Show 2024 - S01E01 - Pilot',
+      'http://provider.test/series/user/pass/101.mkv',
+      'series',
+      'Drama',
+    );
+    episode.entry.attributes['tvg-logo'] =
+      'http://logos.test/episode-screenshot.jpg';
+    const catalogue = buildXtreamSeriesCatalogue(
+      [episode],
+      new Map([
+        [
+          'source-0',
+          [
+            {
+              name: 'Example Show (2024)',
+              categoryName: 'Drama',
+              cover: 'https://images.test/example-poster.jpg',
+            },
+          ],
+        ],
+      ]),
+    );
+    const summary = catalogue.series[0];
+    const detail = summary
+      ? catalogue.detailsById.get(summary.series_id)
+      : undefined;
+
+    expect(summary?.cover).toBe('https://images.test/example-poster.jpg');
+    expect(detail?.episodes['1']?.[0]?.info.movie_image).toBe(
+      'http://logos.test/episode-screenshot.jpg',
+    );
+  });
+
+  it('does not use an episode screenshot as an unmatched series poster', () => {
+    const catalogue = buildXtreamSeriesCatalogue(
+      [
+        item(
+          'Unmatched Show - S01E01',
+          'http://provider.test/series/user/pass/101.mkv',
+          'series',
+          'Drama',
+        ),
+      ],
+      new Map([
+        [
+          'source-0',
+          [
+            {
+              name: 'Different Show',
+              categoryName: 'Drama',
+              cover: 'https://images.test/different-poster.jpg',
+            },
+          ],
+        ],
+      ]),
+    );
+
+    expect(catalogue.series[0]?.cover).toBe('');
+  });
+
   it('collapses episode rows into series summaries and per-season details', () => {
     const entries = [
       item(

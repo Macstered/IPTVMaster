@@ -76,6 +76,10 @@ import {
   type XtreamOutputEntry,
   xtreamStreamId,
 } from './xtream-output.js';
+import {
+  fetchXtreamSeriesArtwork,
+  type XtreamSeriesArtwork,
+} from './xtream-upstream.js';
 
 const SESSION_COOKIE = 'iptvmaster_session';
 const CSRF_COOKIE = 'iptvmaster_csrf';
@@ -414,6 +418,9 @@ export interface BuildAppOptions {
     plan?: SourceImportPlan,
   ) => Promise<PlaylistInspection>;
   epgInspector?: (epgUrl: string) => Promise<XmltvInspection>;
+  xtreamSeriesArtworkLoader?: (
+    playlistUrl: string,
+  ) => Promise<XtreamSeriesArtwork[]>;
   enablePlaylistScheduler?: boolean;
   enableEpgScheduler?: boolean;
   playlistRefreshIntervalMs?: number;
@@ -642,6 +649,8 @@ export async function buildApp(
           : {}),
       }));
   const epgInspector = options.epgInspector;
+  const xtreamSeriesArtworkLoader =
+    options.xtreamSeriesArtworkLoader ?? fetchXtreamSeriesArtwork;
   let ownsSourceRepository = false;
   const databaseUrl = process.env['DATABASE_URL'];
   const masterKey = process.env['IPTVMASTER_MASTER_KEY'];
@@ -2724,6 +2733,55 @@ export async function buildApp(
     return entries;
   }
 
+  const xtreamSeriesArtworkCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      value: Promise<XtreamSeriesArtwork[] | null>;
+    }
+  >();
+  function loadXtreamSeriesArtwork(
+    sourceId: string,
+  ): Promise<XtreamSeriesArtwork[] | null> {
+    const now = Date.now();
+    const cached = xtreamSeriesArtworkCache.get(sourceId);
+    if (cached && cached.expiresAt > now) return cached.value;
+    for (const [candidateId, candidate] of xtreamSeriesArtworkCache) {
+      if (candidate.expiresAt <= now) {
+        xtreamSeriesArtworkCache.delete(candidateId);
+      }
+    }
+    const value = (async () => {
+      if (!sourceRepository) return null;
+      const credentials = await sourceRepository.getSourceCredentials(sourceId);
+      if (!credentials) return null;
+      try {
+        return await xtreamSeriesArtworkLoader(credentials.playlistUrl);
+      } catch (error) {
+        app.log.warn(
+          {
+            sourceId,
+            errorName:
+              error instanceof Error ? error.constructor.name : 'UnknownError',
+          },
+          'Xtream series artwork refresh failed',
+        );
+        return null;
+      }
+    })();
+    const record = { expiresAt: now + 300_000, value };
+    xtreamSeriesArtworkCache.set(sourceId, record);
+    void value.then((artwork) => {
+      if (
+        artwork !== null &&
+        xtreamSeriesArtworkCache.get(sourceId) === record
+      ) {
+        record.expiresAt = Date.now() + 21_600_000;
+      }
+    });
+    return value;
+  }
+
   const xtreamCatalogueCache = new Map<
     string,
     { expiresAt: number; value: Promise<unknown> }
@@ -2766,11 +2824,22 @@ export async function buildApp(
   }
 
   function loadXtreamSeriesCatalogue(profile: ResolvedOutputProfile) {
-    return cachedXtreamCatalogue(profile.id + ':series', async () =>
-      buildXtreamSeriesCatalogue(
-        await loadCachedXtreamEntries(profile, ['series']),
-      ),
-    );
+    return cachedXtreamCatalogue(profile.id + ':series', async () => {
+      const [entries, ...artworkResults] = await Promise.all([
+        loadCachedXtreamEntries(profile, ['series']),
+        ...profile.sourceIds.map(async (sourceId) => ({
+          sourceId,
+          artwork: await loadXtreamSeriesArtwork(sourceId),
+        })),
+      ]);
+      const artworkBySource = new Map<string, XtreamSeriesArtwork[]>();
+      for (const result of artworkResults) {
+        if (result.artwork !== null) {
+          artworkBySource.set(result.sourceId, result.artwork);
+        }
+      }
+      return buildXtreamSeriesCatalogue(entries, artworkBySource);
+    });
   }
   async function sendPlaylistOutput(
     accessToken: string,
