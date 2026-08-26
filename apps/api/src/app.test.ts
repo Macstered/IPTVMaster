@@ -58,6 +58,8 @@ function syntheticProviderUrl(path: string): string {
 }
 
 class MemorySourceRepository implements SourceRepository {
+  interruptedSyncRuns = 0;
+  recoveryCalls = 0;
   readonly inputs: CreateSourceInput[] = [];
   readonly sources: SafeSource[] = [];
   latestEntries: M3uEntry[] = [];
@@ -87,6 +89,13 @@ class MemorySourceRepository implements SourceRepository {
     }
   >();
   #epgSourceSequence = 0;
+
+  async recoverInterruptedSyncRuns(): Promise<number> {
+    this.recoveryCalls += 1;
+    const recovered = this.interruptedSyncRuns;
+    this.interruptedSyncRuns = 0;
+    return recovered;
+  }
 
   #allGuideChannels(sourceName: string) {
     const own = this.latestEpg.channels.map((channel) => ({
@@ -1453,6 +1462,17 @@ describe('IPTVMaster API', () => {
       version: 'development',
       revision: 'unknown',
     });
+  });
+
+  it('recovers refresh jobs interrupted by a previous app exit', async () => {
+    const repository = new MemorySourceRepository();
+    repository.interruptedSyncRuns = 2;
+
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    expect(repository.recoveryCalls).toBe(1);
+    expect(repository.interruptedSyncRuns).toBe(0);
   });
 
   it('previews Stockholm-to-Helsinki event localization', async () => {
@@ -3050,9 +3070,14 @@ describe('IPTVMaster API', () => {
       url: playlistPath,
     });
     const epgResponse = await app.inject({ method: 'GET', url: epgPath });
-    const compressedPlaylistResponse = await app.inject({
+    const gzipAdvertisedPlaylistResponse = await app.inject({
       method: 'GET',
       url: playlistPath,
+      headers: { 'accept-encoding': 'gzip' },
+    });
+    const compressedEpgResponse = await app.inject({
+      method: 'GET',
+      url: epgPath,
       headers: { 'accept-encoding': 'gzip' },
     });
     const legacyPlaylistResponse = await app.inject({
@@ -3080,13 +3105,26 @@ describe('IPTVMaster API', () => {
     });
     expect(playlistResponse.statusCode).toBe(200);
     expect(playlistResponse.headers['content-type']).toContain(
-      'audio/x-mpegurl',
+      'application/octet-stream',
+    );
+    expect(playlistResponse.headers['content-disposition']).toBe(
+      'attachment; filename=playlist.m3u8',
     );
     expect(playlistResponse.body).toContain('Yle TV1');
-    expect(compressedPlaylistResponse.headers['content-encoding']).toBe('gzip');
+    expect(gzipAdvertisedPlaylistResponse.headers['content-encoding']).toBe(
+      undefined,
+    );
+    expect(gzipAdvertisedPlaylistResponse.headers['transfer-encoding']).toBe(
+      undefined,
+    );
+    expect(gzipAdvertisedPlaylistResponse.headers['content-length']).toBe(
+      String(gzipAdvertisedPlaylistResponse.rawPayload.byteLength),
+    );
+    expect(gzipAdvertisedPlaylistResponse.body).toContain('Yle TV1');
+    expect(compressedEpgResponse.headers['content-encoding']).toBe('gzip');
     expect(
-      gunzipSync(compressedPlaylistResponse.rawPayload).toString('utf8'),
-    ).toContain('Yle TV1');
+      gunzipSync(compressedEpgResponse.rawPayload).toString('utf8'),
+    ).toContain('<display-name>Yle TV1</display-name>');
     expect(playlistResponse.body).toContain('18:00 Tennis 8/4');
     expect(playlistResponse.body).toContain(
       'group-title="Today\'s Finnish Sports"',
@@ -3237,6 +3275,22 @@ describe('IPTVMaster API', () => {
       method: 'GET',
       url: playlistPath,
     });
+    const livePlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/live`,
+    });
+    const moviePlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/movies`,
+    });
+    const seriesPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/series`,
+    });
+    const unknownPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/unknown`,
+    });
     const epgResponse = await app.inject({ method: 'GET', url: epgPath });
 
     expect(categoryResponse.statusCode).toBe(201);
@@ -3253,6 +3307,14 @@ describe('IPTVMaster API', () => {
       `tvg-id="${secondSource.id}:shared"`,
     );
     expect(playlistResponse.body).toContain('Provider two movie');
+    expect(livePlaylistResponse.statusCode).toBe(200);
+    expect(livePlaylistResponse.body).toContain('Provider one channel');
+    expect(livePlaylistResponse.body).not.toContain('Provider two movie');
+    expect(moviePlaylistResponse.statusCode).toBe(200);
+    expect(moviePlaylistResponse.body).toContain('Provider two movie');
+    expect(moviePlaylistResponse.body).not.toContain('Provider one channel');
+    expect(seriesPlaylistResponse.statusCode).toBe(404);
+    expect(unknownPlaylistResponse.statusCode).toBe(404);
     expect(epgResponse.body).toContain(`channel id="${firstSource.id}:shared"`);
     expect(epgResponse.body).toContain(
       `channel id="${secondSource.id}:shared"`,

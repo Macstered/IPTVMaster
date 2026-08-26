@@ -4523,6 +4523,14 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 const epgOutputUrl = profile.accessToken
                   ? `${window.location.origin}/e/${profile.accessToken}`
                   : '';
+                const mediaTypes = profile.mediaTypes ?? ['live'];
+                const splitPlaylistUrls = mediaTypes.map((mediaType) => ({
+                  mediaType,
+                  label: MEDIA_TYPE_LABELS[mediaType],
+                  url: `${playlistOutputUrl}/${
+                    mediaType === 'vod' ? 'movies' : mediaType
+                  }`,
+                }));
                 return (
                   <article className="output-url" key={profile.id}>
                     <div className="output-url-heading">
@@ -4537,7 +4545,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                     {profile.recoverable && profile.accessToken ? (
                       <>
                         <label htmlFor={`playlist-output-url-${profile.id}`}>
-                          M3U playlist URL
+                          {mediaTypes.length > 1
+                            ? 'Combined M3U playlist URL'
+                            : 'M3U playlist URL'}
                         </label>
                         <div className="copy-row">
                           <input
@@ -4566,36 +4576,96 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                             Copy
                           </button>
                         </div>
-                        <label htmlFor={`epg-output-url-${profile.id}`}>
-                          XMLTV EPG URL
-                        </label>
-                        <div className="copy-row">
-                          <input
-                            id={`epg-output-url-${profile.id}`}
-                            readOnly
-                            value={epgOutputUrl}
-                            onFocus={(event) => event.currentTarget.select()}
-                          />
-                          <button
-                            className="secondary-button compact"
-                            type="button"
-                            onClick={() =>
-                              void navigator.clipboard
-                                .writeText(epgOutputUrl)
-                                .then(() =>
-                                  showToast('success', 'EPG URL copied'),
-                                )
-                                .catch(() =>
-                                  showToast(
-                                    'error',
-                                    'Could not copy — select the text instead',
-                                  ),
-                                )
-                            }
-                          >
-                            Copy
-                          </button>
-                        </div>
+                        {mediaTypes.length > 1 ? (
+                          <div className="output-variant-list">
+                            <strong>Player-specific M3U URLs</strong>
+                            <small>
+                              Add these as separate playlists when a player
+                              cannot reliably split a combined M3U into Live TV,
+                              Movies, and Series.
+                            </small>
+                            {splitPlaylistUrls.map((output) => (
+                              <div
+                                className="output-variant"
+                                key={output.mediaType}
+                              >
+                                <label
+                                  htmlFor={`playlist-output-url-${profile.id}-${output.mediaType}`}
+                                >
+                                  {output.label}
+                                </label>
+                                <div className="copy-row">
+                                  <input
+                                    id={`playlist-output-url-${profile.id}-${output.mediaType}`}
+                                    readOnly
+                                    value={output.url}
+                                    onFocus={(event) =>
+                                      event.currentTarget.select()
+                                    }
+                                  />
+                                  <button
+                                    className="secondary-button compact"
+                                    type="button"
+                                    onClick={() =>
+                                      void navigator.clipboard
+                                        .writeText(output.url)
+                                        .then(() =>
+                                          showToast(
+                                            'success',
+                                            `${output.label} URL copied`,
+                                          ),
+                                        )
+                                        .catch(() =>
+                                          showToast(
+                                            'error',
+                                            'Could not copy — select the text instead',
+                                          ),
+                                        )
+                                    }
+                                  >
+                                    Copy
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {mediaTypes.includes('live') ? (
+                          <>
+                            <label htmlFor={`epg-output-url-${profile.id}`}>
+                              XMLTV EPG URL
+                            </label>
+                            <div className="copy-row">
+                              <input
+                                id={`epg-output-url-${profile.id}`}
+                                readOnly
+                                value={epgOutputUrl}
+                                onFocus={(event) =>
+                                  event.currentTarget.select()
+                                }
+                              />
+                              <button
+                                className="secondary-button compact"
+                                type="button"
+                                onClick={() =>
+                                  void navigator.clipboard
+                                    .writeText(epgOutputUrl)
+                                    .then(() =>
+                                      showToast('success', 'EPG URL copied'),
+                                    )
+                                    .catch(() =>
+                                      showToast(
+                                        'error',
+                                        'Could not copy — select the text instead',
+                                      ),
+                                    )
+                                }
+                              >
+                                Copy
+                              </button>
+                            </div>
+                          </>
+                        ) : null}
                         <small>
                           Available from any device signed in as this
                           administrator. Treat these URLs like passwords.

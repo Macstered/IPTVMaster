@@ -42,8 +42,9 @@ through IPTVMaster.
 - Movies and series are listed in their own sections and switched on or off
   like live groups. Switching one on keeps its titles from the next refresh;
   switching it off removes them at once.
-- Each kind of content is published through its own output URL, so a live
-  playlist never grows by a catalogue your player would download and ignore.
+- An output can carry any combination of content. Combined outputs also expose
+  dedicated Live TV, Movies, and Series M3U links under the same revocable
+  token for players that cannot reliably split a large mixed playlist.
 
 **Daily live-event groups**
 
