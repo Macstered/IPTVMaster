@@ -21,6 +21,7 @@ import {
   xtreamPlaylistUrl,
   type EventGroupPolicy,
   type M3uEntry,
+  type MediaType,
   type PlaylistInspection,
   type XmltvChannel,
   type XmltvInspection,
@@ -2628,21 +2629,31 @@ export async function buildApp(
     },
   );
 
-  async function sendPlaylistOutput(accessToken: string, reply: FastifyReply) {
+  async function sendPlaylistOutput(
+    accessToken: string,
+    reply: FastifyReply,
+    requestedMediaType?: MediaType,
+  ) {
     if (!sourceRepository || !/^[A-Za-z0-9_-]{16,128}$/.test(accessToken)) {
       return reply.code(404).send({ error: 'Playlist not found' });
     }
     const profile = await sourceRepository.resolveOutputProfile(accessToken);
     if (!profile) return reply.code(404).send({ error: 'Playlist not found' });
+    if (
+      requestedMediaType &&
+      !profile.mediaTypes.includes(requestedMediaType)
+    ) {
+      return reply.code(404).send({ error: 'Playlist not found' });
+    }
+    const mediaTypes = requestedMediaType
+      ? [requestedMediaType]
+      : profile.mediaTypes;
 
     const profileSources = await sourceRepository.listSources();
     const sourceOutputs = await Promise.all(
       profile.sourceIds.map(async (sourceId) => {
         const [entries, policies] = await Promise.all([
-          sourceRepository.getLatestPlaylistEntries(
-            sourceId,
-            profile.mediaTypes,
-          ),
+          sourceRepository.getLatestPlaylistEntries(sourceId, mediaTypes),
           sourceRepository.listOutputGroupPolicies(
             sourceId,
             currentDateInZone(
@@ -2670,6 +2681,14 @@ export async function buildApp(
         ? namespaceGuideEntries(sourceOutput.sourceId, output.entries)
         : output.entries;
     });
+    reply.request.log.info(
+      {
+        mediaTypes,
+        entryCount: entries.length,
+        acceptsEncoding: reply.request.headers['accept-encoding'] ?? 'identity',
+      },
+      'playlist output prepared',
+    );
     return reply
       .type('audio/x-mpegurl; charset=utf-8')
       .header('cache-control', 'private, no-store')
@@ -2716,6 +2735,20 @@ export async function buildApp(
     async (request, reply) =>
       sendPlaylistOutput(request.params.accessToken, reply),
   );
+  app.get<{
+    Params: { accessToken: string; mediaKind: string };
+  }>('/m/:accessToken/:mediaKind', async (request, reply) => {
+    const mediaTypesByPath: Record<string, MediaType> = {
+      live: 'live',
+      movies: 'vod',
+      series: 'series',
+    };
+    const mediaType = mediaTypesByPath[request.params.mediaKind];
+    if (!mediaType) {
+      return reply.code(404).send({ error: 'Playlist not found' });
+    }
+    return sendPlaylistOutput(request.params.accessToken, reply, mediaType);
+  });
   app.get<{ Params: { accessToken: string } }>(
     '/e/:accessToken',
     async (request, reply) => sendEpgOutput(request.params.accessToken, reply),

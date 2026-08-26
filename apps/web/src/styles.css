@@ -2198,6 +2198,30 @@ h2 {
   color: var(--text-muted);
   font-size: 12px;
 }
+.output-variant-list {
+  display: grid;
+  gap: 7px;
+  margin: 5px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-inset);
+}
+.output-variant-list > strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+.output-variant-list > small {
+  margin-bottom: 2px;
+  line-height: 1.5;
+}
+.output-variant {
+  display: grid;
+  gap: 5px;
+}
+.output-variant label {
+  margin-top: 3px;
+}
 .legacy-output-note {
   margin: 0;
   color: var(--warn);

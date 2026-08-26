@@ -3237,6 +3237,22 @@ describe('IPTVMaster API', () => {
       method: 'GET',
       url: playlistPath,
     });
+    const livePlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/live`,
+    });
+    const moviePlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/movies`,
+    });
+    const seriesPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/series`,
+    });
+    const unknownPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: `${playlistPath}/unknown`,
+    });
     const epgResponse = await app.inject({ method: 'GET', url: epgPath });
 
     expect(categoryResponse.statusCode).toBe(201);
@@ -3253,6 +3269,14 @@ describe('IPTVMaster API', () => {
       `tvg-id="${secondSource.id}:shared"`,
     );
     expect(playlistResponse.body).toContain('Provider two movie');
+    expect(livePlaylistResponse.statusCode).toBe(200);
+    expect(livePlaylistResponse.body).toContain('Provider one channel');
+    expect(livePlaylistResponse.body).not.toContain('Provider two movie');
+    expect(moviePlaylistResponse.statusCode).toBe(200);
+    expect(moviePlaylistResponse.body).toContain('Provider two movie');
+    expect(moviePlaylistResponse.body).not.toContain('Provider one channel');
+    expect(seriesPlaylistResponse.statusCode).toBe(404);
+    expect(unknownPlaylistResponse.statusCode).toBe(404);
     expect(epgResponse.body).toContain(`channel id="${firstSource.id}:shared"`);
     expect(epgResponse.body).toContain(
       `channel id="${secondSource.id}:shared"`,
