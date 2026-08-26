@@ -29,6 +29,8 @@ async function readJson<T>(response: Response): Promise<T> {
 interface CataloguePanelProps {
   active: boolean;
   sourceId?: string;
+  sourceName?: string;
+  importCatalogue?: boolean;
 }
 
 /**
@@ -36,7 +38,12 @@ interface CataloguePanelProps {
  * thousands of titles is normal — so this lists categories rather than
  * titles, and only the ones switched on are stored and published.
  */
-export function CataloguePanel({ active, sourceId }: CataloguePanelProps) {
+export function CataloguePanel({
+  active,
+  sourceId,
+  sourceName,
+  importCatalogue = true,
+}: CataloguePanelProps) {
   const [categories, setCategories] = useState<VodCategory[] | null>(null);
   const [filter, setFilter] = useState('');
   const [saving, setSaving] = useState<string | null>(null);
@@ -51,6 +58,12 @@ export function CataloguePanel({ active, sourceId }: CataloguePanelProps) {
 
   useEffect(() => {
     if (!active || !sourceId) return;
+    // Filters belong to the provider being looked at. Carrying "only included"
+    // across a switch hides every category of a provider that has none yet,
+    // which reads as an empty catalogue rather than an unfiltered one.
+    setFilter('');
+    setShowEnabledOnly(false);
+    setCategories(null);
     void load().catch(() => {
       // A provider that has never been imported simply has no catalogue yet.
       setCategories([]);
@@ -103,6 +116,20 @@ export function CataloguePanel({ active, sourceId }: CataloguePanelProps) {
     { mediaType: 'series', heading: 'SERIES' },
   ];
 
+  if (!importCatalogue) {
+    return (
+      <section className="panel">
+        <p className="secret-note">
+          Films and series are switched off for{' '}
+          <strong>{sourceName ?? 'this provider'}</strong>, so its catalogue is
+          not looked at during a refresh. Turn on “Films and series” under
+          Manage connection on the overview page to browse and choose
+          categories.
+        </p>
+      </section>
+    );
+  }
+
   return (
     <>
       {categories === null ? null : categories.length === 0 ? (
@@ -116,11 +143,14 @@ export function CataloguePanel({ active, sourceId }: CataloguePanelProps) {
       ) : (
         <section className="panel catalogue-panel">
           <p className="secret-note">
-            Your provider offers far more titles than channels, so nothing here
-            is stored until you ask for it. Switching a category on keeps its
-            titles from the next refresh onwards; switching it off removes them
-            straight away. Publish them with an output URL of the matching kind
-            on the overview page.
+            Showing the catalogue offered by{' '}
+            <strong>{sourceName ?? 'this provider'}</strong>. Each provider has
+            its own; use the Provider selector above to switch. A provider
+            offers far more titles than channels, so nothing here is stored
+            until you ask for it. Switching a category on keeps its titles from
+            the next refresh onwards and turns catalogue import on for this
+            provider; switching it off removes them straight away. Publish them
+            with an output URL of the matching kind on the overview page.
           </p>
           <div className="channel-search">
             <input
