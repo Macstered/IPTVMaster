@@ -24,13 +24,19 @@ export interface PlaylistInspection {
 export interface PlaylistInspectionOptions {
   timeoutMs?: number;
   maxBytes?: number;
-  maxLiveEntries?: number;
+  maxRetainedEntries?: number;
   fetchImplementation?: typeof fetch;
   /** Film and series categories to retain, keyed by `mediaCategoryKey`. */
   selectiveGroups?: ReadonlySet<string>;
   /** Off for a provider kept only for its catalogue. Defaults to on. */
   includeLive?: boolean;
 }
+
+// The safety ceiling still bounds memory and database growth, while allowing
+// one catalogue-only provider to retain a realistically sized selection. The
+// full feed is separately bounded by maxBytes and unselected titles are only
+// counted while streaming.
+export const DEFAULT_MAX_RETAINED_ENTRIES = 500_000;
 
 const REJECTED_CONTENT_TYPES = ['text/html', 'application/json'];
 
@@ -65,7 +71,8 @@ export async function inspectRemotePlaylist(
 
   const timeoutMs = options.timeoutMs ?? 90_000;
   const maxBytes = options.maxBytes ?? 128 * 1024 * 1024;
-  const maxLiveEntries = options.maxLiveEntries ?? 100_000;
+  const maxRetainedEntries =
+    options.maxRetainedEntries ?? DEFAULT_MAX_RETAINED_ENTRIES;
   const fetchImplementation = options.fetchImplementation ?? guardedFetch;
   const response = await fetchImplementation(url, {
     signal: AbortSignal.timeout(timeoutMs),
@@ -105,7 +112,7 @@ export async function inspectRemotePlaylist(
       ...(options.selectiveGroups
         ? { selectiveGroups: options.selectiveGroups }
         : {}),
-      maxRetainedEntries: maxLiveEntries,
+      maxRetainedEntries,
     },
   );
 

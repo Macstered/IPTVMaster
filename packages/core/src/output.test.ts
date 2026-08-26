@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import { applyOutputGroupPolicies } from './output.js';
-import type { M3uEntry, OutputGroupPolicy } from './types.js';
+import type { M3uEntry, MediaType, OutputGroupPolicy } from './types.js';
 
-function entry(name: string, group: string): M3uEntry {
+function entry(
+  name: string,
+  group: string,
+  mediaType: MediaType = 'live',
+): M3uEntry {
   return {
     duration: -1,
     attributes: { 'tvg-name': name, 'group-title': group },
     name,
     url: 'http://provider.test/synthetic/1',
-    mediaType: 'live',
+    mediaType,
     lineNumber: 2,
   };
 }
@@ -59,6 +63,19 @@ describe('output group policies', () => {
 
     expect(result.entries.map((value) => value.name)).toEqual(['Yle TV1']);
     expect(result.hiddenEntries).toBe(1);
+  });
+
+  it('does not apply live group policies to a catalogue category collision', () => {
+    const movie = entry(
+      '-= Reload your playlist =-',
+      'MTV Urheilu Events FI',
+      'vod',
+    );
+    const result = applyOutputGroupPolicies([movie], policies);
+
+    expect(result.entries).toEqual([movie]);
+    expect(result.hiddenEntries).toBe(0);
+    expect(result.localizedEvents).toBe(0);
   });
 
   it('sorts each event group by its localized start while preserving other slots', () => {

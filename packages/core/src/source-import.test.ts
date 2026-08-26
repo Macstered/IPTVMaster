@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { ProviderHttpError } from './provider-error.js';
-import { inspectRemotePlaylist } from './source-import.js';
+import { PlaylistEntryLimitError } from './m3u.js';
+import {
+  DEFAULT_MAX_RETAINED_ENTRIES,
+  inspectRemotePlaylist,
+} from './source-import.js';
 
 function responseFor(
   body: string,
@@ -90,6 +94,27 @@ describe('remote playlist inspection', () => {
         maxBytes: 20,
       }),
     ).rejects.toThrow(/exceeds/);
+  });
+
+  it('keeps a bounded default above a realistically selected catalogue', () => {
+    // The production catalogue that exposed the old 100,000-entry ceiling has
+    // 165,586 selected films and episodes. Keep this regression explicit while
+    // retaining a finite denial-of-service bound.
+    expect(DEFAULT_MAX_RETAINED_ENTRIES).toBeGreaterThan(165_586);
+  });
+
+  it('reports a selected-entry capacity failure without exposing a URL', async () => {
+    await expect(
+      inspectRemotePlaylist('http://provider.test/get.php?password=synthetic', {
+        fetchImplementation: responseFor(mixedPlaylist),
+        maxRetainedEntries: 1,
+      }),
+    ).rejects.toMatchObject({
+      name: 'PlaylistEntryLimitError',
+      limit: 1,
+      message:
+        'Playlist contains more than 1 selected entries. Disable some movie or series categories, or increase PLAYLIST_MAX_RETAINED_ENTRIES.',
+    } satisfies Partial<PlaylistEntryLimitError>);
   });
 
   it.each([
