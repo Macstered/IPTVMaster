@@ -2207,6 +2207,9 @@ h2 {
   border-radius: var(--radius-control);
   background: var(--surface-inset);
 }
+.xtream-login {
+  border-color: color-mix(in srgb, var(--ok) 42%, var(--border));
+}
 .output-variant-list > strong {
   color: var(--text-bright);
   font-size: 12px;

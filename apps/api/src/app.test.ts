@@ -1,4 +1,4 @@
-﻿import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { gunzipSync } from 'node:zlib';
 
 import {
@@ -436,6 +436,30 @@ class MemorySourceRepository implements SourceRepository {
           left.index - right.index,
       )
       .map(({ entry }) => entry);
+  }
+
+  async resolveLatestStreamUrl(
+    sourceId: string,
+    mediaType: MediaType,
+    providerStreamId: string,
+  ): Promise<string | null> {
+    const entries = await this.getLatestPlaylistEntries(sourceId, mediaType);
+    return (
+      entries.find((entry) => {
+        try {
+          const segment = new URL(entry.url).pathname
+            .split('/')
+            .filter(Boolean)
+            .at(-1);
+          if (!segment) return false;
+          const dot = segment.lastIndexOf('.');
+          const id = dot > 0 ? segment.slice(0, dot) : segment;
+          return id === providerStreamId;
+        } catch {
+          return false;
+        }
+      })?.url ?? null
+    );
   }
 
   async saveEpgSnapshot(
@@ -3088,6 +3112,12 @@ describe('IPTVMaster API', () => {
       method: 'GET',
       url: `/p/${accessToken}/epg.xml`,
     });
+    const xtreamEpgResponse = await app.inject({
+      method: 'GET',
+      url:
+        '/xmltv.php?username=iptvmaster&password=' +
+        encodeURIComponent(accessToken),
+    });
 
     expect(profileResponse.statusCode).toBe(201);
     expect(playlistPath).toBe(`/m/${accessToken}`);
@@ -3140,6 +3170,8 @@ describe('IPTVMaster API', () => {
     expect(epgResponse.body).toContain('start="20260804150000 +0000"');
     expect(legacyPlaylistResponse.statusCode).toBe(200);
     expect(legacyEpgResponse.statusCode).toBe(200);
+    expect(xtreamEpgResponse.statusCode).toBe(200);
+    expect(xtreamEpgResponse.body).toContain('Synthetic news');
 
     const profileId = profileResponse.json().profile.id as string;
     const revokeResponse = await app.inject({
@@ -3157,6 +3189,196 @@ describe('IPTVMaster API', () => {
     expect(revokeResponse.statusCode).toBe(204);
     expect(revokedPlaylistResponse.statusCode).toBe(404);
     expect(revokedEpgResponse.statusCode).toBe(404);
+  });
+
+  it('serves compact Xtream catalogues and resolves playback streams', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Structured provider',
+      sourceType: 'm3u',
+      credentials: { playlistUrl: 'http://provider.test/all' },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    repository.latestEntriesBySource.set(source.id, [
+      {
+        duration: -1,
+        attributes: {
+          'group-title': 'Finnish TV',
+          'tvg-id': 'yle1.fi',
+          'tvg-logo': 'http://logos.test/yle1.png',
+        },
+        name: 'Yle TV1',
+        url: syntheticProviderUrl('/live/user/pass/11.ts'),
+        mediaType: 'live',
+        lineNumber: 1,
+      },
+      {
+        duration: -1,
+        attributes: {
+          'group-title': 'Films',
+          'tvg-logo': 'http://logos.test/film.png',
+        },
+        name: 'Example film',
+        url: syntheticProviderUrl('/movie/user/pass/42.mkv'),
+        mediaType: 'vod',
+        lineNumber: 2,
+      },
+      {
+        duration: -1,
+        attributes: {
+          'group-title': 'Drama',
+          'tvg-logo': 'http://logos.test/show.png',
+        },
+        name: 'Example Show - S01E01 - Pilot',
+        url: syntheticProviderUrl('/series/user/pass/101.mkv'),
+        mediaType: 'series',
+        lineNumber: 3,
+      },
+      {
+        duration: -1,
+        attributes: {
+          'group-title': 'Drama',
+          'tvg-logo': 'http://logos.test/show.png',
+        },
+        name: 'Example Show - S01E02 - Second',
+        url: syntheticProviderUrl('/series/user/pass/102.mkv'),
+        mediaType: 'series',
+        lineNumber: 4,
+      },
+      {
+        duration: -1,
+        attributes: {
+          'group-title': 'Drama',
+          'tvg-logo': 'http://logos.test/show.png',
+        },
+        name: 'Example Show - S02E01',
+        url: syntheticProviderUrl('/series/user/pass/201.mp4'),
+        mediaType: 'series',
+        lineNumber: 5,
+      },
+    ]);
+
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+    const profileResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/output-profiles',
+      payload: {
+        sourceIds: [source.id],
+        name: 'StreamMate',
+        mediaTypes: ['live', 'vod', 'series'],
+      },
+    });
+    const accessToken = profileResponse.json().profile.accessToken as string;
+    const baseQuery =
+      'username=iptvmaster&password=' + encodeURIComponent(accessToken);
+    const actionUrl = (action: string, extra = '') =>
+      '/player_api.php?' + baseQuery + '&action=' + action + extra;
+
+    const loginResponse = await app.inject({
+      method: 'GET',
+      url: '/player_api.php?' + baseQuery,
+      headers: { host: 'iptvmaster.test:8080' },
+    });
+    const invalidLoginResponse = await app.inject({
+      method: 'GET',
+      url: '/player_api.php?username=iptvmaster&password=wrong-password-value',
+    });
+    const liveCategoriesResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_live_categories'),
+    });
+    const movieStreamsResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_vod_streams'),
+    });
+    const seriesResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_series'),
+    });
+
+    expect(loginResponse.statusCode).toBe(200);
+    expect(loginResponse.json()).toEqual(
+      expect.objectContaining({
+        user_info: expect.objectContaining({
+          username: 'iptvmaster',
+          password: accessToken,
+          auth: 1,
+          status: 'Active',
+        }),
+        server_info: expect.objectContaining({
+          url: 'iptvmaster.test',
+          port: '8080',
+          timezone: 'Europe/Helsinki',
+        }),
+      }),
+    );
+    expect(invalidLoginResponse.statusCode).toBe(200);
+    expect(invalidLoginResponse.json().user_info.auth).toBe(0);
+    expect(liveCategoriesResponse.json()).toEqual([
+      expect.objectContaining({ category_name: 'Finnish TV' }),
+    ]);
+
+    const movieStreams = movieStreamsResponse.json();
+    expect(movieStreams).toEqual([
+      expect.objectContaining({
+        name: 'Example film',
+        stream_id: 42,
+        container_extension: 'mkv',
+        direct_source: '',
+      }),
+    ]);
+    const movieInfoResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_vod_info', '&vod_id=42'),
+    });
+    expect(movieInfoResponse.json().movie_data).toEqual(
+      expect.objectContaining({
+        stream_id: 42,
+        name: 'Example film',
+        container_extension: 'mkv',
+      }),
+    );
+
+    const series = seriesResponse.json();
+    expect(series).toHaveLength(1);
+    expect(series[0]).toEqual(
+      expect.objectContaining({ name: 'Example Show' }),
+    );
+    const seriesInfoResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl(
+        'get_series_info',
+        '&series_id=' + encodeURIComponent(String(series[0].series_id)),
+      ),
+    });
+    const seriesInfo = seriesInfoResponse.json();
+    expect(Object.keys(seriesInfo.episodes)).toEqual(['1', '2']);
+    expect(
+      seriesInfo.episodes['1'].map(
+        (episode: { episode_num: number }) => episode.episode_num,
+      ),
+    ).toEqual([1, 2]);
+    expect(seriesInfo.episodes['1'][0]).toEqual(
+      expect.objectContaining({ id: '101', direct_source: '' }),
+    );
+
+    const playbackResponse = await app.inject({
+      method: 'GET',
+      url: '/movie/iptvmaster/' + encodeURIComponent(accessToken) + '/42.mkv',
+    });
+    expect(playbackResponse.statusCode).toBe(302);
+    expect(playbackResponse.headers.location).toBe(
+      syntheticProviderUrl('/movie/user/pass/42.mkv'),
+    );
+
+    const compatibilityPlaylistResponse = await app.inject({
+      method: 'GET',
+      url: '/get.php?' + baseQuery + '&type=m3u_plus&output=ts',
+    });
+    expect(compatibilityPlaylistResponse.statusCode).toBe(200);
+    expect(compatibilityPlaylistResponse.body).toContain('Example Show');
   });
 
   it('creates custom categories, persists drag ordering, and combines providers', async () => {

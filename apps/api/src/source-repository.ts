@@ -495,6 +495,11 @@ export interface SourceRepository {
     sourceId: string,
     mediaType?: MediaType | readonly MediaType[],
   ): Promise<M3uEntry[]>;
+  resolveLatestStreamUrl?(
+    sourceId: string,
+    mediaType: MediaType,
+    providerStreamId: string,
+  ): Promise<string | null>;
   listGroups(sourceId: string): Promise<GroupSummary[]>;
   saveGroupPolicy(
     sourceId: string,
@@ -1866,6 +1871,35 @@ export class PostgresSourceRepository implements SourceRepository {
         lineNumber: row.metadata.lineNumber ?? 0,
       };
     });
+  }
+
+  async resolveLatestStreamUrl(
+    sourceId: string,
+    mediaType: MediaType,
+    providerStreamIdValue: string,
+  ): Promise<string | null> {
+    const result = await this.#pool.query<{ encrypted_stream_url: string }>(
+      `SELECT i.encrypted_stream_url
+       FROM source_snapshot s
+       JOIN upstream_item i
+         ON i.snapshot_id = s.id
+        AND i.media_type = $2
+        AND i.provider_stream_id = $3
+       LEFT JOIN channel c
+         ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
+       LEFT JOIN group_policy p
+         ON p.source_id = s.source_id
+        AND p.provider_group = i.provider_group
+        AND i.media_type = 'live'
+       WHERE s.source_id = $1 AND s.is_last_known_good = TRUE
+         AND COALESCE(p.excluded, FALSE) = FALSE
+         AND (c.id IS NULL OR c.enabled = TRUE)
+       ORDER BY (i.metadata->>'lineNumber')::int, i.id
+       LIMIT 1`,
+      [sourceId, mediaType, providerStreamIdValue],
+    );
+    const encrypted = result.rows[0]?.encrypted_stream_url;
+    return encrypted ? decryptSecret(encrypted, this.#masterKey) : null;
   }
 
   async saveEpgSnapshot(

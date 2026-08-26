@@ -43,6 +43,7 @@ import {
   SnapshotActivationConflictError,
   XmltvDerivationError,
   type AutomationOverrides,
+  type ResolvedOutputProfile,
   type SourceImportPlan,
   type SourceRepository,
 } from './source-repository.js';
@@ -66,6 +67,15 @@ import {
   type CreatedAuthSession,
 } from './auth.js';
 import { MaintenanceScheduler } from './maintenance.js';
+import {
+  buildXtreamFlatCatalogue,
+  buildXtreamSeriesCatalogue,
+  buildXtreamVodInfo,
+  decodeXtreamStreamId,
+  XTREAM_OUTPUT_USERNAME,
+  type XtreamOutputEntry,
+  xtreamStreamId,
+} from './xtream-output.js';
 
 const SESSION_COOKIE = 'iptvmaster_session';
 const CSRF_COOKIE = 'iptvmaster_csrf';
@@ -210,6 +220,17 @@ const outputProfileSchema = z.object({
     .array(z.enum(['live', 'vod', 'series']))
     .min(1)
     .default(['live']),
+});
+
+const xtreamQuerySchema = z.object({
+  username: z.string().min(1).max(128),
+  password: z.string().min(16).max(128),
+  action: z.string().max(64).optional(),
+  category_id: z.string().max(32).optional(),
+  series_id: z.string().max(32).optional(),
+  vod_id: z.string().max(32).optional(),
+  stream_id: z.string().max(32).optional(),
+  limit: z.string().max(8).optional(),
 });
 
 const channelListSchema = z.object({
@@ -2645,6 +2666,112 @@ export async function buildApp(
     },
   );
 
+  async function loadOutputEntries(
+    profile: ResolvedOutputProfile,
+    mediaTypes: readonly MediaType[],
+  ): Promise<XtreamOutputEntry[]> {
+    if (!sourceRepository) return [];
+    const profileSources = await sourceRepository.listSources();
+    const sourceOutputs = await Promise.all(
+      profile.sourceIds.map(async (sourceId, sourceIndex) => {
+        const [entries, policies] = await Promise.all([
+          sourceRepository.getLatestPlaylistEntries(sourceId, mediaTypes),
+          sourceRepository.listOutputGroupPolicies(
+            sourceId,
+            currentDateInZone(
+              profileSources.find((candidate) => candidate.id === sourceId)
+                ?.sourceTimezone ?? 'UTC',
+            ),
+          ),
+        ]);
+        return { sourceId, sourceIndex, entries, policies };
+      }),
+    );
+    const isCombined = profile.sourceIds.length > 1;
+    return sourceOutputs.flatMap((sourceOutput) => {
+      const output = applyOutputGroupPolicies(
+        sourceOutput.entries,
+        sourceOutput.policies,
+      );
+      const entries = isCombined
+        ? namespaceGuideEntries(sourceOutput.sourceId, output.entries)
+        : output.entries;
+      return entries.map((entry) => ({
+        entry,
+        sourceId: sourceOutput.sourceId,
+        sourceIndex: sourceOutput.sourceIndex,
+      }));
+    });
+  }
+
+  const xtreamEntryCache = new Map<
+    string,
+    { expiresAt: number; entries: XtreamOutputEntry[] }
+  >();
+  async function loadCachedXtreamEntries(
+    profile: ResolvedOutputProfile,
+    mediaTypes: readonly MediaType[],
+  ): Promise<XtreamOutputEntry[]> {
+    const key = `${profile.id}:${mediaTypes.join(',')}`;
+    const now = Date.now();
+    const cached = xtreamEntryCache.get(key);
+    if (cached && cached.expiresAt > now) return cached.entries;
+    for (const [candidateKey, candidate] of xtreamEntryCache) {
+      if (candidate.expiresAt <= now) xtreamEntryCache.delete(candidateKey);
+    }
+    const entries = await loadOutputEntries(profile, mediaTypes);
+    xtreamEntryCache.set(key, { expiresAt: now + 120_000, entries });
+    return entries;
+  }
+
+  const xtreamCatalogueCache = new Map<
+    string,
+    { expiresAt: number; value: Promise<unknown> }
+  >();
+  function cachedXtreamCatalogue<T>(
+    key: string,
+    build: () => Promise<T>,
+  ): Promise<T> {
+    const now = Date.now();
+    const cached = xtreamCatalogueCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      return cached.value as Promise<T>;
+    }
+    for (const [candidateKey, candidate] of xtreamCatalogueCache) {
+      if (candidate.expiresAt <= now) {
+        xtreamCatalogueCache.delete(candidateKey);
+      }
+    }
+    const value = build().catch((error: unknown) => {
+      xtreamCatalogueCache.delete(key);
+      throw error;
+    });
+    xtreamCatalogueCache.set(key, {
+      expiresAt: now + 300_000,
+      value,
+    });
+    return value;
+  }
+
+  function loadXtreamFlatCatalogue(
+    profile: ResolvedOutputProfile,
+    mediaType: 'live' | 'vod',
+  ) {
+    return cachedXtreamCatalogue(profile.id + ':flat:' + mediaType, async () =>
+      buildXtreamFlatCatalogue(
+        await loadCachedXtreamEntries(profile, [mediaType]),
+        mediaType,
+      ),
+    );
+  }
+
+  function loadXtreamSeriesCatalogue(profile: ResolvedOutputProfile) {
+    return cachedXtreamCatalogue(profile.id + ':series', async () =>
+      buildXtreamSeriesCatalogue(
+        await loadCachedXtreamEntries(profile, ['series']),
+      ),
+    );
+  }
   async function sendPlaylistOutput(
     accessToken: string,
     reply: FastifyReply,
@@ -2664,39 +2791,11 @@ export async function buildApp(
     const mediaTypes = requestedMediaType
       ? [requestedMediaType]
       : profile.mediaTypes;
-
-    const profileSources = await sourceRepository.listSources();
-    const sourceOutputs = await Promise.all(
-      profile.sourceIds.map(async (sourceId) => {
-        const [entries, policies] = await Promise.all([
-          sourceRepository.getLatestPlaylistEntries(sourceId, mediaTypes),
-          sourceRepository.listOutputGroupPolicies(
-            sourceId,
-            currentDateInZone(
-              profileSources.find((candidate) => candidate.id === sourceId)
-                ?.sourceTimezone ?? 'UTC',
-            ),
-          ),
-        ]);
-        return { sourceId, entries, policies };
-      }),
-    );
-    const readyOutputs = sourceOutputs.filter(
-      (sourceOutput) => sourceOutput.entries.length > 0,
-    );
-    if (readyOutputs.length === 0) {
+    const outputEntries = await loadOutputEntries(profile, mediaTypes);
+    if (outputEntries.length === 0) {
       return reply.code(503).send({ error: 'Playlist is not ready' });
     }
-    const isCombined = profile.sourceIds.length > 1;
-    const entries = readyOutputs.flatMap((sourceOutput) => {
-      const output = applyOutputGroupPolicies(
-        sourceOutput.entries,
-        sourceOutput.policies,
-      );
-      return isCombined
-        ? namespaceGuideEntries(sourceOutput.sourceId, output.entries)
-        : output.entries;
-    });
+    const entries = outputEntries.map((item) => item.entry);
     reply.request.log.info(
       {
         mediaTypes,
@@ -2784,6 +2883,260 @@ export async function buildApp(
     async (request, reply) => sendEpgOutput(request.params.accessToken, reply),
   );
 
+  function xtreamAuthenticationResponse(authenticated: boolean, password = '') {
+    return {
+      user_info: {
+        username: authenticated ? XTREAM_OUTPUT_USERNAME : '',
+        password: authenticated ? password : '',
+        message: '',
+        auth: authenticated ? 1 : 0,
+        status: authenticated ? 'Active' : 'Disabled',
+        exp_date: '0',
+        is_trial: '0',
+        active_cons: '0',
+        created_at: '0',
+        max_connections: '1',
+        allowed_output_formats: ['m3u8', 'ts'],
+      },
+    };
+  }
+
+  function xtreamServerInfo(request: FastifyRequest) {
+    let hostname = request.hostname;
+    let port = request.protocol === 'https' ? '443' : '80';
+    try {
+      const requestUrl = new URL(
+        request.protocol + '://' + (request.headers.host ?? request.hostname),
+      );
+      hostname = requestUrl.hostname;
+      port =
+        requestUrl.port || (requestUrl.protocol === 'https:' ? '443' : '80');
+    } catch {
+      // Fastify has already validated the request; use its safe host fallback.
+    }
+    const now = new Date();
+    const timeNow = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Europe/Helsinki',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(now);
+    return {
+      url: hostname,
+      port,
+      https_port: '443',
+      server_protocol: request.protocol,
+      rtmp_port: '0',
+      timezone: 'Europe/Helsinki',
+      timestamp_now: Math.floor(now.getTime() / 1_000),
+      time_now: timeNow,
+      process: true,
+    };
+  }
+
+  async function resolveXtreamProfile(
+    username: string,
+    password: string,
+  ): Promise<ResolvedOutputProfile | null> {
+    if (
+      !sourceRepository ||
+      username !== XTREAM_OUTPUT_USERNAME ||
+      !/^[A-Za-z0-9_-]{16,128}$/.test(password)
+    ) {
+      return null;
+    }
+    return sourceRepository.resolveOutputProfile(password);
+  }
+
+  app.get<{ Querystring: Record<string, unknown> }>(
+    '/player_api.php',
+    async (request, reply) => {
+      const parsed = xtreamQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply
+          .header('cache-control', 'private, no-store')
+          .send(xtreamAuthenticationResponse(false));
+      }
+      const profile = await resolveXtreamProfile(
+        parsed.data.username,
+        parsed.data.password,
+      );
+      if (!profile) {
+        return reply
+          .header('cache-control', 'private, no-store')
+          .send(xtreamAuthenticationResponse(false));
+      }
+      if (!parsed.data.action) {
+        return reply.header('cache-control', 'private, no-store').send({
+          ...xtreamAuthenticationResponse(true, parsed.data.password),
+          server_info: xtreamServerInfo(request),
+        });
+      }
+
+      const categoryId = parsed.data.category_id;
+      const byCategory = <T extends { category_id: string }>(items: T[]) =>
+        categoryId
+          ? items.filter((item) => item.category_id === categoryId)
+          : items;
+      let response: unknown = [];
+      switch (parsed.data.action) {
+        case 'get_live_categories': {
+          if (!profile.mediaTypes.includes('live')) break;
+          const catalogue = await loadXtreamFlatCatalogue(profile, 'live');
+          response = catalogue.categories;
+          break;
+        }
+        case 'get_live_streams': {
+          if (!profile.mediaTypes.includes('live')) break;
+          const catalogue = await loadXtreamFlatCatalogue(profile, 'live');
+          response = byCategory(catalogue.streams);
+          break;
+        }
+        case 'get_vod_categories': {
+          if (!profile.mediaTypes.includes('vod')) break;
+          const catalogue = await loadXtreamFlatCatalogue(profile, 'vod');
+          response = catalogue.categories;
+          break;
+        }
+        case 'get_vod_streams': {
+          if (!profile.mediaTypes.includes('vod')) break;
+          const catalogue = await loadXtreamFlatCatalogue(profile, 'vod');
+          response = byCategory(catalogue.streams);
+          break;
+        }
+        case 'get_vod_info': {
+          if (!profile.mediaTypes.includes('vod')) break;
+          const requestedId = parsed.data.vod_id ?? parsed.data.stream_id;
+          const catalogue = await loadXtreamFlatCatalogue(profile, 'vod');
+          const stream = catalogue.streams.find(
+            (candidate) => String(candidate.stream_id) === requestedId,
+          );
+          response = stream ? buildXtreamVodInfo(stream) : {};
+          break;
+        }
+        case 'get_series_categories': {
+          if (!profile.mediaTypes.includes('series')) break;
+          const catalogue = await loadXtreamSeriesCatalogue(profile);
+          response = catalogue.categories;
+          break;
+        }
+        case 'get_series': {
+          if (!profile.mediaTypes.includes('series')) break;
+          const catalogue = await loadXtreamSeriesCatalogue(profile);
+          response = byCategory(catalogue.series);
+          break;
+        }
+        case 'get_series_info': {
+          if (!profile.mediaTypes.includes('series')) break;
+          const seriesId = Number(parsed.data.series_id);
+          const catalogue = await loadXtreamSeriesCatalogue(profile);
+          response =
+            (Number.isSafeInteger(seriesId) &&
+              catalogue.detailsById.get(seriesId)) ||
+            {};
+          break;
+        }
+        case 'get_short_epg':
+          response = { epg_listings: [] };
+          break;
+      }
+      request.log.info(
+        { action: parsed.data.action, outputProfileId: profile.id },
+        'Xtream output request completed',
+      );
+      return reply.header('cache-control', 'private, no-store').send(response);
+    },
+  );
+
+  app.get<{ Querystring: Record<string, unknown> }>(
+    '/get.php',
+    async (request, reply) => {
+      const parsed = xtreamQuerySchema
+        .pick({ username: true, password: true })
+        .safeParse(request.query);
+      if (!parsed.success || parsed.data.username !== XTREAM_OUTPUT_USERNAME) {
+        return reply.code(404).send({ error: 'Playlist not found' });
+      }
+      return sendPlaylistOutput(parsed.data.password, reply);
+    },
+  );
+
+  app.get<{ Querystring: Record<string, unknown> }>(
+    '/xmltv.php',
+    async (request, reply) => {
+      const parsed = xtreamQuerySchema
+        .pick({ username: true, password: true })
+        .safeParse(request.query);
+      if (!parsed.success || parsed.data.username !== XTREAM_OUTPUT_USERNAME) {
+        return reply.code(404).send({ error: 'EPG not found' });
+      }
+      return sendEpgOutput(parsed.data.password, reply);
+    },
+  );
+
+  async function redirectXtreamStream(
+    request: FastifyRequest<{
+      Params: { username: string; password: string; streamFile: string };
+    }>,
+    reply: FastifyReply,
+    mediaType: MediaType,
+  ) {
+    const profile = await resolveXtreamProfile(
+      request.params.username,
+      request.params.password,
+    );
+    if (
+      !sourceRepository?.resolveLatestStreamUrl ||
+      !profile?.mediaTypes.includes(mediaType)
+    ) {
+      return reply.code(404).send({ error: 'Stream not found' });
+    }
+    const requestedId = request.params.streamFile.split('.', 1)[0] ?? '';
+    const decoded = decodeXtreamStreamId(requestedId, profile.sourceIds.length);
+    if (!decoded) return reply.code(404).send({ error: 'Stream not found' });
+    const sourceId = profile.sourceIds[decoded.sourceIndex];
+    if (!sourceId) return reply.code(404).send({ error: 'Stream not found' });
+    let streamUrl = await sourceRepository.resolveLatestStreamUrl(
+      sourceId,
+      mediaType,
+      decoded.providerStreamId,
+    );
+    if (!streamUrl) {
+      const entries = await loadCachedXtreamEntries(profile, [mediaType]);
+      streamUrl =
+        entries.find(
+          (item) =>
+            item.sourceId === sourceId &&
+            String(xtreamStreamId(item)) === requestedId,
+        )?.entry.url ?? null;
+    }
+    if (!streamUrl) return reply.code(404).send({ error: 'Stream not found' });
+    try {
+      const target = new URL(streamUrl);
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+        return reply.code(404).send({ error: 'Stream not found' });
+      }
+    } catch {
+      return reply.code(404).send({ error: 'Stream not found' });
+    }
+    return reply.code(302).redirect(streamUrl);
+  }
+
+  for (const [route, mediaType] of [
+    ['/live/:username/:password/:streamFile', 'live'],
+    ['/movie/:username/:password/:streamFile', 'vod'],
+    ['/series/:username/:password/:streamFile', 'series'],
+  ] as const) {
+    app.get<{
+      Params: { username: string; password: string; streamFile: string };
+    }>(route, async (request, reply) =>
+      redirectXtreamStream(request, reply, mediaType),
+    );
+  }
   app.post('/api/v1/event-time/preview', async (request, reply) => {
     const parsed = eventPreviewSchema.safeParse(request.body);
     if (!parsed.success) {
