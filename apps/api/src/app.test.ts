@@ -1354,14 +1354,14 @@ class MemorySourceRepository implements SourceRepository {
   async createOutputProfile(
     sourceIds: string[],
     name: string,
-    mediaType: MediaType = 'live',
+    mediaTypes: readonly MediaType[] = ['live'],
   ): Promise<CreatedOutputProfile> {
     const accessToken = 'synthetic_output_token_1234567890';
     this.outputProfile = {
       id: '00000000-0000-4000-8000-000000000003',
       name,
       sourceIds,
-      mediaType,
+      mediaTypes: [...mediaTypes],
     };
     return {
       id: this.outputProfile.id,

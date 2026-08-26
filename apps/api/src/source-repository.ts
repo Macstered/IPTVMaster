@@ -453,7 +453,7 @@ export interface ActiveOutputProfile {
   id: string;
   name: string;
   sourceIds: string[];
-  mediaType: MediaType;
+  mediaTypes: MediaType[];
   createdAt: string;
   recoverable: boolean;
   accessToken?: string;
@@ -463,7 +463,7 @@ export interface ResolvedOutputProfile {
   id: string;
   name: string;
   sourceIds: string[];
-  mediaType: MediaType;
+  mediaTypes: MediaType[];
 }
 
 export interface SourceRepository {
@@ -491,7 +491,7 @@ export interface SourceRepository {
   getLatestEpg(sourceId: string): Promise<StoredEpgGuide>;
   getLatestPlaylistEntries(
     sourceId: string,
-    mediaType?: MediaType,
+    mediaType?: MediaType | readonly MediaType[],
   ): Promise<M3uEntry[]>;
   listGroups(sourceId: string): Promise<GroupSummary[]>;
   saveGroupPolicy(
@@ -629,7 +629,7 @@ export interface SourceRepository {
   createOutputProfile(
     sourceIds: string[],
     name: string,
-    mediaType?: MediaType,
+    mediaTypes?: readonly MediaType[],
   ): Promise<CreatedOutputProfile>;
   listOutputProfiles(): Promise<ActiveOutputProfile[]>;
   resolveOutputProfile(
@@ -928,16 +928,32 @@ function outputProfileSourceIds(configuration: unknown): string[] {
   return typeof legacySourceId === 'string' ? [legacySourceId] : [];
 }
 
+const PUBLISHABLE_MEDIA_TYPES: readonly MediaType[] = ['live', 'vod', 'series'];
+
 /**
- * Profiles created before films and series existed carry no media type, and
- * they publish live TV, so an absent value has to keep meaning exactly that.
+ * A profile can carry any combination of the three. Profiles created before
+ * films and series existed carry no media type at all and publish live TV, so
+ * an absent value has to keep meaning exactly that; a single `mediaType` from
+ * the first version of this feature is still read as well.
+ *
+ * The order is fixed rather than taken from the stored value, so a combined
+ * playlist always reads channels, then films, then series.
  */
-function outputProfileMediaType(configuration: unknown): MediaType {
+function outputProfileMediaTypes(configuration: unknown): MediaType[] {
   if (typeof configuration !== 'object' || configuration === null) {
-    return 'live';
+    return ['live'];
   }
-  const value = (configuration as Record<string, unknown>)['mediaType'];
-  return value === 'vod' || value === 'series' ? value : 'live';
+  const record = configuration as Record<string, unknown>;
+  const many = record['mediaTypes'];
+  if (Array.isArray(many)) {
+    const chosen = PUBLISHABLE_MEDIA_TYPES.filter((type) =>
+      many.includes(type),
+    );
+    if (chosen.length > 0) return chosen;
+  }
+  const single = record['mediaType'];
+  if (single === 'vod' || single === 'series') return [single];
+  return ['live'];
 }
 
 export function deriveXmltvUrl(playlistUrl: string): string | null {
@@ -1783,8 +1799,9 @@ export class PostgresSourceRepository implements SourceRepository {
    */
   async getLatestPlaylistEntries(
     sourceId: string,
-    mediaType: MediaType = 'live',
+    mediaType: MediaType | readonly MediaType[] = 'live',
   ): Promise<M3uEntry[]> {
+    const mediaTypes = Array.isArray(mediaType) ? mediaType : [mediaType];
     const result = await this.#pool.query<StoredEntryRow>(
       `SELECT i.original_name, i.encrypted_stream_url, i.media_type, i.metadata,
               c.custom_name, c.custom_group, c.custom_logo_url, c.sort_order,
@@ -1793,7 +1810,7 @@ export class PostgresSourceRepository implements SourceRepository {
               group_order.sort_order AS group_sort_order
        FROM source_snapshot s
        JOIN upstream_item i
-         ON i.snapshot_id = s.id AND i.media_type = $2
+         ON i.snapshot_id = s.id AND i.media_type = ANY($2::text[])
        LEFT JOIN channel c
          ON c.current_upstream_item_id = i.id AND c.archived_at IS NULL
        LEFT JOIN epg_mapping mapping ON mapping.channel_id = c.id
@@ -1822,7 +1839,7 @@ export class PostgresSourceRepository implements SourceRepository {
                 i.provider_group,
                 COALESCE(c.sort_order, (i.metadata->>'lineNumber')::int, 0),
                 COALESCE((i.metadata->>'lineNumber')::int, 0), i.id`,
-      [sourceId, mediaType],
+      [sourceId, mediaTypes],
     );
     return result.rows.map((row) => {
       const attributes = { ...(row.metadata.attributes ?? {}) };
@@ -4536,8 +4553,14 @@ export class PostgresSourceRepository implements SourceRepository {
   async createOutputProfile(
     sourceIds: string[],
     name: string,
-    mediaType: MediaType = 'live',
+    mediaTypes: readonly MediaType[] = ['live'],
   ): Promise<CreatedOutputProfile> {
+    const chosenMediaTypes = PUBLISHABLE_MEDIA_TYPES.filter((type) =>
+      mediaTypes.includes(type),
+    );
+    if (chosenMediaTypes.length === 0) {
+      throw new Error('An output must carry at least one kind of content');
+    }
     const uniqueSourceIds = [...new Set(sourceIds)];
     if (uniqueSourceIds.length === 0) {
       throw new Error('At least one provider is required for an output');
@@ -4563,7 +4586,7 @@ export class PostgresSourceRepository implements SourceRepository {
          )
          VALUES ($1, $2, $3, jsonb_build_object(
            'sourceIds', $4::jsonb,
-           'mediaType', $5::text
+           'mediaTypes', $5::jsonb
          ))
          RETURNING id, name`,
         [
@@ -4571,7 +4594,7 @@ export class PostgresSourceRepository implements SourceRepository {
           accessTokenHash(accessToken),
           encryptSecret(accessToken, this.#masterKey),
           JSON.stringify(uniqueSourceIds),
-          mediaType,
+          JSON.stringify(chosenMediaTypes),
         ],
       );
       profile = result.rows[0];
@@ -4601,14 +4624,14 @@ export class PostgresSourceRepository implements SourceRepository {
     );
     return result.rows.reduce<ActiveOutputProfile[]>((profiles, row) => {
       const sourceIds = outputProfileSourceIds(row.configuration);
-      const mediaType = outputProfileMediaType(row.configuration);
+      const mediaTypes = outputProfileMediaTypes(row.configuration);
       if (sourceIds.length === 0 || !row.created_at) return profiles;
       if (!row.access_token_encrypted) {
         profiles.push({
           id: row.id,
           name: row.name,
           sourceIds,
-          mediaType,
+          mediaTypes,
           createdAt: row.created_at.toISOString(),
           recoverable: false,
         });
@@ -4618,7 +4641,7 @@ export class PostgresSourceRepository implements SourceRepository {
         id: row.id,
         name: row.name,
         sourceIds,
-        mediaType,
+        mediaTypes,
         createdAt: row.created_at.toISOString(),
         recoverable: true,
         accessToken: decryptSecret(row.access_token_encrypted, this.#masterKey),
@@ -4644,7 +4667,7 @@ export class PostgresSourceRepository implements SourceRepository {
           id: row.id,
           name: row.name,
           sourceIds,
-          mediaType: outputProfileMediaType(row.configuration),
+          mediaTypes: outputProfileMediaTypes(row.configuration),
         }
       : null;
   }
