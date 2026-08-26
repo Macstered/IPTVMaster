@@ -263,10 +263,17 @@ interface ActiveOutputProfile {
   id: string;
   name: string;
   sourceIds: string[];
+  mediaTypes: Array<'live' | 'vod' | 'series'>;
   createdAt: string;
   recoverable: boolean;
   accessToken?: string;
 }
+
+const MEDIA_TYPE_LABELS: Record<'live' | 'vod' | 'series', string> = {
+  live: 'Live TV',
+  vod: 'Movies',
+  series: 'Series',
+};
 
 async function readJson<T>(response: Response): Promise<T> {
   const value: unknown = await response.json();
@@ -443,9 +450,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [creatingOutput, setCreatingOutput] = useState(false);
   const [outputSourceIds, setOutputSourceIds] = useState<string[]>([]);
   const [outputName, setOutputName] = useState('My playlist');
-  const [outputMediaType, setOutputMediaType] = useState<
-    'live' | 'vod' | 'series'
-  >('live');
+  const [outputMediaTypes, setOutputMediaTypes] = useState<
+    Array<'live' | 'vod' | 'series'>
+  >(['live']);
   const [outputProfiles, setOutputProfiles] = useState<ActiveOutputProfile[]>(
     [],
   );
@@ -1855,7 +1862,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         body: JSON.stringify({
           sourceIds: outputSourceIds,
           name: outputName.trim() || 'My playlist',
-          mediaType: outputMediaType,
+          mediaTypes: outputMediaTypes,
         }),
       });
       await readJson<{ profile: CreatedOutputProfile }>(response);
@@ -4396,7 +4403,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   />
                 </label>
                 <div className="source-type-choice">
-                  <span className="source-type-label">This URL carries</span>
+                  <span className="source-type-label">
+                    This URL carries (choose any)
+                  </span>
                   <div className="epg-chips">
                     {(
                       [
@@ -4408,16 +4417,27 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                       <button
                         key={value}
                         type="button"
-                        className={`epg-chip ${outputMediaType === value ? 'active' : ''}`}
-                        onClick={() => setOutputMediaType(value)}
+                        aria-pressed={outputMediaTypes.includes(value)}
+                        className={`epg-chip ${outputMediaTypes.includes(value) ? 'active' : ''}`}
+                        onClick={() =>
+                          setOutputMediaTypes((current) =>
+                            current.includes(value)
+                              ? // Never leave an output carrying nothing.
+                                current.length > 1
+                                ? current.filter((kind) => kind !== value)
+                                : current
+                              : [...current, value],
+                          )
+                        }
                       >
                         {label}
                       </button>
                     ))}
                   </div>
                   <small className="channel-limit-note">
-                    Each kind gets its own URL, so a live playlist never grows
-                    by a catalogue your player would download and ignore.
+                    Pick several to publish one combined URL, or make a separate
+                    URL per kind so a live playlist never grows by a catalogue
+                    your player would download and ignore.
                   </small>
                 </div>
                 <div className="output-provider-list">
@@ -4473,7 +4493,12 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                   <article className="output-url" key={profile.id}>
                     <div className="output-url-heading">
                       <strong>{profile.name}</strong>
-                      <small>{sourceNames}</small>
+                      <small>
+                        {sourceNames} ·{' '}
+                        {(profile.mediaTypes ?? ['live'])
+                          .map((kind) => MEDIA_TYPE_LABELS[kind])
+                          .join(', ')}
+                      </small>
                     </div>
                     {profile.recoverable && profile.accessToken ? (
                       <>

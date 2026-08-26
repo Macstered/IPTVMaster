@@ -199,9 +199,13 @@ const groupPolicySchema = z.object({
 const outputProfileSchema = z.object({
   sourceIds: z.array(z.uuid()).min(1).max(20),
   name: z.string().trim().min(1).max(120).default('My playlist'),
-  // Each kind of content gets its own URL, so a live playlist is never
-  // enlarged by a catalogue the player has to download to ignore.
-  mediaType: z.enum(['live', 'vod', 'series']).default('live'),
+  // A URL can carry any combination. Keeping them apart avoids enlarging a
+  // live playlist with a catalogue the player downloads and ignores, but one
+  // combined URL is a reasonable thing to want.
+  mediaTypes: z
+    .array(z.enum(['live', 'vod', 'series']))
+    .min(1)
+    .default(['live']),
 });
 
 const channelListSchema = z.object({
@@ -2565,7 +2569,7 @@ export async function buildApp(
     const profile = await sourceRepository.createOutputProfile(
       parsed.data.sourceIds,
       parsed.data.name,
-      parsed.data.mediaType,
+      parsed.data.mediaTypes,
     );
     return reply.code(201).send({ profile });
   });
@@ -2612,7 +2616,7 @@ export async function buildApp(
         const [entries, policies] = await Promise.all([
           sourceRepository.getLatestPlaylistEntries(
             sourceId,
-            profile.mediaType,
+            profile.mediaTypes,
           ),
           sourceRepository.listOutputGroupPolicies(
             sourceId,
