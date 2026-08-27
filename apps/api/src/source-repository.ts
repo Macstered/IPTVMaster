@@ -1391,11 +1391,29 @@ export class PostgresSourceRepository implements SourceRepository {
         throw new Error('Sync run insert did not return an identifier');
 
       await client.query('BEGIN');
-      const sourceLock = await client.query<{ id: string }>(
-        'SELECT id FROM source WHERE id = $1 FOR UPDATE',
+      // Serialize imports of the same source without blocking ordinary editor
+      // writes on the source row while a large catalogue is staged.
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('iptvmaster:source:' || $1::text, 0)
+         )`,
         [sourceId],
       );
-      if (!sourceLock.rows[0]) throw new Error('Source not found');
+      const sourceRecord = await client.query<{ id: string }>(
+        'SELECT id FROM source WHERE id = $1',
+        [sourceId],
+      );
+      if (!sourceRecord.rows[0]) throw new Error('Source not found');
+      let sourceRowLocked = false;
+      const lockSourceRow = async () => {
+        if (sourceRowLocked) return;
+        const sourceLock = await client.query<{ id: string }>(
+          'SELECT id FROM source WHERE id = $1 FOR UPDATE',
+          [sourceId],
+        );
+        if (!sourceLock.rows[0]) throw new Error('Source not found');
+        sourceRowLocked = true;
+      };
 
       const existing = await client.query<SnapshotHistoryRow>(
         `SELECT id, source_id, fingerprint, imported_at, live_count,
@@ -1422,6 +1440,7 @@ export class PostgresSourceRepository implements SourceRepository {
       }
 
       if (existingSnapshot && !selectionChanged) {
+        await lockSourceRow();
         // A provider whose playlist does not change returns this same
         // fingerprint forever. Without recording the catalogue here, one
         // imported before categories existed would never gain an index and
@@ -1497,6 +1516,10 @@ export class PostgresSourceRepository implements SourceRepository {
       }
 
       if (existingSnapshot) {
+        // Replacing an existing fingerprint can cascade into current channel
+        // links, so keep this rarer selection-change path serialized with
+        // editor writes. New provider fingerprints take the fast staging path.
+        await lockSourceRow();
         // Same provider data, different selection. Replacing the stored copy
         // keeps one snapshot per fingerprint, so the lookup above stays
         // unambiguous and history does not fill with duplicates every time a
@@ -1509,15 +1532,11 @@ export class PostgresSourceRepository implements SourceRepository {
         ]);
       }
 
-      await client.query(
-        'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
-        [sourceId],
-      );
       const snapshotResult = await client.query<SnapshotRow>(
         `INSERT INTO source_snapshot
           (source_id, sync_run_id, fingerprint, live_count, skipped_vod_count,
            issue_count, is_last_known_good)
-         VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+         VALUES ($1, $2, $3, $4, $5, $6, FALSE)
          RETURNING id, source_id, fingerprint, imported_at, live_count,
                    skipped_vod_count, issue_count`,
         [
@@ -1594,6 +1613,21 @@ export class PostgresSourceRepository implements SourceRepository {
         await this.#saveVodCategories(client, sourceId, inspection.categories);
       }
 
+      // Only activation and live-channel reconciliation need to exclude editor
+      // mutations. Catalogue encryption and insertion above can take minutes,
+      // so acquiring the source row here keeps that staging time invisible to
+      // ordinary group/channel edits.
+      await lockSourceRow();
+      await client.query(
+        'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
+        [sourceId],
+      );
+      await client.query(
+        `UPDATE source_snapshot
+         SET is_last_known_good = TRUE
+         WHERE source_id = $1 AND id = $2`,
+        [sourceId, snapshot.id],
+      );
       const removedChannels = await this.#reconcileChannels(
         client,
         sourceId,
@@ -4872,24 +4906,20 @@ export class PostgresSourceRepository implements SourceRepository {
     }));
     const reconciliation = reconcileChannels(channels, items);
 
+    // Materialize matches with statistics before joining them to channel. A
+    // large JSON recordset is otherwise estimated as a tiny relation and can
+    // produce tens of thousands of random index reads on modest home storage.
     await client.query(
-      `UPDATE channel
-       SET current_upstream_item_id = NULL,
-           reconciliation_status = 'missing',
-           match_confidence = NULL,
-           missed_refreshes = CASE
-             WHEN $2 AND COALESCE(
-               (SELECT p.behavior
-                FROM group_policy p
-                WHERE p.source_id = channel.source_id
-                  AND p.provider_group = channel.provider_group),
-               'permanent'
-             ) = 'permanent' THEN missed_refreshes + 1
-             ELSE missed_refreshes
-           END,
-           updated_at = NOW()
-       WHERE source_id = $1 AND archived_at IS NULL`,
-      [sourceId, countRefreshCycle],
+      `CREATE TEMP TABLE iptvmaster_channel_matches (
+         channel_id UUID PRIMARY KEY,
+         item_id UUID NOT NULL,
+         provider_stream_id TEXT,
+         tvg_id TEXT,
+         provider_name TEXT NOT NULL,
+         provider_group TEXT NOT NULL,
+         provider_logo_url TEXT,
+         confidence NUMERIC
+       ) ON COMMIT DROP`,
     );
 
     if (reconciliation.matches.length > 0) {
@@ -4904,8 +4934,28 @@ export class PostgresSourceRepository implements SourceRepository {
         confidence: match.confidence,
       }));
       await client.query(
+        `INSERT INTO iptvmaster_channel_matches
+          (channel_id, item_id, provider_stream_id, tvg_id, provider_name,
+           provider_group, provider_logo_url, confidence)
+         SELECT item.channel_id, item.item_id, item.provider_stream_id,
+                item.tvg_id, item.provider_name, item.provider_group,
+                item.provider_logo_url, item.confidence
+         FROM jsonb_to_recordset($1::jsonb) AS item(
+           channel_id UUID,
+           item_id UUID,
+           provider_stream_id TEXT,
+           tvg_id TEXT,
+           provider_name TEXT,
+           provider_group TEXT,
+           provider_logo_url TEXT,
+           confidence NUMERIC
+         )`,
+        [JSON.stringify(values)],
+      );
+      await client.query('ANALYZE iptvmaster_channel_matches');
+      await client.query(
         `UPDATE channel c
-         SET current_upstream_item_id = item.item_id::uuid,
+         SET current_upstream_item_id = item.item_id,
              provider_stream_id = item.provider_stream_id,
              tvg_id = item.tvg_id,
              provider_name = item.provider_name,
@@ -4916,30 +4966,40 @@ export class PostgresSourceRepository implements SourceRepository {
              last_seen_at = NOW(),
              missed_refreshes = 0,
              updated_at = NOW()
-         FROM jsonb_to_recordset($1::jsonb) AS item(
-           channel_id UUID,
-           item_id TEXT,
-           provider_stream_id TEXT,
-           tvg_id TEXT,
-           provider_name TEXT,
-           provider_group TEXT,
-           provider_logo_url TEXT,
-           confidence NUMERIC
-         )
+         FROM iptvmaster_channel_matches item
          WHERE c.id = item.channel_id`,
-        [JSON.stringify(values)],
       );
     }
 
-    if (reconciliation.ambiguousChannelIds.length > 0) {
-      await client.query(
-        `UPDATE channel
-         SET reconciliation_status = 'ambiguous', updated_at = NOW()
-         WHERE source_id = $1 AND id = ANY($2::uuid[])`,
-        [sourceId, reconciliation.ambiguousChannelIds],
-      );
-    }
-
+    // Matched rows are updated once instead of first being marked missing and
+    // then immediately rewritten. Only genuinely unmatched rows take this
+    // second path.
+    await client.query(
+      `UPDATE channel c
+       SET current_upstream_item_id = NULL,
+           reconciliation_status = CASE
+             WHEN c.id = ANY($3::uuid[]) THEN 'ambiguous'
+             ELSE 'missing'
+           END,
+           match_confidence = NULL,
+           missed_refreshes = CASE
+             WHEN $2 AND COALESCE(
+               (SELECT p.behavior
+                FROM group_policy p
+                WHERE p.source_id = c.source_id
+                  AND p.provider_group = c.provider_group),
+               'permanent'
+             ) = 'permanent' THEN missed_refreshes + 1
+             ELSE missed_refreshes
+           END,
+           updated_at = NOW()
+       WHERE c.source_id = $1 AND c.archived_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM iptvmaster_channel_matches item
+           WHERE item.channel_id = c.id
+         )`,
+      [sourceId, countRefreshCycle, reconciliation.ambiguousChannelIds],
+    );
     if (reconciliation.newItems.length > 0) {
       const values = reconciliation.newItems.map((item) => ({
         item_id: item.id,
