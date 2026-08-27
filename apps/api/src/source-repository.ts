@@ -3091,8 +3091,17 @@ export class PostgresSourceRepository implements SourceRepository {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      // Serialize competing reorder requests without taking an UPDATE lock on
+      // the parent source row. A large snapshot import holds a foreign-key
+      // KEY SHARE lock there while staging, but does not modify category order.
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('iptvmaster:output-order:' || $1::text, 0)
+         )`,
+        [sourceId],
+      );
       const source = await client.query<{ id: string }>(
-        `SELECT id FROM source WHERE id = $1 FOR UPDATE`,
+        `SELECT id FROM source WHERE id = $1`,
         [sourceId],
       );
       if (!source.rows[0]) throw new Error('Source was not found');
