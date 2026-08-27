@@ -16,6 +16,7 @@ import {
   withProviderRetry,
   type ProviderRetryOptions,
 } from './provider-retry.js';
+import type { ExclusiveBackgroundRun } from './background-work.js';
 
 export class EpgNotConfiguredError extends Error {}
 
@@ -229,6 +230,7 @@ export class EpgScheduler {
   readonly #repository: SourceRepository;
   readonly #coordinator: EpgRefreshCoordinator;
   readonly #logger: PlaylistSchedulerLogger;
+  readonly #runExclusive: ExclusiveBackgroundRun;
   #intervalMs: number;
   readonly #initialDelayMs: number;
   #timer?: NodeJS.Timeout;
@@ -243,13 +245,18 @@ export class EpgScheduler {
     repository: SourceRepository,
     coordinator: EpgRefreshCoordinator,
     logger: PlaylistSchedulerLogger,
-    options: { intervalMs: number; initialDelayMs: number },
+    options: {
+      intervalMs: number;
+      initialDelayMs: number;
+      runExclusive?: ExclusiveBackgroundRun;
+    },
   ) {
     this.#repository = repository;
     this.#coordinator = coordinator;
     this.#logger = logger;
     this.#intervalMs = options.intervalMs;
     this.#initialDelayMs = options.initialDelayMs;
+    this.#runExclusive = options.runExclusive ?? ((work) => work());
   }
 
   start(): void {
@@ -305,63 +312,64 @@ export class EpgScheduler {
     this.#running = true;
     this.#lastCycleStartedAt = new Date().toISOString();
     try {
-      const sources = await this.#repository.listSources();
-      for (const source of sources.filter(
-        (candidate) => candidate.enabled && candidate.hasEpgUrl,
-      )) {
-        try {
-          const result = await this.#coordinator.refresh(source.id);
-          this.#logger.info(
-            {
-              sourceId: source.id,
-              unchanged: result.summary?.unchanged,
-              programmeCount: result.summary?.programmeCount,
-              skipped: result.status === 'already-running',
-            },
-            'Automatic EPG refresh finished',
-          );
-        } catch (error) {
-          this.#logger.warn(
-            { sourceId: source.id, safeError: safeRefreshError(error) },
-            'Automatic EPG refresh failed',
-          );
-        }
-      }
-      try {
-        const guides = await this.#repository.listEpgSources();
-        for (const guide of guides.filter(
-          (candidate) => candidate.kind === 'custom' && candidate.enabled,
+      await this.#runExclusive(async () => {
+        const sources = await this.#repository.listSources();
+        for (const source of sources.filter(
+          (candidate) => candidate.enabled && candidate.hasEpgUrl,
         )) {
           try {
-            const result = await this.#coordinator.refreshEpgSource(guide.id);
+            const result = await this.#coordinator.refresh(source.id);
             this.#logger.info(
               {
-                epgSourceId: guide.id,
+                sourceId: source.id,
                 unchanged: result.summary?.unchanged,
                 programmeCount: result.summary?.programmeCount,
                 skipped: result.status === 'already-running',
               },
-              'Automatic custom EPG refresh finished',
+              'Automatic EPG refresh finished',
             );
           } catch (error) {
             this.#logger.warn(
-              { epgSourceId: guide.id, safeError: safeRefreshError(error) },
-              'Automatic custom EPG refresh failed',
+              { sourceId: source.id, safeError: safeRefreshError(error) },
+              'Automatic EPG refresh failed',
             );
           }
         }
-      } catch (error) {
-        this.#logger.warn(
-          { safeError: safeRefreshError(error) },
-          'Could not list EPG sources for automatic refresh',
-        );
-      }
+        try {
+          const guides = await this.#repository.listEpgSources();
+          for (const guide of guides.filter(
+            (candidate) => candidate.kind === 'custom' && candidate.enabled,
+          )) {
+            try {
+              const result = await this.#coordinator.refreshEpgSource(guide.id);
+              this.#logger.info(
+                {
+                  epgSourceId: guide.id,
+                  unchanged: result.summary?.unchanged,
+                  programmeCount: result.summary?.programmeCount,
+                  skipped: result.status === 'already-running',
+                },
+                'Automatic custom EPG refresh finished',
+              );
+            } catch (error) {
+              this.#logger.warn(
+                { epgSourceId: guide.id, safeError: safeRefreshError(error) },
+                'Automatic custom EPG refresh failed',
+              );
+            }
+          }
+        } catch (error) {
+          this.#logger.warn(
+            { safeError: safeRefreshError(error) },
+            'Could not list EPG sources for automatic refresh',
+          );
+        }
+      });
     } finally {
       this.#running = false;
       this.#lastCycleFinishedAt = new Date().toISOString();
     }
   }
-
   #schedule(delayMs: number): void {
     if (!this.#started) return;
     this.#nextRunAt = new Date(Date.now() + delayMs).toISOString();

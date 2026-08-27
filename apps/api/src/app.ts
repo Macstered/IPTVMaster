@@ -67,6 +67,7 @@ import {
   type CreatedAuthSession,
 } from './auth.js';
 import { MaintenanceScheduler } from './maintenance.js';
+import { BackgroundWorkQueue } from './background-work.js';
 import {
   buildXtreamFlatCatalogue,
   buildXtreamSeriesCatalogue,
@@ -709,6 +710,9 @@ export async function buildApp(
       positiveEnvironmentNumber('PROVIDER_RETRY_MAX_DELAY_SECONDS', 30) * 1_000,
   };
 
+  const backgroundWorkQueue = new BackgroundWorkQueue();
+  const runBackgroundWork = backgroundWorkQueue.run.bind(backgroundWorkQueue);
+
   const refreshCoordinator = sourceRepository
     ? new PlaylistRefreshCoordinator(
         sourceRepository,
@@ -736,6 +740,7 @@ export async function buildApp(
               'PLAYLIST_REFRESH_INITIAL_DELAY_SECONDS',
               30,
             ) * 1_000,
+          runExclusive: runBackgroundWork,
         })
       : undefined;
   const epgRefreshCoordinator = sourceRepository
@@ -760,6 +765,7 @@ export async function buildApp(
             options.epgRefreshInitialDelayMs ??
             positiveEnvironmentNumber('EPG_REFRESH_INITIAL_DELAY_SECONDS', 60) *
               1_000,
+          runExclusive: runBackgroundWork,
         })
       : undefined;
   const maintenanceSchedulerEnabled =
@@ -796,6 +802,7 @@ export async function buildApp(
                 'MAINTENANCE_INITIAL_DELAY_SECONDS',
                 300,
               ) * 1_000,
+            runExclusive: runBackgroundWork,
           },
         )
       : undefined;

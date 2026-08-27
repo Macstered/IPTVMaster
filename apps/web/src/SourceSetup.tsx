@@ -1117,7 +1117,24 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                 expandedOutputGroup,
           ),
       );
-      await Promise.all([refreshPermanentWorkspace(source.id)]);
+      const refreshes: Promise<void>[] = [];
+      if ('enabled' in update || 'customGroup' in update) {
+        refreshes.push(
+          loadPermanentGroups(source.id),
+          loadOutputGroupCategories(source.id),
+        );
+      }
+      if ('sortOrder' in update || 'customName' in update) {
+        if (expandedPermanentGroup !== null) {
+          refreshes.push(loadChannels(source.id, expandedPermanentGroup));
+        }
+        if (expandedOutputGroup !== null) {
+          refreshes.push(
+            loadOutputGroupChannels(source.id, expandedOutputGroup),
+          );
+        }
+      }
+      await Promise.all(refreshes);
       return payload.channel;
     } catch (caught) {
       showToast(

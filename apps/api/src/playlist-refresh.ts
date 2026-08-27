@@ -13,6 +13,7 @@ import {
   withProviderRetry,
   type ProviderRetryOptions,
 } from './provider-retry.js';
+import type { ExclusiveBackgroundRun } from './background-work.js';
 
 export interface PlaylistRefreshResult {
   status: 'completed' | 'already-running';
@@ -165,6 +166,7 @@ export interface PlaylistSchedulerLogger {
 export interface PlaylistSchedulerOptions {
   intervalMs: number;
   initialDelayMs: number;
+  runExclusive?: ExclusiveBackgroundRun;
 }
 
 export interface PlaylistSchedulerStatus {
@@ -181,6 +183,7 @@ export class PlaylistScheduler {
   readonly #repository: SourceRepository;
   readonly #coordinator: PlaylistRefreshCoordinator;
   readonly #logger: PlaylistSchedulerLogger;
+  readonly #runExclusive: ExclusiveBackgroundRun;
   #options: PlaylistSchedulerOptions;
   #timer?: NodeJS.Timeout;
   #cyclePromise?: Promise<void>;
@@ -200,6 +203,7 @@ export class PlaylistScheduler {
     this.#coordinator = coordinator;
     this.#logger = logger;
     this.#options = { ...options };
+    this.#runExclusive = options.runExclusive ?? ((work) => work());
   }
 
   start(): void {
@@ -255,32 +259,33 @@ export class PlaylistScheduler {
     this.#running = true;
     this.#lastCycleStartedAt = new Date().toISOString();
     try {
-      const sources = await this.#repository.listSources();
-      for (const source of sources.filter((candidate) => candidate.enabled)) {
-        try {
-          const result = await this.#coordinator.refresh(source.id);
-          this.#logger.info(
-            {
-              sourceId: source.id,
-              unchanged: result.snapshot?.unchanged,
-              liveCount: result.snapshot?.liveCount,
-              skipped: result.status === 'already-running',
-            },
-            'Automatic playlist refresh finished',
-          );
-        } catch (error) {
-          this.#logger.warn(
-            { sourceId: source.id, safeError: safeRefreshError(error) },
-            'Automatic playlist refresh failed',
-          );
+      await this.#runExclusive(async () => {
+        const sources = await this.#repository.listSources();
+        for (const source of sources.filter((candidate) => candidate.enabled)) {
+          try {
+            const result = await this.#coordinator.refresh(source.id);
+            this.#logger.info(
+              {
+                sourceId: source.id,
+                unchanged: result.snapshot?.unchanged,
+                liveCount: result.snapshot?.liveCount,
+                skipped: result.status === 'already-running',
+              },
+              'Automatic playlist refresh finished',
+            );
+          } catch (error) {
+            this.#logger.warn(
+              { sourceId: source.id, safeError: safeRefreshError(error) },
+              'Automatic playlist refresh failed',
+            );
+          }
         }
-      }
+      });
     } finally {
       this.#running = false;
       this.#lastCycleFinishedAt = new Date().toISOString();
     }
   }
-
   #schedule(delayMs: number): void {
     if (!this.#started) return;
     this.#nextRunAt = new Date(Date.now() + delayMs).toISOString();

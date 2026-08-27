@@ -1,4 +1,5 @@
 import { safeRefreshError } from './playlist-refresh.js';
+import type { ExclusiveBackgroundRun } from './background-work.js';
 
 export interface MaintenanceTask {
   cleanupExpiredSessions(): Promise<number>;
@@ -26,6 +27,7 @@ export interface MaintenanceStatus {
 export class MaintenanceScheduler {
   readonly #task: MaintenanceTask;
   readonly #logger: MaintenanceLogger;
+  readonly #runExclusive: ExclusiveBackgroundRun;
   readonly #intervalMs: number;
   readonly #initialDelayMs: number;
   #timer?: NodeJS.Timeout;
@@ -42,12 +44,17 @@ export class MaintenanceScheduler {
   constructor(
     task: MaintenanceTask,
     logger: MaintenanceLogger,
-    options: { intervalMs: number; initialDelayMs: number },
+    options: {
+      intervalMs: number;
+      initialDelayMs: number;
+      runExclusive?: ExclusiveBackgroundRun;
+    },
   ) {
     this.#task = task;
     this.#logger = logger;
     this.#intervalMs = options.intervalMs;
     this.#initialDelayMs = options.initialDelayMs;
+    this.#runExclusive = options.runExclusive ?? ((work) => work());
   }
 
   start(): void {
@@ -92,17 +99,20 @@ export class MaintenanceScheduler {
     this.#lastRunStartedAt = new Date().toISOString();
     this.#lastSafeError = undefined;
     try {
-      const expiredSessionsRemoved = await this.#task.cleanupExpiredSessions();
-      this.#lastExpiredSessionsRemoved = expiredSessionsRemoved;
-      // Every accepted refresh writes a full copy of the provider's entries.
-      // Without pruning, that table grows without limit and each import pays
-      // more index maintenance than the last.
-      const prunedSnapshots = (await this.#task.pruneSnapshots?.()) ?? 0;
-      this.#lastPrunedSnapshots = prunedSnapshots;
-      this.#logger.info(
-        { expiredSessionsRemoved, prunedSnapshots },
-        'Database maintenance finished',
-      );
+      await this.#runExclusive(async () => {
+        const expiredSessionsRemoved =
+          await this.#task.cleanupExpiredSessions();
+        this.#lastExpiredSessionsRemoved = expiredSessionsRemoved;
+        // Every accepted refresh writes a full copy of the provider's entries.
+        // Without pruning, that table grows without limit and each import pays
+        // more index maintenance than the last.
+        const prunedSnapshots = (await this.#task.pruneSnapshots?.()) ?? 0;
+        this.#lastPrunedSnapshots = prunedSnapshots;
+        this.#logger.info(
+          { expiredSessionsRemoved, prunedSnapshots },
+          'Database maintenance finished',
+        );
+      });
     } catch (error) {
       this.#lastSafeError = safeRefreshError(error);
       this.#logger.warn(
@@ -114,7 +124,6 @@ export class MaintenanceScheduler {
       this.#lastRunFinishedAt = new Date().toISOString();
     }
   }
-
   #schedule(delayMs: number): void {
     if (!this.#started) return;
     this.#nextRunAt = new Date(Date.now() + delayMs).toISOString();
