@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { M3uEntry } from '@iptvmaster/core';
 
 import {
+  buildHybridXtreamSeriesCatalogue,
   buildXtreamFlatCatalogue,
   buildXtreamSeriesCatalogue,
+  buildXtreamSeriesDetailFromUpstream,
   decodeXtreamStreamId,
   parseSeriesEpisode,
   type XtreamOutputEntry,
@@ -191,8 +193,205 @@ describe('Xtream-compatible output', () => {
     );
   });
 
+  it('uses upstream parents instead of M3U episode rows', () => {
+    const entries = [
+      item(
+        '4K - NC Avatar: The Last Airbender (2024) S01E01',
+        'http://provider.test/series/user/pass/101.mkv',
+        'series',
+        'Series: Nordic 4K',
+      ),
+      item(
+        '4K - NC Avatar: The Last Airbender (2024) S01 E02',
+        'http://provider.test/series/user/pass/102.mkv',
+        'series',
+        'Series: Nordic 4K',
+      ),
+      item(
+        '4K - NC Avatar: The Last Airbender (2024) S02E01',
+        'http://provider.test/series/user/pass/201.mp4',
+        'series',
+        'Series: Nordic 4K',
+      ),
+    ];
+    const catalogue = buildHybridXtreamSeriesCatalogue(
+      entries,
+      new Map([
+        [
+          'source-0',
+          {
+            categories: [
+              {
+                categoryId: '1052',
+                categoryName: 'Series: Nordic 4K',
+                parentId: 0,
+              },
+            ],
+            series: [
+              {
+                seriesId: 11903,
+                name: '4K - NC Avatar: The Last Airbender (2024)',
+                categoryId: '1052',
+                cover: 'https://images.test/avatar.jpg',
+                plot: '',
+                cast: '',
+                director: '',
+                genre: '',
+                releaseDate: '',
+                lastModified: '',
+                rating: '',
+                rating5Based: 0,
+                backdropPath: [],
+                youtubeTrailer: '',
+                tmdb: '',
+                episodeRunTime: '',
+              },
+            ],
+          },
+        ],
+      ]),
+    );
+
+    expect(catalogue.categories).toEqual([
+      expect.objectContaining({
+        category_id: '1052',
+        category_name: 'Series: Nordic 4K',
+      }),
+    ]);
+    expect(catalogue.series).toEqual([
+      expect.objectContaining({
+        series_id: 11903,
+        name: '4K - NC Avatar: The Last Airbender (2024)',
+        category_id: '1052',
+      }),
+    ]);
+    expect(
+      catalogue.series.some((series) => /S\d{2}\s*E\d{2}/i.test(series.name)),
+    ).toBe(false);
+    expect(catalogue.upstreamById.get(11903)).toEqual(
+      expect.objectContaining({ upstreamSeriesId: 11903 }),
+    );
+  });
+
+  it('rewrites provider episodes into playable multi-season detail', () => {
+    const summary = {
+      num: 1,
+      name: 'Avatar: The Last Airbender (2024)',
+      series_id: 11903,
+      cover: 'https://images.test/avatar.jpg',
+      plot: '',
+      cast: '',
+      director: '',
+      genre: '',
+      releaseDate: '',
+      release_date: '',
+      last_modified: '',
+      rating: '',
+      rating_5based: 0,
+      backdrop_path: [],
+      youtube_trailer: '',
+      tmdb: '',
+      episode_run_time: '',
+      category_id: '1052',
+      category_ids: ['1052'],
+    };
+    const detail = buildXtreamSeriesDetailFromUpstream(
+      {
+        sourceId: 'source-0',
+        sourceIndex: 0,
+        upstreamSeriesId: 11903,
+        summary,
+      },
+      {
+        seasons: [
+          { season_number: 1, episode_count: 2 },
+          { season_number: 2, episode_count: 1 },
+        ],
+        episodes: {
+          '1': [
+            {
+              id: '101',
+              episodeNumber: 1,
+              title: 'Avatar S01E01',
+              containerExtension: 'mkv',
+              added: '1',
+              season: 1,
+              info: {
+                tmdbId: 0,
+                releaseDate: '',
+                plot: '',
+                durationSeconds: 0,
+                duration: '',
+                movieImage: '',
+                bitrate: 0,
+                rating: 0,
+              },
+            },
+            {
+              id: '102',
+              episodeNumber: 2,
+              title: 'Avatar S01 E02',
+              containerExtension: 'mkv',
+              added: '2',
+              season: 1,
+              info: {
+                tmdbId: 0,
+                releaseDate: '',
+                plot: '',
+                durationSeconds: 0,
+                duration: '',
+                movieImage: '',
+                bitrate: 0,
+                rating: 0,
+              },
+            },
+          ],
+          '2': [
+            {
+              id: '201',
+              episodeNumber: 1,
+              title: 'Avatar S02E01',
+              containerExtension: 'mp4',
+              added: '3',
+              season: 2,
+              info: {
+                tmdbId: 0,
+                releaseDate: '',
+                plot: '',
+                durationSeconds: 0,
+                duration: '',
+                movieImage: '',
+                bitrate: 0,
+                rating: 0,
+              },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(detail.seasons).toHaveLength(2);
+    expect(detail.episodes['1']?.map((episode) => episode.id)).toEqual([
+      '101',
+      '102',
+    ]);
+    expect(detail.episodes['2']?.[0]).toEqual(
+      expect.objectContaining({
+        id: '201',
+        season: 2,
+        container_extension: 'mp4',
+        direct_source: '',
+      }),
+    );
+  });
   it('recognizes common season and episode label formats', () => {
     expect(parseSeriesEpisode('Example - S03E12 - Finale')).toEqual({
+      seriesName: 'Example',
+      season: 3,
+      episodeNumber: 12,
+      episodeTitle: 'Finale',
+    });
+    expect(parseSeriesEpisode('Example - S03 E12 - Finale')).toEqual({
       seriesName: 'Example',
       season: 3,
       episodeNumber: 12,

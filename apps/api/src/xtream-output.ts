@@ -1,6 +1,11 @@
 import type { M3uEntry, MediaType } from '@iptvmaster/core';
 
-import type { XtreamSeriesArtwork } from './xtream-upstream.js';
+import type {
+  XtreamProviderSeriesCatalogue,
+  XtreamProviderSeriesInfo,
+  XtreamProviderSeriesSummary,
+  XtreamSeriesArtwork,
+} from './xtream-upstream.js';
 
 export const XTREAM_OUTPUT_USERNAME = 'iptvmaster';
 export const XTREAM_STREAM_NAMESPACE_SIZE = 100_000_000;
@@ -86,15 +91,23 @@ export interface XtreamEpisode {
 }
 
 export interface XtreamSeriesDetail {
-  seasons: never[];
+  seasons: Array<Record<string, unknown>>;
   info: Omit<XtreamSeriesSummary, 'num' | 'series_id'>;
   episodes: Record<string, XtreamEpisode[]>;
+}
+
+export interface XtreamUpstreamSeriesRoute {
+  sourceId: string;
+  sourceIndex: number;
+  upstreamSeriesId: number;
+  summary: XtreamSeriesSummary;
 }
 
 export interface XtreamSeriesCatalogue {
   categories: XtreamCategory[];
   series: XtreamSeriesSummary[];
   detailsById: Map<number, XtreamSeriesDetail>;
+  upstreamById: Map<number, XtreamUpstreamSeriesRoute>;
 }
 
 function stableNumericId(value: string): number {
@@ -166,16 +179,22 @@ export function containerExtension(value: string): string {
   }
 }
 
-export function xtreamStreamId(item: XtreamOutputEntry): number {
-  const providerId = providerStreamIdFromUrl(item.entry.url);
-  const numericProviderId =
-    providerId && /^\d{1,8}$/.test(providerId)
-      ? Number(providerId)
-      : stableNumericId(`${item.sourceId}\0${providerId ?? item.entry.url}`) %
-        XTREAM_STREAM_NAMESPACE_SIZE;
-  return item.sourceIndex * XTREAM_STREAM_NAMESPACE_SIZE + numericProviderId;
+export function xtreamProviderStreamId(
+  sourceId: string,
+  sourceIndex: number,
+  providerId: string,
+): number {
+  const numericProviderId = /^\d{1,8}$/.test(providerId)
+    ? Number(providerId)
+    : stableNumericId(sourceId + '\0' + providerId) %
+        XTREAM_STREAM_NAMESPACE_SIZE || 1;
+  return sourceIndex * XTREAM_STREAM_NAMESPACE_SIZE + numericProviderId;
 }
 
+export function xtreamStreamId(item: XtreamOutputEntry): number {
+  const providerId = providerStreamIdFromUrl(item.entry.url) ?? item.entry.url;
+  return xtreamProviderStreamId(item.sourceId, item.sourceIndex, providerId);
+}
 export function decodeXtreamStreamId(
   value: string,
   sourceCount: number,
@@ -261,7 +280,7 @@ interface ParsedEpisode {
 }
 
 const EPISODE_PATTERNS = [
-  /^(.*?)(?:\s+-\s+|\s+)?S(\d{1,3})E(\d{1,4})(?:\s+-\s+(.+))?$/i,
+  /^(.*?)(?:\s+-\s+|\s+)?S(\d{1,3})\s*E(\d{1,4})(?:\s+-\s+(.+))?$/i,
   /^(.*?)(?:\s+-\s+|\s+)?(\d{1,3})x(\d{1,4})(?:\s+-\s+(.+))?$/i,
 ];
 
@@ -495,9 +514,315 @@ export function buildXtreamSeriesCatalogue(
       return { num: index + 1, series_id: seriesId, ...common };
     },
   );
-  return { categories, series, detailsById };
+  return { categories, series, detailsById, upstreamById: new Map() };
 }
 
+function allocatedTextId(
+  key: string,
+  reserved: Set<string>,
+  used: Set<string>,
+): string {
+  let candidate = String(stableNumericId(key));
+  while (reserved.has(candidate) || used.has(candidate)) {
+    const numeric = Number(candidate);
+    candidate = String(numeric >= 0x7fff_ffff ? 1 : numeric + 1);
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function allocatedNumericId(
+  key: string,
+  reserved: Set<number>,
+  used: Set<number>,
+): number {
+  let candidate = stableNumericId(key);
+  while (reserved.has(candidate) || used.has(candidate)) {
+    candidate = candidate >= 0x7fff_ffff ? 1 : candidate + 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function providerSeriesSummary(
+  series: XtreamProviderSeriesSummary,
+  seriesId: number,
+  categoryId: string,
+): XtreamSeriesSummary {
+  return {
+    num: 0,
+    name: series.name,
+    series_id: seriesId,
+    cover: series.cover,
+    plot: series.plot,
+    cast: series.cast,
+    director: series.director,
+    genre: series.genre,
+    releaseDate: series.releaseDate,
+    release_date: series.releaseDate,
+    last_modified: series.lastModified,
+    rating: series.rating,
+    rating_5based: series.rating5Based,
+    backdrop_path: series.backdropPath,
+    youtube_trailer: series.youtubeTrailer,
+    tmdb: series.tmdb,
+    episode_run_time: series.episodeRunTime,
+    category_id: categoryId,
+    category_ids: [categoryId],
+  };
+}
+
+/**
+ * Uses provider Xtream parents when that API is available for a source. M3U
+ * episode-title synthesis remains only for sources whose Xtream metadata call
+ * failed or was unavailable.
+ */
+export function buildHybridXtreamSeriesCatalogue(
+  entries: readonly XtreamOutputEntry[],
+  upstreamBySource: ReadonlyMap<string, XtreamProviderSeriesCatalogue>,
+  artworkBySource: ReadonlyMap<
+    string,
+    readonly XtreamSeriesArtwork[]
+  > = new Map(),
+): XtreamSeriesCatalogue {
+  const allowedCategories = new Map<string, Set<string>>();
+  const sourceIndexes = new Map<string, number>();
+  for (const item of entries) {
+    sourceIndexes.set(item.sourceId, item.sourceIndex);
+    if (item.entry.mediaType !== 'series') continue;
+    const names = allowedCategories.get(item.sourceId) ?? new Set<string>();
+    names.add(normalizedSeriesText(item.entry.attributes['group-title'] ?? ''));
+    allowedCategories.set(item.sourceId, names);
+  }
+
+  const categoryCandidates: Array<{
+    key: string;
+    sourceId: string;
+    preferredId: string;
+    categoryName: string;
+    parentId: number;
+  }> = [];
+  for (const [sourceId, catalogue] of upstreamBySource) {
+    const allowed = allowedCategories.get(sourceId);
+    if (!allowed || allowed.size === 0) continue;
+    for (const category of catalogue.categories) {
+      if (!allowed.has(normalizedSeriesText(category.categoryName))) continue;
+      categoryCandidates.push({
+        key: sourceId + '\0' + category.categoryId,
+        sourceId,
+        preferredId: category.categoryId,
+        categoryName: category.categoryName,
+        parentId: category.parentId,
+      });
+    }
+  }
+
+  const reservedCategoryIds = new Set(
+    categoryCandidates.map((candidate) => candidate.preferredId),
+  );
+  const usedCategoryIds = new Set<string>();
+  const categoryIds = new Map<string, string>();
+  for (const candidate of categoryCandidates) {
+    const id = !usedCategoryIds.has(candidate.preferredId)
+      ? candidate.preferredId
+      : allocatedTextId(
+          'xtream-category\0' + candidate.key,
+          reservedCategoryIds,
+          usedCategoryIds,
+        );
+    usedCategoryIds.add(id);
+    categoryIds.set(candidate.key, id);
+  }
+  const providerCategories = categoryCandidates.map(
+    (candidate): XtreamCategory => ({
+      category_id: categoryIds.get(candidate.key) ?? candidate.preferredId,
+      category_name: candidate.categoryName,
+      parent_id:
+        candidate.parentId === 0
+          ? 0
+          : Number(
+              categoryIds.get(
+                candidate.sourceId + '\0' + String(candidate.parentId),
+              ) ?? candidate.parentId,
+            ),
+    }),
+  );
+
+  const seriesCandidates: Array<{
+    key: string;
+    sourceId: string;
+    sourceIndex: number;
+    preferredId: number;
+    series: XtreamProviderSeriesSummary;
+    categoryId: string;
+  }> = [];
+  for (const [sourceId, catalogue] of upstreamBySource) {
+    const sourceIndex = sourceIndexes.get(sourceId);
+    if (sourceIndex === undefined) continue;
+    for (const series of catalogue.series) {
+      const categoryId = categoryIds.get(sourceId + '\0' + series.categoryId);
+      if (!categoryId) continue;
+      seriesCandidates.push({
+        key: sourceId + '\0' + String(series.seriesId),
+        sourceId,
+        sourceIndex,
+        preferredId: series.seriesId,
+        series,
+        categoryId,
+      });
+    }
+  }
+  const reservedSeriesIds = new Set(
+    seriesCandidates.map((candidate) => candidate.preferredId),
+  );
+  const usedSeriesIds = new Set<number>();
+  const providerSeries: XtreamSeriesSummary[] = [];
+  const providerRoutes = new Map<
+    number,
+    Omit<XtreamUpstreamSeriesRoute, 'summary'>
+  >();
+  for (const candidate of seriesCandidates) {
+    const id = !usedSeriesIds.has(candidate.preferredId)
+      ? candidate.preferredId
+      : allocatedNumericId(
+          'xtream-series\0' + candidate.key,
+          reservedSeriesIds,
+          usedSeriesIds,
+        );
+    usedSeriesIds.add(id);
+    providerSeries.push(
+      providerSeriesSummary(candidate.series, id, candidate.categoryId),
+    );
+    providerRoutes.set(id, {
+      sourceId: candidate.sourceId,
+      sourceIndex: candidate.sourceIndex,
+      upstreamSeriesId: candidate.preferredId,
+    });
+  }
+
+  const fallbackEntries = entries.filter(
+    (item) => !upstreamBySource.has(item.sourceId),
+  );
+  const fallback = buildXtreamSeriesCatalogue(fallbackEntries, artworkBySource);
+  const fallbackCategoryIds = new Map<string, string>();
+  for (const category of fallback.categories) {
+    const id = !usedCategoryIds.has(category.category_id)
+      ? category.category_id
+      : allocatedTextId(
+          'fallback-category\0' +
+            category.category_id +
+            '\0' +
+            category.category_name,
+          reservedCategoryIds,
+          usedCategoryIds,
+        );
+    usedCategoryIds.add(id);
+    fallbackCategoryIds.set(category.category_id, id);
+  }
+  const fallbackCategories = fallback.categories.map((category) => ({
+    ...category,
+    category_id:
+      fallbackCategoryIds.get(category.category_id) ?? category.category_id,
+  }));
+
+  const detailsById = new Map<number, XtreamSeriesDetail>();
+  const fallbackSeries = fallback.series.map((summary) => {
+    const id = !usedSeriesIds.has(summary.series_id)
+      ? summary.series_id
+      : allocatedNumericId(
+          'fallback-series\0' + String(summary.series_id) + '\0' + summary.name,
+          reservedSeriesIds,
+          usedSeriesIds,
+        );
+    usedSeriesIds.add(id);
+    const detail = fallback.detailsById.get(summary.series_id);
+    if (detail) detailsById.set(id, detail);
+    const categoryId =
+      fallbackCategoryIds.get(summary.category_id) ?? summary.category_id;
+    return {
+      ...summary,
+      series_id: id,
+      category_id: categoryId,
+      category_ids: summary.category_ids.map(
+        (candidate) => fallbackCategoryIds.get(candidate) ?? candidate,
+      ),
+    };
+  });
+
+  const series = [...providerSeries, ...fallbackSeries].map(
+    (summary, index) => ({ ...summary, num: index + 1 }),
+  );
+  const summariesById = new Map(
+    series.map((summary) => [summary.series_id, summary]),
+  );
+  const upstreamRoutes = new Map<number, XtreamUpstreamSeriesRoute>();
+  for (const [id, route] of providerRoutes) {
+    const summary = summariesById.get(id);
+    if (summary) upstreamRoutes.set(id, { ...route, summary });
+  }
+  return {
+    categories: [...providerCategories, ...fallbackCategories],
+    series,
+    detailsById,
+    upstreamById: upstreamRoutes,
+  };
+}
+
+export function buildXtreamSeriesDetailFromUpstream(
+  route: XtreamUpstreamSeriesRoute,
+  provider: XtreamProviderSeriesInfo,
+): XtreamSeriesDetail {
+  const info: XtreamSeriesDetail['info'] = {
+    name: route.summary.name,
+    cover: route.summary.cover,
+    plot: route.summary.plot,
+    cast: route.summary.cast,
+    director: route.summary.director,
+    genre: route.summary.genre,
+    releaseDate: route.summary.releaseDate,
+    release_date: route.summary.release_date,
+    last_modified: route.summary.last_modified,
+    rating: route.summary.rating,
+    rating_5based: route.summary.rating_5based,
+    backdrop_path: route.summary.backdrop_path,
+    youtube_trailer: route.summary.youtube_trailer,
+    tmdb: route.summary.tmdb,
+    episode_run_time: route.summary.episode_run_time,
+    category_id: route.summary.category_id,
+    category_ids: route.summary.category_ids,
+  };
+  const episodes: Record<string, XtreamEpisode[]> = {};
+  for (const [seasonKey, values] of Object.entries(provider.episodes)) {
+    episodes[seasonKey] = values
+      .map((episode): XtreamEpisode => ({
+        id: String(
+          xtreamProviderStreamId(route.sourceId, route.sourceIndex, episode.id),
+        ),
+        episode_num: episode.episodeNumber,
+        title: episode.title,
+        container_extension: episode.containerExtension,
+        info: {
+          tmdb_id: episode.info.tmdbId,
+          releasedate: episode.info.releaseDate,
+          plot: episode.info.plot,
+          duration_secs: episode.info.durationSeconds,
+          duration: episode.info.duration,
+          movie_image: episode.info.movieImage || route.summary.cover,
+          video: {},
+          audio: {},
+          bitrate: episode.info.bitrate,
+          rating: episode.info.rating,
+          season: episode.season,
+        },
+        custom_sid: '',
+        added: episode.added,
+        season: episode.season,
+        direct_source: '',
+      }))
+      .sort((left, right) => left.episode_num - right.episode_num);
+  }
+  return { seasons: provider.seasons, info, episodes };
+}
 export function buildXtreamVodInfo(stream: XtreamFlatStream) {
   return {
     info: {
