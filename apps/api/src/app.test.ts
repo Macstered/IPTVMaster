@@ -3399,6 +3399,198 @@ describe('IPTVMaster API', () => {
     expect(compatibilityPlaylistResponse.body).toContain('Example Show');
   });
 
+  it('preserves upstream Xtream series parents and resolves their episodes', async () => {
+    const repository = new MemorySourceRepository();
+    const playlistUrl = syntheticProviderUrl('/get.php');
+    const source = await repository.createSource({
+      name: 'Hierarchical provider',
+      sourceType: 'xtream',
+      credentials: { playlistUrl },
+      sourceTimezone: 'Europe/Stockholm',
+      displayTimezone: 'Europe/Helsinki',
+    });
+    repository.latestEntriesBySource.set(source.id, [
+      {
+        duration: -1,
+        attributes: { 'group-title': 'Series: Nordic 4K' },
+        name: '4K - NC Avatar: The Last Airbender (2024) S01E01',
+        url: syntheticProviderUrl('/series/user/pass/101.mkv'),
+        mediaType: 'series',
+        lineNumber: 1,
+      },
+      {
+        duration: -1,
+        attributes: { 'group-title': 'Series: Nordic 4K' },
+        name: '4K - NC Avatar: The Last Airbender (2024) S01 E02',
+        url: syntheticProviderUrl('/series/user/pass/102.mkv'),
+        mediaType: 'series',
+        lineNumber: 2,
+      },
+      {
+        duration: -1,
+        attributes: { 'group-title': 'Series: Nordic 4K' },
+        name: '4K - NC Avatar: The Last Airbender (2024) S02E01',
+        url: syntheticProviderUrl('/series/user/pass/201.mp4'),
+        mediaType: 'series',
+        lineNumber: 3,
+      },
+    ]);
+
+    const app = await buildApp({
+      sourceRepository: repository,
+      xtreamSeriesCatalogueLoader: async (candidateUrl) => {
+        expect(candidateUrl).toBe(playlistUrl);
+        return {
+          categories: [
+            {
+              categoryId: '1052',
+              categoryName: 'Series: Nordic 4K',
+              parentId: 0,
+            },
+          ],
+          series: [
+            {
+              seriesId: 11903,
+              name: '4K - NC Avatar: The Last Airbender (2024)',
+              categoryId: '1052',
+              cover: 'https://images.test/avatar.jpg',
+              plot: '',
+              cast: '',
+              director: '',
+              genre: '',
+              releaseDate: '',
+              lastModified: '',
+              rating: '',
+              rating5Based: 0,
+              backdropPath: [],
+              youtubeTrailer: '',
+              tmdb: '',
+              episodeRunTime: '',
+            },
+          ],
+        };
+      },
+      xtreamSeriesInfoLoader: async (candidateUrl, seriesId) => {
+        expect(candidateUrl).toBe(playlistUrl);
+        expect(seriesId).toBe(11903);
+        const info = {
+          tmdbId: 0,
+          releaseDate: '',
+          plot: '',
+          durationSeconds: 0,
+          duration: '',
+          movieImage: '',
+          bitrate: 0,
+          rating: 0,
+        };
+        return {
+          seasons: [
+            { season_number: 1, episode_count: 2 },
+            { season_number: 2, episode_count: 1 },
+          ],
+          episodes: {
+            '1': [
+              {
+                id: '101',
+                episodeNumber: 1,
+                title: 'Avatar S01E01',
+                containerExtension: 'mkv',
+                added: '1',
+                season: 1,
+                info,
+              },
+              {
+                id: '102',
+                episodeNumber: 2,
+                title: 'Avatar S01 E02',
+                containerExtension: 'mkv',
+                added: '2',
+                season: 1,
+                info,
+              },
+            ],
+            '2': [
+              {
+                id: '201',
+                episodeNumber: 1,
+                title: 'Avatar S02E01',
+                containerExtension: 'mp4',
+                added: '3',
+                season: 2,
+                info,
+              },
+            ],
+          },
+        };
+      },
+    });
+    applications.push(app);
+    const profileResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/output-profiles',
+      payload: {
+        sourceIds: [source.id],
+        name: 'Series hierarchy',
+        mediaTypes: ['series'],
+      },
+    });
+    const accessToken = profileResponse.json().profile.accessToken as string;
+    const baseQuery =
+      'username=iptvmaster&password=' + encodeURIComponent(accessToken);
+    const actionUrl = (action: string, extra = '') =>
+      '/player_api.php?' + baseQuery + '&action=' + action + extra;
+
+    const categoriesResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_series_categories'),
+    });
+    const seriesResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_series', '&category_id=1052'),
+    });
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: actionUrl('get_series_info', '&series_id=11903'),
+    });
+
+    expect(categoriesResponse.json()).toEqual([
+      expect.objectContaining({
+        category_id: '1052',
+        category_name: 'Series: Nordic 4K',
+      }),
+    ]);
+    expect(seriesResponse.json()).toEqual([
+      expect.objectContaining({
+        series_id: 11903,
+        category_id: '1052',
+        name: '4K - NC Avatar: The Last Airbender (2024)',
+      }),
+    ]);
+    expect(
+      seriesResponse
+        .json()
+        .some((series: { name: string }) =>
+          /S\d{2}\s*E\d{2}/i.test(series.name),
+        ),
+    ).toBe(false);
+    const detail = detailResponse.json();
+    expect(detail.seasons).toHaveLength(2);
+    expect(
+      detail.episodes['1'].map((episode: { id: string }) => episode.id),
+    ).toEqual(['101', '102']);
+    expect(detail.episodes['2'][0]).toEqual(
+      expect.objectContaining({ id: '201', direct_source: '' }),
+    );
+
+    const playbackResponse = await app.inject({
+      method: 'GET',
+      url: '/series/iptvmaster/' + encodeURIComponent(accessToken) + '/201.mp4',
+    });
+    expect(playbackResponse.statusCode).toBe(302);
+    expect(playbackResponse.headers.location).toBe(
+      syntheticProviderUrl('/series/user/pass/201.mp4'),
+    );
+  });
   it('creates custom categories, persists drag ordering, and combines providers', async () => {
     const repository = new MemorySourceRepository();
     const firstSource = await repository.createSource({

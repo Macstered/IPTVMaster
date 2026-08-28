@@ -70,15 +70,21 @@ import { MaintenanceScheduler } from './maintenance.js';
 import { BackgroundWorkQueue } from './background-work.js';
 import {
   buildXtreamFlatCatalogue,
-  buildXtreamSeriesCatalogue,
+  buildHybridXtreamSeriesCatalogue,
+  buildXtreamSeriesDetailFromUpstream,
   buildXtreamVodInfo,
   decodeXtreamStreamId,
   XTREAM_OUTPUT_USERNAME,
   type XtreamOutputEntry,
+  type XtreamSeriesCatalogue,
   xtreamStreamId,
 } from './xtream-output.js';
 import {
   fetchXtreamSeriesArtwork,
+  fetchXtreamSeriesCatalogue,
+  fetchXtreamSeriesInfo,
+  type XtreamProviderSeriesCatalogue,
+  type XtreamProviderSeriesInfo,
   type XtreamSeriesArtwork,
 } from './xtream-upstream.js';
 
@@ -422,6 +428,13 @@ export interface BuildAppOptions {
   xtreamSeriesArtworkLoader?: (
     playlistUrl: string,
   ) => Promise<XtreamSeriesArtwork[]>;
+  xtreamSeriesCatalogueLoader?: (
+    playlistUrl: string,
+  ) => Promise<XtreamProviderSeriesCatalogue>;
+  xtreamSeriesInfoLoader?: (
+    playlistUrl: string,
+    seriesId: number,
+  ) => Promise<XtreamProviderSeriesInfo>;
   enablePlaylistScheduler?: boolean;
   enableEpgScheduler?: boolean;
   playlistRefreshIntervalMs?: number;
@@ -652,6 +665,13 @@ export async function buildApp(
   const epgInspector = options.epgInspector;
   const xtreamSeriesArtworkLoader =
     options.xtreamSeriesArtworkLoader ?? fetchXtreamSeriesArtwork;
+  const xtreamSeriesCatalogueLoader =
+    options.xtreamSeriesCatalogueLoader ??
+    (options.xtreamSeriesArtworkLoader
+      ? undefined
+      : fetchXtreamSeriesCatalogue);
+  const xtreamSeriesInfoLoader =
+    options.xtreamSeriesInfoLoader ?? fetchXtreamSeriesInfo;
   let ownsSourceRepository = false;
   const databaseUrl = process.env['DATABASE_URL'];
   const masterKey = process.env['IPTVMASTER_MASTER_KEY'];
@@ -2740,6 +2760,54 @@ export async function buildApp(
     return entries;
   }
 
+  const xtreamSeriesHierarchyCache = new Map<
+    string,
+    {
+      expiresAt: number;
+      value: Promise<XtreamProviderSeriesCatalogue | null>;
+    }
+  >();
+  function loadXtreamSeriesHierarchy(
+    sourceId: string,
+  ): Promise<XtreamProviderSeriesCatalogue | null> {
+    const now = Date.now();
+    const cached = xtreamSeriesHierarchyCache.get(sourceId);
+    if (cached && cached.expiresAt > now) return cached.value;
+    for (const [candidateId, candidate] of xtreamSeriesHierarchyCache) {
+      if (candidate.expiresAt <= now) {
+        xtreamSeriesHierarchyCache.delete(candidateId);
+      }
+    }
+    const value = (async () => {
+      if (!sourceRepository || !xtreamSeriesCatalogueLoader) return null;
+      const credentials = await sourceRepository.getSourceCredentials(sourceId);
+      if (!credentials) return null;
+      try {
+        return await xtreamSeriesCatalogueLoader(credentials.playlistUrl);
+      } catch (error) {
+        app.log.warn(
+          {
+            sourceId,
+            errorName:
+              error instanceof Error ? error.constructor.name : 'UnknownError',
+          },
+          'Xtream series hierarchy refresh failed; using M3U fallback',
+        );
+        return null;
+      }
+    })();
+    const record = { expiresAt: now + 300_000, value };
+    xtreamSeriesHierarchyCache.set(sourceId, record);
+    void value.then((hierarchy) => {
+      if (
+        hierarchy !== null &&
+        xtreamSeriesHierarchyCache.get(sourceId) === record
+      ) {
+        record.expiresAt = Date.now() + 21_600_000;
+      }
+    });
+    return value;
+  }
   const xtreamSeriesArtworkCache = new Map<
     string,
     {
@@ -2832,21 +2900,95 @@ export async function buildApp(
 
   function loadXtreamSeriesCatalogue(profile: ResolvedOutputProfile) {
     return cachedXtreamCatalogue(profile.id + ':series', async () => {
-      const [entries, ...artworkResults] = await Promise.all([
-        loadCachedXtreamEntries(profile, ['series']),
-        ...profile.sourceIds.map(async (sourceId) => ({
+      const entries = await loadCachedXtreamEntries(profile, ['series']);
+      const hierarchyResults = await Promise.all(
+        profile.sourceIds.map(async (sourceId) => ({
+          sourceId,
+          hierarchy: await loadXtreamSeriesHierarchy(sourceId),
+        })),
+      );
+      const hierarchyBySource = new Map<
+        string,
+        XtreamProviderSeriesCatalogue
+      >();
+      for (const result of hierarchyResults) {
+        if (result.hierarchy !== null) {
+          hierarchyBySource.set(result.sourceId, result.hierarchy);
+        }
+      }
+
+      const fallbackSourceIds = profile.sourceIds.filter(
+        (sourceId) => !hierarchyBySource.has(sourceId),
+      );
+      const artworkResults = await Promise.all(
+        fallbackSourceIds.map(async (sourceId) => ({
           sourceId,
           artwork: await loadXtreamSeriesArtwork(sourceId),
         })),
-      ]);
+      );
       const artworkBySource = new Map<string, XtreamSeriesArtwork[]>();
       for (const result of artworkResults) {
         if (result.artwork !== null) {
           artworkBySource.set(result.sourceId, result.artwork);
         }
       }
-      return buildXtreamSeriesCatalogue(entries, artworkBySource);
+      return buildHybridXtreamSeriesCatalogue(
+        entries,
+        hierarchyBySource,
+        artworkBySource,
+      );
     });
+  }
+
+  const xtreamSeriesInfoCache = new Map<
+    string,
+    { expiresAt: number; value: Promise<unknown | null> }
+  >();
+  async function loadXtreamSeriesDetail(
+    profile: ResolvedOutputProfile,
+    catalogue: XtreamSeriesCatalogue,
+    seriesId: number,
+  ): Promise<unknown | null> {
+    const synthesized = catalogue.detailsById.get(seriesId);
+    if (synthesized) return synthesized;
+    const route = catalogue.upstreamById.get(seriesId);
+    if (!route || !sourceRepository) return null;
+
+    const key = profile.id + ':series-info:' + String(seriesId);
+    const now = Date.now();
+    const cached = xtreamSeriesInfoCache.get(key);
+    if (cached && cached.expiresAt > now) return cached.value;
+    for (const [candidateKey, candidate] of xtreamSeriesInfoCache) {
+      if (candidate.expiresAt <= now) {
+        xtreamSeriesInfoCache.delete(candidateKey);
+      }
+    }
+    const value = (async () => {
+      const credentials = await sourceRepository.getSourceCredentials(
+        route.sourceId,
+      );
+      if (!credentials) return null;
+      try {
+        const provider = await xtreamSeriesInfoLoader(
+          credentials.playlistUrl,
+          route.upstreamSeriesId,
+        );
+        return buildXtreamSeriesDetailFromUpstream(route, provider);
+      } catch (error) {
+        app.log.warn(
+          {
+            sourceId: route.sourceId,
+            seriesId: route.upstreamSeriesId,
+            errorName:
+              error instanceof Error ? error.constructor.name : 'UnknownError',
+          },
+          'Xtream series detail refresh failed',
+        );
+        return null;
+      }
+    })();
+    xtreamSeriesInfoCache.set(key, { expiresAt: now + 300_000, value });
+    return value;
   }
   async function sendPlaylistOutput(
     accessToken: string,
@@ -3112,7 +3254,7 @@ export async function buildApp(
           const catalogue = await loadXtreamSeriesCatalogue(profile);
           response =
             (Number.isSafeInteger(seriesId) &&
-              catalogue.detailsById.get(seriesId)) ||
+              (await loadXtreamSeriesDetail(profile, catalogue, seriesId))) ||
             {};
           break;
         }
