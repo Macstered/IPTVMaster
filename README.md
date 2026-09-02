@@ -95,17 +95,26 @@ through IPTVMaster.
 
 ## Requirements
 
-- Docker with the Compose plugin (deployment), or Node.js 22+ and npm 10+
-  (development)
+- Docker with the Compose plugin or rootless Podman with a Compose provider
+  (deployment), or Node.js 22+ and npm 10+ (development)
 - PostgreSQL 17 (provided by the compose stack)
 
 ## Quick start
 
 ```sh
 cp .env.example .env
-# set POSTGRES_PASSWORD and IPTVMASTER_MASTER_KEY (openssl rand -base64 32)
-docker compose up --build -d
+# Put these generated values into .env; keep both private.
+openssl rand -hex 32       # POSTGRES_PASSWORD
+openssl rand -base64 32    # IPTVMASTER_MASTER_KEY
+docker compose pull
+docker compose up -d
+docker compose ps
 ```
+
+The public, version-pinned image is downloaded from GHCR. The image contains
+the database migrations and applies them before port 8080 opens, so there is
+no separate migration container or host-mounted migration directory. Rootless
+Podman users can replace `docker compose` with `podman compose`.
 
 Open `http://localhost:8080`, create the administrator account, add your
 provider's M3U (and optional XMLTV) URL, import, and shape the lineup. Then
@@ -116,6 +125,10 @@ shown on the output card: the server is the IPTVMaster address, the username is
 
 Losing `IPTVMASTER_MASTER_KEY` makes stored provider credentials
 unrecoverable; back it up separately and never commit it.
+
+An app-only custom stack still needs PostgreSQL. Set `DATABASE_URL` to that
+database and `IPTVMASTER_MASTER_KEY` in the app container. Do not mount
+`/app/data`; IPTVMaster does not use a local database file.
 
 ## Development
 
@@ -130,6 +143,8 @@ npm run check    # format, lint, versions, typecheck, tests, build
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — how the pieces fit together
 - [docs/PROXMOX_INSTALL.md](./docs/PROXMOX_INSTALL.md) — production runbook
   (VM or LXC, backups, upgrades, rollback)
+- [docs/CONTAINER_INSTALL.md](./docs/CONTAINER_INSTALL.md) — prebuilt Docker,
+  rootless Podman, Traefik, and external PostgreSQL installs
 - [docs/HTTPS.md](./docs/HTTPS.md) — optional TLS deployment
 - [docs/DEPLOY.md](./docs/DEPLOY.md) — pushing a build to a LAN host over SSH
 - [docs/SYNOLOGY.md](./docs/SYNOLOGY.md) — running on a Synology NAS

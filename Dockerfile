@@ -38,6 +38,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/web/dist ./public
 COPY --from=build /app/packages/core/dist ./packages/core/dist
+COPY deploy/postgres/init ./deploy/postgres/init
 
 USER node
 EXPOSE 8080

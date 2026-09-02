@@ -16,12 +16,12 @@ The SSH deploy flow in [DEPLOY.md](./DEPLOY.md) is unrelated to this: it builds 
 Do the version change through a pull request:
 
 ```sh
-git switch -c release/v0.1.0
-npm version 0.1.0 --workspaces --include-workspace-root --no-git-tag-version
+git switch -c release/v0.2.1
+npm version 0.2.1 --workspaces --include-workspace-root --no-git-tag-version
 npm run check
 git add package.json package-lock.json apps/*/package.json packages/*/package.json
-git commit -m "Prepare v0.1.0"
-git push -u origin release/v0.1.0
+git commit -m "Prepare v0.2.1"
+git push -u origin release/v0.2.1
 ```
 
 After that pull request is merged and `main` is green, create the tag from the verified `main` commit:
@@ -30,21 +30,24 @@ After that pull request is merged and `main` is green, create the tag from the v
 git switch main
 git pull --ff-only
 npm run verify:version
-git tag -a v0.1.0 -m "IPTVMaster v0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.1 -m "IPTVMaster v0.2.1"
+git push origin v0.2.1
 ```
 
 Do not move or reuse a release tag. The GitHub `Release image` workflow must pass before deploying it.
 
 ## Database migration contract
 
-SQL files under `deploy/postgres/init` are ordered migrations, despite the historical directory name. The one-shot `migrate` Compose service:
+SQL files under `deploy/postgres/init` are ordered migrations, despite the historical directory name. They are copied into every application image. Before port 8080 opens, the application:
 
-1. waits for PostgreSQL readiness;
-2. creates the `schema_migration` ledger when needed;
-3. applies each missing migration in its own transaction;
-4. records its SHA-256 checksum; and
-5. blocks application startup if a migration fails or an applied file changed.
+1. retries while PostgreSQL starts;
+2. takes a PostgreSQL advisory lock, so concurrent starts cannot race;
+3. creates the `schema_migration` ledger when needed;
+4. applies each missing migration in its own transaction;
+5. records and verifies every SHA-256 checksum; and
+6. refuses to serve the UI if a migration fails or an applied file changed.
+
+This makes the image self-migrating for Docker, Podman, NAS interfaces, and custom stacks using an external PostgreSQL database. The same runner can be invoked manually with `docker compose run --rm --no-deps app node apps/api/dist/migrate.js`.
 
 Never edit an applied migration. Add the next numbered file. Migrations are forward-only, so a pre-upgrade database backup is the rollback boundary for a schema-incompatible release.
 
@@ -56,7 +59,7 @@ registry sign-in is needed:
 ```sh
 cd /opt/iptvmaster
 git fetch --tags --force
-git switch --detach v0.1.0
+git switch --detach v0.2.1
 ```
 
 If you fork this project and keep your own package private, sign Docker in
@@ -71,14 +74,14 @@ unset CR_PAT
 Set this value in `/opt/iptvmaster/.env`:
 
 ```dotenv
-IPTVMASTER_IMAGE=ghcr.io/macstered/iptvmaster:0.1.0
+IPTVMASTER_IMAGE=ghcr.io/macstered/iptvmaster:0.2.1
 ```
 
 Then deploy without rebuilding:
 
 ```sh
-docker compose pull app postgres migrate
-docker compose up -d --no-build
+docker compose pull app postgres
+docker compose up -d --no-build --remove-orphans
 docker compose ps --all
 curl --fail http://127.0.0.1:8080/ready
 curl --fail http://127.0.0.1:8080/health
@@ -90,12 +93,12 @@ If GHCR access is not configured, build the checked-out tag locally with immutab
 
 ```sh
 docker build \
-  --build-arg IPTVMASTER_VERSION=0.1.0 \
+  --build-arg IPTVMASTER_VERSION=0.2.1 \
   --build-arg IPTVMASTER_REVISION="$(git rev-parse HEAD)" \
-  --tag iptvmaster:0.1.0 .
+  --tag iptvmaster:0.2.1 .
 ```
 
-Set `IPTVMASTER_IMAGE=iptvmaster:0.1.0`, then run the same `docker compose up -d --no-build` and verification commands.
+Set `IPTVMASTER_IMAGE=iptvmaster:0.2.1`, then run the same `docker compose up -d --no-build --remove-orphans` and verification commands.
 
 ## Upgrade
 
@@ -112,12 +115,12 @@ git switch --detach vNEW_VERSION
 Set `IPTVMASTER_IMAGE=ghcr.io/macstered/iptvmaster:NEW_VERSION` in `.env`, then:
 
 ```sh
-docker compose pull app postgres migrate
-docker compose up -d --no-build
+docker compose pull app postgres
+docker compose up -d --no-build --remove-orphans
 docker compose ps --all
 curl --fail http://127.0.0.1:8080/ready
 curl --fail http://127.0.0.1:8080/health
-docker compose logs --no-color --tail=100 migrate app
+docker compose logs --no-color --tail=100 app
 ```
 
 Verify one manual source refresh, both tokenized outputs, and one player stream before accepting the upgrade.
@@ -128,7 +131,7 @@ For an application-only rollback where the release notes explicitly say the data
 
 1. check out the prior release tag;
 2. restore the prior `IPTVMASTER_IMAGE` value;
-3. run `docker compose pull app` and `docker compose up -d --no-build`; and
+3. run `docker compose pull app` and `docker compose up -d --no-build --remove-orphans`; and
 4. repeat readiness, output, and playback checks.
 
 If a migration was applied and backward compatibility is not explicit, restore the pre-upgrade database backup while the checkout and image are both pinned to the prior release:
@@ -137,7 +140,7 @@ If a migration was applied and backward compatibility is not explicit, restore t
 cd /opt/iptvmaster
 git switch --detach vPREVIOUS_VERSION
 # Restore IPTVMASTER_IMAGE=ghcr.io/macstered/iptvmaster:PREVIOUS_VERSION in .env
-docker compose pull app postgres migrate
+docker compose pull app postgres
 docker compose up -d postgres
 docker compose create --no-deps --force-recreate app
 ./scripts/restore-postgres.sh /var/backups/iptvmaster/PRE_UPGRADE_BACKUP.dump

@@ -34,7 +34,9 @@ trap cleanup EXIT HUP INT TERM
 if [ "${VERIFY_SKIP_BUILD:-false}" = true ]; then
   docker compose -f "$project_dir/compose.yaml" up -d --no-build
 else
-  docker compose -f "$project_dir/compose.yaml" up -d --build
+  export IPTVMASTER_IMAGE="${IPTVMASTER_IMAGE:-iptvmaster:backup-restore-test}"
+  docker build --tag "$IPTVMASTER_IMAGE" "$project_dir"
+  docker compose -f "$project_dir/compose.yaml" up -d --no-build
 fi
 
 attempt=0
@@ -45,7 +47,7 @@ until health_response=$(docker compose -f "$project_dir/compose.yaml" exec -T ap
   if [ "$attempt" -ge 30 ]; then
     echo "Application did not become healthy after migration." >&2
     docker compose -f "$project_dir/compose.yaml" ps --all >&2
-    docker compose -f "$project_dir/compose.yaml" logs --tail=50 migrate app >&2
+    docker compose -f "$project_dir/compose.yaml" logs --tail=50 app >&2
     exit 1
   fi
   sleep 2
@@ -68,8 +70,15 @@ if [ "$applied_migration_count" != "$expected_migration_count" ]; then
   echo "Expected $expected_migration_count applied migrations, received $applied_migration_count." >&2
   exit 1
 fi
+required_table_count=$(docker compose -f "$project_dir/compose.yaml" exec -T postgres \
+  psql --username=iptvmaster --dbname=iptvmaster --tuples-only --no-align \
+  --command="SELECT COUNT(*) FROM pg_class WHERE oid IN ('admin_account'::regclass, 'admin_session'::regclass, 'source'::regclass);")
+if [ "$required_table_count" != 3 ]; then
+  echo "Clean startup did not create the required application tables." >&2
+  exit 1
+fi
 
-docker compose -f "$project_dir/compose.yaml" run --rm migrate >/dev/null
+docker compose -f "$project_dir/compose.yaml" run --rm --no-deps app node apps/api/dist/migrate.js >/dev/null
 first_migration=$(find "$project_dir/deploy/postgres/init" \
   -maxdepth 1 -type f -name '*.sql' | sort | head -n 1)
 first_migration_name=$(basename -- "$first_migration" .sql)
@@ -78,7 +87,7 @@ docker compose -f "$project_dir/compose.yaml" exec -T postgres \
   psql --username=iptvmaster --dbname=iptvmaster --set ON_ERROR_STOP=1 \
   --command="UPDATE schema_migration SET checksum = repeat('0', 64) WHERE version = '$first_migration_name';" \
   >/dev/null
-if docker compose -f "$project_dir/compose.yaml" run --rm migrate >/dev/null 2>&1; then
+if docker compose -f "$project_dir/compose.yaml" run --rm --no-deps app node apps/api/dist/migrate.js >/dev/null 2>&1; then
   echo "Migration verification accepted an altered applied checksum." >&2
   exit 1
 fi
@@ -86,7 +95,7 @@ docker compose -f "$project_dir/compose.yaml" exec -T postgres \
   psql --username=iptvmaster --dbname=iptvmaster --set ON_ERROR_STOP=1 \
   --command="UPDATE schema_migration SET checksum = '$first_migration_checksum' WHERE version = '$first_migration_name';" \
   >/dev/null
-docker compose -f "$project_dir/compose.yaml" run --rm migrate >/dev/null
+docker compose -f "$project_dir/compose.yaml" run --rm --no-deps app node apps/api/dist/migrate.js >/dev/null
 
 docker compose -f "$project_dir/compose.yaml" exec -T postgres \
   psql --username=iptvmaster --dbname=iptvmaster --set ON_ERROR_STOP=1 \

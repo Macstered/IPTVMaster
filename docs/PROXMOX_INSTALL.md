@@ -38,12 +38,12 @@ The default playlist refresh interval is 120 minutes and the XMLTV interval is 7
 
 ```sh
 cd /opt/iptvmaster
-docker compose pull app postgres migrate
-docker compose up -d --no-build
+docker compose pull app postgres
+docker compose up -d --no-build --remove-orphans
 docker compose ps --all
 ```
 
-The one-shot `migrate` service must exit successfully before the app starts. It records applied SQL checksums and safely does nothing on repeat startup. See [RELEASES.md](./RELEASES.md) for GHCR authentication, local pinned builds, version creation, and exact rollback commands.
+The application image includes every SQL migration. It waits for PostgreSQL, takes a database migration lock, verifies applied checksums, and applies any missing migrations before opening port 8080. A clean installation therefore cannot serve the setup UI against an incomplete schema. `--remove-orphans` also removes the obsolete one-shot `migrate` container from releases older than 0.2.1. See [RELEASES.md](./RELEASES.md) for pinned images and rollback.
 
 The app is initially published on TCP port 8080. Restrict it to trusted LAN clients using the Proxmox firewall, guest firewall, or both. Do not forward the port on the internet router.
 

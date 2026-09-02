@@ -34,12 +34,12 @@ What it does:
 2. Builds the image as `iptvmaster:<git describe>` with the version and revision
    embedded, so `/health` reports exactly what is running.
 3. Streams the image over SSH (`docker save | gzip | docker load`).
-4. Syncs `compose.yaml`, `deploy/` (SQL migrations), and `scripts/` to the host
+4. Syncs `compose.yaml`, `deploy/` (backup support), and `scripts/` to the host
    using `git archive HEAD` — committed content only, line endings normalized.
 5. Records the currently active image in `.deploy-previous`, rewrites
    `IPTVMASTER_IMAGE` in the host `.env`, and runs
-   `docker compose up -d --no-build`. The one-shot `migrate` service re-runs
-   (idempotent, checksum-verified) before the app starts.
+   `docker compose up -d --no-build --remove-orphans`. The app waits for PostgreSQL and applies
+   its bundled, checksum-verified migrations before it opens port 8080.
 6. Waits until `/health` reports the deployed revision, then prunes host images
    older than current + previous.
 
@@ -62,8 +62,9 @@ section 6 (prior checkout + database restore) instead.
 ## Troubleshooting
 
 - **Health timeout** — inspect on the host:
-  `cd /opt/iptvmaster && docker compose ps --all && docker compose logs --tail 50 app migrate`.
-  A failed `migrate` leaves the previous app running; fix forward or restore.
+  `cd /opt/iptvmaster && docker compose ps --all && docker compose logs --tail 50 app`.
+  A migration failure keeps port 8080 closed and is reported in the app log;
+  fix forward or restore.
 - **Host key changed** — remove the old entry with
   `ssh-keygen -R <host>` and reconnect deliberately.
 - **Git checkout drift on the host** — deploys overwrite `compose.yaml`,

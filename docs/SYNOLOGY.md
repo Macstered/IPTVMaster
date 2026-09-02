@@ -25,7 +25,7 @@ your model cannot run this.
 
    ```yaml
    app:
-     image: ghcr.io/macstered/iptvmaster:0.2.0
+     image: ghcr.io/macstered/iptvmaster:0.2.1
    ```
 
    The image is public, so Container Manager pulls it without any registry
@@ -68,9 +68,9 @@ not expose it through QuickConnect or DSM's reverse proxy without reading
 [SECURITY.md](../SECURITY.md) and [HTTPS.md](./HTTPS.md) first.
 
 **Updating.** Change the pinned image version in `compose.yaml`, then use
-Container Manager's project **Build** action. Schema migrations run
-automatically on start; they are forward-only, so take a database backup
-before a version jump.
+Container Manager's project **Build** action. The image contains its migrations
+and applies them before the web service starts; they are forward-only, so take
+a database backup before a version jump.
 
 ## A native Package Center package
 
@@ -86,11 +86,11 @@ runtime instead of bundling one — and SynoCommunity ships a PostgreSQL 17
 package this can depend on. Nothing in the runtime dependency tree is a
 native module, so there is no cross-compiling.
 
-Two changes here would be needed first, and are worth doing anyway:
-`scripts/migrate-postgres.sh` runs `psql` inside a container and would have
-to become a Node script using `pg`, and the built web assets would need
-publishing as a release artifact so packaging does not run Vite on the NAS.
-Open an issue if you intend to package it and those can be done.
+The database migration runner is already implemented in Node with `pg` and
+bundled into the image. A native package would still need the built web and API
+assets published as a separate release artifact so packaging does not run the
+toolchain on the NAS. Open an issue if you intend to package it and that can be
+done.
 
 The packager would need to be the maintainer. SynoCommunity requires a fresh
 install and an upgrade to be verified on real hardware for every submission,

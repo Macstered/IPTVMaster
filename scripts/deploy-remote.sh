@@ -8,7 +8,7 @@ set -euo pipefail
 #   scripts/deploy-remote.sh --dirty     allow a build from uncommitted changes
 #   scripts/deploy-remote.sh --rollback  reactivate the previously active image
 #
-# The image is streamed over SSH (no registry) and compose/migration files are
+# The image is streamed over SSH (no registry) and Compose/support files are
 # synced from committed content with `git archive`. Secrets never leave the
 # host: its .env is edited in place (IPTVMASTER_IMAGE line only, .env.bak kept).
 # Rollback swaps with .deploy-previous, so running --rollback twice returns to
@@ -51,7 +51,7 @@ wait_healthy() {
     sleep 2
   done
   echo "ERROR: $BASE_URL/health did not report the expected release." >&2
-  echo "Inspect with: ssh -i $KEY $HOST 'cd $REMOTE_DIR && docker compose ps && docker compose logs --tail 50 app migrate'" >&2
+  echo "Inspect with: ssh -i $KEY $HOST 'cd $REMOTE_DIR && docker compose ps && docker compose logs --tail 50 app'" >&2
   return 1
 }
 
@@ -67,7 +67,7 @@ activate_remote() {
     else \
       printf '\nIPTVMASTER_IMAGE=%s\n' '$image' >> .env; \
     fi; \
-    docker compose up -d --no-build"
+    docker compose up -d --no-build --remove-orphans"
 }
 
 if [ "$mode" = "rollback" ]; then

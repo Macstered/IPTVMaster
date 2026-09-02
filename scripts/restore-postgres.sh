@@ -84,7 +84,7 @@ docker compose -f "$compose_file" exec -T postgres sh -c \
   <"$backup_path"
 
 database_replaced=true
-docker compose -f "$compose_file" run --rm migrate
+docker compose -f "$compose_file" run --rm --no-deps app node apps/api/dist/migrate.js
 docker compose -f "$compose_file" start app >/dev/null
 app_stopped=false
 trap - EXIT HUP INT TERM
