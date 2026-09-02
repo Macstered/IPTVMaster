@@ -35,8 +35,8 @@ Goal: update the app inside Docker on the LAN host from the workstation,
 without moving secrets off the host.
 
 Model (matches `docs/PROXMOX_INSTALL.md`): build the image locally on the workstation,
-stream it over SSH into the VM's Docker, sync compose/migration files via git, flip
-`IPTVMASTER_IMAGE` in the host `.env`, `docker compose up -d --no-build`, verify health.
+stream it over SSH into the VM's Docker, sync operational files via git, flip
+`IPTVMASTER_IMAGE` in the host `.env`, `docker compose up -d --no-build --remove-orphans`, verify health.
 No registry required; GHCR remains available for tagged releases per `docs/RELEASES.md`.
 
 One-time setup the operator does on the VM:
@@ -53,14 +53,14 @@ Steps I do once access works:
   from the repo path; record current image tag and app `/health` revision.
 - A5. Write `scripts/deploy-remote.sh` (run from this repo on the workstation):
   1. Refuse to run with a dirty working tree unless `--dirty` is passed.
-  2. `TAG=$(git describe --always --tags --dirty)`; `docker compose build app` with
+  2. `TAG=$(git describe --always --tags --dirty)`; `docker build` with
      `IPTVMASTER_VERSION/REVISION` build args; tag `iptvmaster:$TAG`.
   3. `docker save iptvmaster:$TAG | gzip | ssh ... 'gunzip | docker load'`.
-  4. On host: `git fetch && git checkout <same commit>` (fallback: rsync compose.yaml,
-     `deploy/postgres/init/`, `scripts/migrate-postgres.sh` when GitHub is unreachable).
+  4. On host: stream the image over SSH and sync the committed Compose and
+     backup-support files when GitHub is unreachable.
   5. Update `IPTVMASTER_IMAGE=iptvmaster:$TAG` in host `.env` (keep a `.env.bak`).
-  6. `docker compose up -d --no-build`; wait for `migrate` to exit 0 and `/ready` 200;
-     verify `/health` reports `$TAG`'s revision.
+  6. `docker compose up -d --no-build --remove-orphans`; wait for embedded
+     migrations and `/ready` 200; verify `/health` reports `${TAG}`'s revision.
   7. Keep the previously deployed image; print the one-line rollback command
      (previous tag + `up -d --no-build`). Prune images older than the previous one.
 - A6. Document the flow in `docs/DEPLOY.md`; note the rollback caveat from
@@ -335,7 +335,7 @@ Reproducible recipe (used for the 2026-08-05 review):
 ## Appendix B — deploy quick reference (once Track A lands)
 
 ```sh
-./scripts/deploy-remote.sh            # build → ship → migrate → health-check
+./scripts/deploy-remote.sh            # build → ship → activate → health-check
 ./scripts/deploy-remote.sh --rollback # previous tag, schema-compatible releases only
 ```
 

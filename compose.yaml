@@ -18,41 +18,13 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  migrate:
-    image: postgres:17-alpine
-    restart: 'no'
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGHOST: postgres
-      PGDATABASE: ${POSTGRES_DB:-iptvmaster}
-      PGUSER: ${POSTGRES_USER:-iptvmaster}
-      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      IPTVMASTER_MIGRATIONS_DIR: /migrations
-    volumes:
-      - ./deploy/postgres/init:/migrations:ro
-      - ./scripts/migrate-postgres.sh:/usr/local/bin/migrate-postgres:ro
-    command: ['/bin/sh', '/usr/local/bin/migrate-postgres']
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-
   app:
-    image: ${IPTVMASTER_IMAGE:-iptvmaster:local}
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        IPTVMASTER_VERSION: ${IPTVMASTER_VERSION:-development}
-        IPTVMASTER_REVISION: ${IPTVMASTER_REVISION:-unknown}
+    image: ${IPTVMASTER_IMAGE:-ghcr.io/macstered/iptvmaster:0.2.1}
+
     restart: unless-stopped
     init: true
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      - postgres
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
