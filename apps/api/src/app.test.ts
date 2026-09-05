@@ -1489,6 +1489,36 @@ describe('IPTVMaster API', () => {
     });
   });
 
+  it('answers repeated system status polls from one shared query', async () => {
+    // Every open overview polls this once a minute; the counts behind it are
+    // a full pass over the channel table, so callers within a short window
+    // must share one result.
+    class CountingRepository extends MemorySourceRepository {
+      statusQueries = 0;
+      override async getSystemStatus() {
+        this.statusQueries += 1;
+        return super.getSystemStatus();
+      }
+    }
+    const repository = new CountingRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const first = await app.inject({
+      method: 'GET',
+      url: '/api/v1/system/status',
+    });
+    const second = await app.inject({
+      method: 'GET',
+      url: '/api/v1/system/status',
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(repository.statusQueries).toBe(1);
+  });
+
   it('recovers refresh jobs interrupted by a previous app exit', async () => {
     const repository = new MemorySourceRepository();
     repository.interruptedSyncRuns = 2;

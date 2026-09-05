@@ -123,7 +123,10 @@ export async function runPostgresMigrations(
       'PostgreSQL migration pool is unavailable',
     );
   }
-  const attempts = Math.max(1, options.connectionAttempts ?? 30);
+  // Crash recovery after an unclean shutdown can hold connections off for
+  // minutes on slow storage. Waiting five minutes by default (150 x 2 s) rides
+  // that out instead of exiting and letting the container restart loop.
+  const attempts = Math.max(1, options.connectionAttempts ?? 150);
   const retryDelayMs = Math.max(0, options.retryDelayMs ?? 2_000);
   let client: PoolClient | null = null;
   let applied = 0;

@@ -4,6 +4,42 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    # A stop has to finish its final checkpoint. On slow storage that takes
+    # longer than the ten-second default, after which the process is killed
+    # and the next start spends minutes replaying WAL before the app can
+    # connect.
+    stop_grace_period: 5m
+    # Parallel query workers share memory; the 64 MB container default fails
+    # large sorts with "could not resize shared memory segment".
+    shm_size: 256m
+    # Defaults sized for a small guest with 1-2 GB of memory. Override any
+    # value in .env; the knobs are documented in .env.example.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-1GB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-16MB}
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - wal_compression=on
+      - -c
+      - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-4}
+      - -c
+      - synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}
+      - -c
+      - jit=off
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_MS:-1000}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-iptvmaster}
       POSTGRES_USER: ${POSTGRES_USER:-iptvmaster}
@@ -15,6 +51,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+      # Crash recovery after an unclean shutdown can take minutes on slow
+      # storage; do not count those probes as failures.
+      start_period: 10m
     security_opt:
       - no-new-privileges:true
 
@@ -24,7 +63,8 @@ services:
     restart: unless-stopped
     init: true
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
@@ -41,6 +81,7 @@ services:
       PROVIDER_RETRY_INITIAL_DELAY_SECONDS: ${PROVIDER_RETRY_INITIAL_DELAY_SECONDS:-2}
       PROVIDER_RETRY_MAX_DELAY_SECONDS: ${PROVIDER_RETRY_MAX_DELAY_SECONDS:-30}
       CHANNEL_RETENTION_REFRESHES: ${CHANNEL_RETENTION_REFRESHES:-5}
+      SNAPSHOT_RETENTION_COUNT: ${SNAPSHOT_RETENTION_COUNT:-3}
       MAINTENANCE_ENABLED: ${MAINTENANCE_ENABLED:-true}
       MAINTENANCE_INTERVAL_MINUTES: ${MAINTENANCE_INTERVAL_MINUTES:-1440}
       MAINTENANCE_INITIAL_DELAY_SECONDS: ${MAINTENANCE_INITIAL_DELAY_SECONDS:-300}
