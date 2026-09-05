@@ -9,7 +9,9 @@ import {
   inspectRemotePlaylist,
   localizeEventName,
   parseM3uText,
+  parseXtreamInput,
   PlaylistEntryLimitError,
+  ProviderHttpError,
   redactStreamUrl,
   serializeM3u,
   serializeXmltv,
@@ -19,6 +21,7 @@ import {
   normalizeXtreamServer,
   xtreamGuideUrl,
   xtreamPlaylistUrl,
+  xtreamStreamUrl,
   type EventGroupPolicy,
   type M3uEntry,
   type MediaType,
@@ -87,6 +90,7 @@ import {
   type XtreamProviderSeriesInfo,
   type XtreamSeriesArtwork,
 } from './xtream-upstream.js';
+import { inspectRemoteXtreamPlaylist } from './xtream-import.js';
 
 const SESSION_COOKIE = 'iptvmaster_session';
 const CSRF_COOKIE = 'iptvmaster_csrf';
@@ -652,16 +656,21 @@ export async function buildApp(
     );
   const playlistInspector =
     options.playlistInspector ??
-    ((playlistUrl: string, plan?: SourceImportPlan) =>
-      inspectRemotePlaylist(playlistUrl, {
+    ((playlistUrl: string, plan?: SourceImportPlan) => {
+      const importOptions = {
         maxRetainedEntries: playlistMaxRetainedEntries,
         ...(plan
           ? {
               selectiveGroups: plan.selectiveGroups,
               includeLive: plan.includeLive,
+              includeCatalogue: plan.includeCatalogue,
             }
           : {}),
-      }));
+      };
+      return plan?.sourceType === 'xtream'
+        ? inspectRemoteXtreamPlaylist(playlistUrl, importOptions)
+        : inspectRemotePlaylist(playlistUrl, importOptions);
+    });
   const epgInspector = options.epgInspector;
   const xtreamSeriesArtworkLoader =
     options.xtreamSeriesArtworkLoader ?? fetchXtreamSeriesArtwork;
@@ -944,6 +953,15 @@ export async function buildApp(
   // callers. Client errors keep their message; server errors are logged and
   // answered generically.
   app.setErrorHandler((error: FastifyError, request, reply) => {
+    if (error instanceof ProviderHttpError) {
+      request.log.warn(
+        { providerStatus: error.status, retryable: error.retryable },
+        'Provider request was rejected',
+      );
+      return reply.code(502).send({
+        error: `Provider rejected the request (HTTP ${error.status}). Check that this endpoint is enabled for the account.`,
+      });
+    }
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 400 && statusCode < 500) {
       return reply.code(statusCode).send({ error: error.message });
@@ -1334,9 +1352,9 @@ export async function buildApp(
       return reply.code(400).send({ error: validationMessage(parsed.error) });
     }
 
-    // A panel is described by an address and a login; the URLs it serves
-    // are derived here so everything downstream stays a plain playlist and
-    // guide fetch, with no second import path to keep working.
+    // Persist the account as standard panel URLs. Native Xtream imports parse
+    // the same encrypted login and use player_api.php; the derived M3U remains
+    // useful for backwards compatibility and direct output metadata.
     let playlistUrl = parsed.data.playlistUrl;
     let epgUrl = parsed.data.epgUrl;
     if (parsed.data.sourceType === 'xtream' && parsed.data.xtream) {
@@ -1475,7 +1493,8 @@ export async function buildApp(
       if (!credentials)
         return reply.code(404).send({ error: 'Source not found' });
 
-      const inspection = await playlistInspector(credentials.playlistUrl);
+      const plan = await sourceRepository.getImportPlan?.(sourceId.data);
+      const inspection = await playlistInspector(credentials.playlistUrl, plan);
       return {
         summary: {
           fingerprint: inspection.fingerprint,
@@ -3331,6 +3350,33 @@ export async function buildApp(
             item.sourceId === sourceId &&
             String(xtreamStreamId(item)) === requestedId,
         )?.entry.url ?? null;
+    }
+    // Native Xtream snapshots deliberately retain series parents instead of
+    // every episode. get_series_info supplies episode stream IDs lazily, so
+    // construct their upstream path only when a client requests playback.
+    if (!streamUrl && mediaType === 'series') {
+      const credentials = await sourceRepository.getSourceCredentials(sourceId);
+      const parsed = credentials
+        ? parseXtreamInput(credentials.playlistUrl)
+        : {};
+      const requestedExtension =
+        request.params.streamFile.match(/\.([A-Za-z0-9]{1,8})$/)?.[1] ?? 'ts';
+      if (parsed.server && parsed.username && parsed.password) {
+        try {
+          streamUrl = xtreamStreamUrl(
+            {
+              server: parsed.server,
+              username: parsed.username,
+              password: parsed.password,
+            },
+            'series',
+            decoded.providerStreamId,
+            requestedExtension,
+          );
+        } catch {
+          streamUrl = null;
+        }
+      }
     }
     if (!streamUrl) return reply.code(404).send({ error: 'Stream not found' });
     try {

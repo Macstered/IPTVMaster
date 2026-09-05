@@ -3,6 +3,7 @@ import { gunzipSync } from 'node:zlib';
 
 import {
   PlaylistEntryLimitError,
+  ProviderHttpError,
   SnapshotRejectedError,
   type M3uEntry,
   type MediaType,
@@ -1940,6 +1941,39 @@ describe('IPTVMaster API', () => {
     expect(response.json().error).toContain('PLAYLIST_MAX_RETAINED_ENTRIES');
   });
 
+  it('reports a provider rejection as a safe gateway error', async () => {
+    const repository = new MemorySourceRepository();
+    await repository.createSource({
+      name: 'Rejected provider',
+      sourceType: 'xtream',
+      credentials: {
+        playlistUrl: syntheticProviderUrl('/get.php'),
+      },
+      sourceTimezone: 'UTC',
+      displayTimezone: 'UTC',
+    });
+    const app = await buildApp({
+      sourceRepository: repository,
+      playlistInspector: async () => {
+        throw new ProviderHttpError(511);
+      },
+      providerRetryAttempts: 1,
+    });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sources/00000000-0000-4000-8000-000000000001/import',
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({
+      error:
+        'Provider rejected the request (HTTP 511). Check that this endpoint is enabled for the account.',
+    });
+    expect(response.body).not.toContain('synthetic-secret');
+  });
+
   it('lists retained snapshots and safely restores an older version', async () => {
     const repository = new MemorySourceRepository();
     const source = await repository.createSource({
@@ -3413,26 +3447,10 @@ describe('IPTVMaster API', () => {
       {
         duration: -1,
         attributes: { 'group-title': 'Series: Nordic 4K' },
-        name: '4K - NC Avatar: The Last Airbender (2024) S01E01',
-        url: syntheticProviderUrl('/series/user/pass/101.mkv'),
+        name: '4K - NC Avatar: The Last Airbender (2024)',
+        url: syntheticProviderUrl('/series/user/pass/11903.ts'),
         mediaType: 'series',
         lineNumber: 1,
-      },
-      {
-        duration: -1,
-        attributes: { 'group-title': 'Series: Nordic 4K' },
-        name: '4K - NC Avatar: The Last Airbender (2024) S01 E02',
-        url: syntheticProviderUrl('/series/user/pass/102.mkv'),
-        mediaType: 'series',
-        lineNumber: 2,
-      },
-      {
-        duration: -1,
-        attributes: { 'group-title': 'Series: Nordic 4K' },
-        name: '4K - NC Avatar: The Last Airbender (2024) S02E01',
-        url: syntheticProviderUrl('/series/user/pass/201.mp4'),
-        mediaType: 'series',
-        lineNumber: 3,
       },
     ]);
 
@@ -3587,9 +3605,10 @@ describe('IPTVMaster API', () => {
       url: '/series/iptvmaster/' + encodeURIComponent(accessToken) + '/201.mp4',
     });
     expect(playbackResponse.statusCode).toBe(302);
-    expect(playbackResponse.headers.location).toBe(
-      syntheticProviderUrl('/series/user/pass/201.mp4'),
-    );
+    const playbackTarget = new URL(playbackResponse.headers.location ?? '');
+    expect(playbackTarget.pathname.split('/').at(-1)).toBe('201.mp4');
+    expect(playbackTarget.pathname.split('/')).toHaveLength(5);
+    expect(playbackTarget.search).toBe('');
   });
   it('creates custom categories, persists drag ordering, and combines providers', async () => {
     const repository = new MemorySourceRepository();

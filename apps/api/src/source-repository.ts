@@ -199,6 +199,8 @@ export interface RemovedGroupSummary {
 }
 
 export interface SourceImportPlan {
+  /** Xtream sources use player_api.php instead of depending on get.php M3U. */
+  sourceType?: 'm3u' | 'xtream';
   includeLive: boolean;
   includeCatalogue: boolean;
   /** Keyed by `mediaCategoryKey`; empty when the catalogue is not indexed. */
@@ -2556,8 +2558,13 @@ export class PostgresSourceRepository implements SourceRepository {
    */
   async getImportPlan(sourceId: string): Promise<SourceImportPlan> {
     const [scope, categories] = await Promise.all([
-      this.#pool.query<{ import_live: boolean; import_catalogue: boolean }>(
-        `SELECT import_live, import_catalogue FROM source WHERE id = $1`,
+      this.#pool.query<{
+        source_type: 'm3u' | 'xtream';
+        import_live: boolean;
+        import_catalogue: boolean;
+      }>(
+        `SELECT source_type, import_live, import_catalogue
+         FROM source WHERE id = $1`,
         [sourceId],
       ),
       this.#pool.query<{
@@ -2573,6 +2580,7 @@ export class PostgresSourceRepository implements SourceRepository {
     const row = scope.rows[0];
     const includeCatalogue = row?.import_catalogue ?? true;
     return {
+      ...(row?.source_type ? { sourceType: row.source_type } : {}),
       includeLive: row?.import_live ?? true,
       includeCatalogue,
       selectiveGroups: includeCatalogue

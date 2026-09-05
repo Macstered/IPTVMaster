@@ -6,6 +6,7 @@ import {
   parseXtreamInput,
   xtreamGuideUrl,
   xtreamPlaylistUrl,
+  xtreamStreamUrl,
 } from './xtream.js';
 
 const account = {
@@ -67,6 +68,11 @@ describe('xtream endpoints', () => {
       'http://panel.example:2095/xmltv.php',
     );
     expect(url.searchParams.get('username')).toBe('user');
+  });
+
+  it('builds an encoded native series episode URL', () => {
+    const url = new URL(xtreamStreamUrl(account, 'series', '11903', 'mkv'));
+    expect(url.pathname).toBe('/series/user/p%40ss%20word/11903.mkv');
   });
 });
 
