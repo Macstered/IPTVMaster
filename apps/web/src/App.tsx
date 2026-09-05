@@ -249,10 +249,20 @@ export function App({ authUsername, onLogout }: AppProps) {
       }
     }
     void loadStatus();
-    const handle = window.setInterval(() => void loadStatus(), 60_000);
+    // A background tab still polls otherwise, and every open overview costs
+    // the server a pass over all channels each minute. Skip while hidden and
+    // catch up as soon as the tab is looked at again.
+    const handle = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void loadStatus();
+    }, 60_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void loadStatus();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       active = false;
       window.clearInterval(handle);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [workspace]);
 

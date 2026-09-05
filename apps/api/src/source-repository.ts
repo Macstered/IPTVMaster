@@ -916,10 +916,12 @@ function isLockTimeout(error: unknown): boolean {
  * Retained snapshots per source, beyond the current one. Restoring a snapshot
  * is a rescue for a bad refresh, so a handful covers the realistic need while
  * keeping the largest table proportional to the lineup rather than to uptime.
+ * Each snapshot is a full copy of the provider's entries, so on a 50k-channel
+ * account every retained copy costs tens of megabytes and a slower import.
  */
 function snapshotRetentionCount(): number {
   const configured = Number(process.env['SNAPSHOT_RETENTION_COUNT']);
-  return Number.isInteger(configured) && configured >= 0 ? configured : 10;
+  return Number.isInteger(configured) && configured >= 0 ? configured : 3;
 }
 
 function outputProfileSourceIds(configuration: unknown): string[] {
@@ -4319,23 +4321,15 @@ export class PostgresSourceRepository implements SourceRepository {
         epg_finished_at: Date | null;
         epg_error: string | null;
       }>(
-        `SELECT s.id, s.name, s.enabled,
-                counts.channel_count, counts.visible_channel_count,
-                counts.group_count, counts.review_pending,
-                counts.epg_mappable, counts.epg_excluded,
-                COALESCE(mapped.epg_mapped, 0) AS epg_mapped,
-                playlist_sync.status AS playlist_status,
-                playlist_sync.finished_at AS playlist_finished_at,
-                playlist_sync.safe_error AS playlist_error,
-                epg_sync.status AS epg_status,
-                epg_sync.finished_at AS epg_finished_at,
-                epg_sync.safe_error AS epg_error
-         FROM source s
-         LEFT JOIN LATERAL (
-           SELECT COUNT(*) AS channel_count,
+        // Every count here is a full pass over the source's channels, and the
+        // overview asks for it once a minute from every open tab. One grouped
+        // pass over the table serves all sources; the earlier per-source
+        // LATERAL form scanned the table twice per source and sorted the
+        // distinct groups on disk, which on slow storage took seconds.
+        `WITH channel_stats AS (
+           SELECT c.source_id,
+                  COUNT(*) AS channel_count,
                   COUNT(*) FILTER (WHERE c.enabled) AS visible_channel_count,
-                  COUNT(DISTINCT COALESCE(c.custom_group, c.provider_group))
-                    AS group_count,
                   COUNT(*) FILTER (
                     WHERE c.reconciliation_status IN ('missing', 'ambiguous')
                       AND COALESCE(p.behavior, 'permanent') = 'permanent'
@@ -4347,26 +4341,44 @@ export class PostgresSourceRepository implements SourceRepository {
                   COUNT(*) FILTER (
                     WHERE c.enabled AND c.epg_excluded = TRUE
                       AND COALESCE(p.behavior, 'permanent') = 'permanent'
-                  ) AS epg_excluded
+                  ) AS epg_excluded,
+                  COUNT(m.channel_id) FILTER (
+                    WHERE c.enabled AND c.epg_excluded = FALSE
+                      AND COALESCE(p.behavior, 'permanent') = 'permanent'
+                  ) AS epg_mapped
            FROM channel c
            LEFT JOIN group_policy p
-             ON p.source_id = c.source_id
-            AND p.provider_group = c.provider_group
-           WHERE c.source_id = s.id AND c.archived_at IS NULL
-             AND c.current_upstream_item_id IS NOT NULL
-         ) counts ON TRUE
-         LEFT JOIN LATERAL (
-           SELECT COUNT(*) AS epg_mapped
-           FROM epg_mapping m
-           JOIN channel c ON c.id = m.channel_id
-           LEFT JOIN group_policy p
-             ON p.source_id = c.source_id
-            AND p.provider_group = c.provider_group
-           WHERE c.source_id = s.id AND c.archived_at IS NULL
-             AND c.current_upstream_item_id IS NOT NULL
-             AND c.enabled AND c.epg_excluded = FALSE
-             AND COALESCE(p.behavior, 'permanent') = 'permanent'
-         ) mapped ON TRUE
+             ON p.source_id = c.source_id AND p.provider_group = c.provider_group
+           LEFT JOIN epg_mapping m ON m.channel_id = c.id
+           WHERE c.archived_at IS NULL AND c.current_upstream_item_id IS NOT NULL
+           GROUP BY c.source_id
+         ),
+         group_counts AS (
+           SELECT source_id, COUNT(*) AS group_count
+           FROM (
+             SELECT DISTINCT c.source_id, COALESCE(c.custom_group, c.provider_group) AS output_group
+             FROM channel c
+             WHERE c.archived_at IS NULL AND c.current_upstream_item_id IS NOT NULL
+           ) AS groups
+           GROUP BY source_id
+         )
+         SELECT s.id, s.name, s.enabled,
+                COALESCE(stats.channel_count, 0) AS channel_count,
+                COALESCE(stats.visible_channel_count, 0) AS visible_channel_count,
+                COALESCE(groups.group_count, 0) AS group_count,
+                COALESCE(stats.review_pending, 0) AS review_pending,
+                COALESCE(stats.epg_mappable, 0) AS epg_mappable,
+                COALESCE(stats.epg_excluded, 0) AS epg_excluded,
+                COALESCE(stats.epg_mapped, 0) AS epg_mapped,
+                playlist_sync.status AS playlist_status,
+                playlist_sync.finished_at AS playlist_finished_at,
+                playlist_sync.safe_error AS playlist_error,
+                epg_sync.status AS epg_status,
+                epg_sync.finished_at AS epg_finished_at,
+                epg_sync.safe_error AS epg_error
+         FROM source s
+         LEFT JOIN channel_stats stats ON stats.source_id = s.id
+         LEFT JOIN group_counts groups ON groups.source_id = s.id
          LEFT JOIN LATERAL (
            SELECT r.status, r.finished_at, r.safe_error
            FROM sync_run r

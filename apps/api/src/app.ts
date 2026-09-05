@@ -1160,13 +1160,39 @@ export async function buildApp(
     maintenanceAutomation: maintenanceScheduler !== undefined,
   }));
 
+  // Every open overview polls this once a minute, and the counts behind it
+  // are a pass over every channel. One answer is shared for a short while so
+  // several tabs cost one query; the scheduler status beside it is free and
+  // stays live.
+  const SYSTEM_STATUS_CACHE_MS = 30_000;
+  let systemStatusCache:
+    | {
+        expiresAt: number;
+        value: ReturnType<SourceRepository['getSystemStatus']>;
+      }
+    | undefined;
+  function loadSystemStatus(repository: SourceRepository) {
+    const now = Date.now();
+    if (systemStatusCache && systemStatusCache.expiresAt > now) {
+      return systemStatusCache.value;
+    }
+    const value = repository.getSystemStatus();
+    const entry = { expiresAt: now + SYSTEM_STATUS_CACHE_MS, value };
+    systemStatusCache = entry;
+    // A failure is not worth remembering for thirty seconds.
+    value.catch(() => {
+      if (systemStatusCache === entry) systemStatusCache = undefined;
+    });
+    return value;
+  }
+
   app.get('/api/v1/system/status', async (_request, reply) => {
     if (!sourceRepository) {
       return reply
         .code(503)
         .send({ error: 'Source persistence is not configured' });
     }
-    const summary = await sourceRepository.getSystemStatus();
+    const summary = await loadSystemStatus(sourceRepository);
     const playlistStatus = playlistScheduler?.status();
     const epgStatus = epgScheduler?.status();
     return {

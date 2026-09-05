@@ -8,7 +8,7 @@ Create a minimal Debian guest with:
 
 - 2 vCPU
 - 4 GB RAM
-- 32 GB disk on reliable storage
+- 32 GB disk on SSD-backed storage. The database is latency-bound; a guest disk on a spinning drive makes every refresh and page slow (see docs/CONTAINER_INSTALL.md, Storage and PostgreSQL tuning)
 - A DHCP reservation or stable address on the trusted LAN
 
 Either guest type works, and the rest of this runbook applies to both.

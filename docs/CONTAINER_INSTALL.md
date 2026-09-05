@@ -75,6 +75,41 @@ the proxy's internal network, forward to port 8080, and set both TLS variables
 shown above. Proxy authentication can be added, but it does not replace
 IPTVMaster's own administrator account.
 
+## Storage and PostgreSQL tuning
+
+IPTVMaster is bound by disk latency far more than by CPU. Every playlist
+refresh writes a full copy of the provider's entries and every EPG refresh
+replaces the guide, so the database volume must sit on SSD-backed storage. On
+a spinning disk, or a container image file that lives on one, a 50k-channel
+import takes the better part of an hour and the editor stalls for seconds at a
+time. Check with the storage the container or VM disk was created on, not with
+the guest itself.
+
+The Compose stack starts PostgreSQL with settings for a guest of 1-2 GB. Adjust
+them in `.env` (see `.env.example`):
+
+| Guest  | `POSTGRES_SHARED_BUFFERS` | `POSTGRES_EFFECTIVE_CACHE_SIZE` |
+| ------ | ------------------------- | ------------------------------- |
+| 1-2 GB | `256MB` (default)         | `1GB` (default)                 |
+| 4 GB   | `1GB`                     | `3GB`                           |
+
+On SSD storage set `POSTGRES_RANDOM_PAGE_COST=1.1`. Queries slower than
+`POSTGRES_LOG_MIN_DURATION_MS` (default 1000) are written to the postgres
+service log, which is the first place to look when the editor feels slow:
+
+```bash
+docker compose logs --since 1h postgres | grep duration
+```
+
+`SNAPSHOT_RETENTION_COUNT` (default 3) bounds the largest table: each retained
+snapshot is a full copy of a provider's entries, kept so a bad refresh can be
+undone from the editor.
+
+Stopping the stack lets PostgreSQL finish its final checkpoint
+(`stop_grace_period` is five minutes). A host reboot that does not wait for it
+is safe but slow: the next start replays the write-ahead log, which on slow
+storage can take several minutes, and the app waits for it.
+
 ## Diagnosing startup
 
 If the setup screen cannot connect, inspect only the application and database:
