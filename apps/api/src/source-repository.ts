@@ -5028,7 +5028,29 @@ export class PostgresSourceRepository implements SourceRepository {
         sort_order: item.sortOrder,
       }));
       await client.query(
-        `INSERT INTO channel
+        // Inherited visibility is a property of the group, not of each
+        // arriving row, so it is aggregated once and joined. Asking it per
+        // row left the planner free to rescan `channel` for every new
+        // channel -- and it does, because `jsonb_to_recordset` reports no
+        // row estimate: importing a 25k-channel provider read a billion
+        // rows and had not finished after 50 minutes.
+        `WITH group_visibility AS (
+           SELECT existing.provider_group,
+                  BOOL_OR(existing.enabled)
+                    FILTER (WHERE existing.current_upstream_item_id IS NOT NULL)
+                    AS published_enabled,
+                  BOOL_OR(existing.enabled) AS any_enabled
+           FROM channel existing
+           WHERE existing.source_id = $1
+             AND existing.archived_at IS NULL
+           GROUP BY existing.provider_group
+         ),
+         removed_group AS (
+           SELECT policy.provider_group
+           FROM group_policy policy
+           WHERE policy.source_id = $1 AND policy.excluded
+         )
+         INSERT INTO channel
           (source_id, current_upstream_item_id, provider_stream_id, tvg_id,
            provider_name, provider_group, provider_logo_url, sort_order,
            reconciliation_status, last_seen_at, enabled)
@@ -5045,17 +5067,8 @@ export class PostgresSourceRepository implements SourceRepository {
                 -- provider has dropped are a poor sample, because a stale
                 -- visible one would re-enable the whole group.
                 COALESCE(
-                  (SELECT BOOL_OR(existing.enabled)
-                   FROM channel existing
-                   WHERE existing.source_id = $1
-                     AND existing.provider_group = item.provider_group
-                     AND existing.archived_at IS NULL
-                     AND existing.current_upstream_item_id IS NOT NULL),
-                  (SELECT BOOL_OR(existing.enabled)
-                   FROM channel existing
-                   WHERE existing.source_id = $1
-                     AND existing.provider_group = item.provider_group
-                     AND existing.archived_at IS NULL),
+                  visibility.published_enabled,
+                  visibility.any_enabled,
                   TRUE
                 )
          FROM jsonb_to_recordset($2::jsonb) AS item(
@@ -5067,11 +5080,11 @@ export class PostgresSourceRepository implements SourceRepository {
            provider_logo_url TEXT,
            sort_order INTEGER
          )
+         LEFT JOIN group_visibility visibility
+           ON visibility.provider_group = item.provider_group
          WHERE NOT EXISTS (
-           SELECT 1 FROM group_policy removed
-           WHERE removed.source_id = $1
-             AND removed.provider_group = item.provider_group
-             AND removed.excluded
+           SELECT 1 FROM removed_group
+           WHERE removed_group.provider_group = item.provider_group
          )`,
         [sourceId, JSON.stringify(values)],
       );
