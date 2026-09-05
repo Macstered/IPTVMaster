@@ -96,6 +96,27 @@ export function xtreamPlayerApiUrl(account: XtreamAccount): string {
   return endpoint(account, 'player_api.php');
 }
 
+export function xtreamStreamUrl(
+  account: XtreamAccount,
+  mediaType: 'live' | 'movie' | 'series',
+  providerStreamId: string,
+  containerExtension = 'ts',
+): string {
+  if (!/^\d{1,16}$/.test(providerStreamId)) {
+    throw new Error('The Xtream stream identifier is invalid');
+  }
+  if (!/^[A-Za-z0-9]{1,8}$/.test(containerExtension)) {
+    throw new Error('The Xtream stream extension is invalid');
+  }
+  const path = [
+    mediaType,
+    encodeURIComponent(account.username),
+    encodeURIComponent(account.password),
+    `${providerStreamId}.${containerExtension.toLowerCase()}`,
+  ].join('/');
+  return new URL(path, `${normalizeXtreamServer(account.server)}/`).toString();
+}
+
 function asNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
