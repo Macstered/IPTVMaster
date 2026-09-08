@@ -58,7 +58,7 @@ services:
       - no-new-privileges:true
 
   app:
-    image: ${IPTVMASTER_IMAGE:-ghcr.io/macstered/iptvmaster:0.2.1}
+    image: ${IPTVMASTER_IMAGE:-ghcr.io/macstered/iptvmaster:0.2.2}
 
     restart: unless-stopped
     init: true
