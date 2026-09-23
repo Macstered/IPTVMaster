@@ -91,6 +91,10 @@ import {
   type XtreamSeriesArtwork,
 } from './xtream-upstream.js';
 import { inspectRemoteXtreamPlaylist } from './xtream-import.js';
+import {
+  SourceImportMethodError,
+  updateSourceWithImportMethod,
+} from './source-import-method.js';
 
 const SESSION_COOKIE = 'iptvmaster_session';
 const CSRF_COOKIE = 'iptvmaster_csrf';
@@ -164,6 +168,7 @@ const createSourceSchema = z
 
 const updateSourceSchema = z
   .object({
+    sourceType: z.enum(['m3u', 'xtream']).optional(),
     name: z.string().trim().min(1).max(120),
     playlistUrl: z.url().max(4_000).optional(),
     epgUrl: z.url().max(4_000).optional(),
@@ -747,6 +752,7 @@ export async function buildApp(
         sourceRepository,
         playlistInspector,
         providerRetryOptions,
+        runBackgroundWork,
       )
     : undefined;
   const schedulerEnabled =
@@ -769,7 +775,6 @@ export async function buildApp(
               'PLAYLIST_REFRESH_INITIAL_DELAY_SECONDS',
               30,
             ) * 1_000,
-          runExclusive: runBackgroundWork,
         })
       : undefined;
   const epgRefreshCoordinator = sourceRepository
@@ -777,6 +782,7 @@ export async function buildApp(
         sourceRepository,
         epgInspector ?? undefined,
         providerRetryOptions,
+        runBackgroundWork,
       )
     : undefined;
   const epgSchedulerEnabled =
@@ -794,7 +800,6 @@ export async function buildApp(
             options.epgRefreshInitialDelayMs ??
             positiveEnvironmentNumber('EPG_REFRESH_INITIAL_DELAY_SECONDS', 60) *
               1_000,
-          runExclusive: runBackgroundWork,
         })
       : undefined;
   const maintenanceSchedulerEnabled =
@@ -1455,27 +1460,40 @@ export async function buildApp(
         }
       }
       try {
-        const source = await sourceRepository.updateSource(sourceId.data, {
-          name: parsed.data.name,
-          ...(parsed.data.playlistUrl
-            ? { playlistUrl: parsed.data.playlistUrl }
-            : {}),
-          ...(parsed.data.epgUrl ? { epgUrl: parsed.data.epgUrl } : {}),
-          ...(parsed.data.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
-          ...(parsed.data.importLive === undefined
-            ? {}
-            : { importLive: parsed.data.importLive }),
-          ...(parsed.data.importCatalogue === undefined
-            ? {}
-            : { importCatalogue: parsed.data.importCatalogue }),
-          ...(parsed.data.clearEpgUrl ? { clearEpgUrl: true } : {}),
-          sourceTimezone: parsed.data.sourceTimezone,
-          displayTimezone: parsed.data.displayTimezone,
-        });
+        const source = await updateSourceWithImportMethod(
+          sourceRepository,
+          sourceId.data,
+          {
+            ...(parsed.data.sourceType
+              ? { sourceType: parsed.data.sourceType }
+              : {}),
+            name: parsed.data.name,
+            ...(parsed.data.playlistUrl
+              ? { playlistUrl: parsed.data.playlistUrl }
+              : {}),
+            ...(parsed.data.epgUrl ? { epgUrl: parsed.data.epgUrl } : {}),
+            ...(parsed.data.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
+            ...(parsed.data.importLive === undefined
+              ? {}
+              : { importLive: parsed.data.importLive }),
+            ...(parsed.data.importCatalogue === undefined
+              ? {}
+              : { importCatalogue: parsed.data.importCatalogue }),
+            ...(parsed.data.clearEpgUrl ? { clearEpgUrl: true } : {}),
+            sourceTimezone: parsed.data.sourceTimezone,
+            displayTimezone: parsed.data.displayTimezone,
+          },
+          playlistInspector,
+          runBackgroundWork,
+        );
         if (!source) return reply.code(404).send({ error: 'Source not found' });
         return { source };
       } catch (error) {
-        if (error instanceof XmltvDerivationError) {
+        if (
+          error instanceof XmltvDerivationError ||
+          error instanceof SourceImportMethodError ||
+          error instanceof SnapshotRejectedError
+        ) {
           return reply.code(422).send({ error: error.message });
         }
         throw error;

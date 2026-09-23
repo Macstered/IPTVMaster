@@ -4,6 +4,7 @@ import { channelLogoSource, ChannelLogo } from './components/ChannelLogo.js';
 import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
 import { showToast } from './toast.js';
 import { AutomationSettings } from './workspaces/AutomationSettings.js';
+import { RefreshActivity } from './workspaces/RefreshActivity.js';
 import { CataloguePanel } from './workspaces/CataloguePanel.js';
 import { EpgSourcesPanel } from './workspaces/EpgSourcesPanel.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
@@ -742,6 +743,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   }
 
   async function beginConnectionEdit(source: SafeSource) {
+    setNewSourceType(source.sourceType);
     setEditingConnection(source);
     setShowSourceForm(false);
     setName(source.name);
@@ -765,6 +767,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name,
+          ...(newSourceType !== source.sourceType
+            ? { sourceType: newSourceType }
+            : {}),
           ...(playlistUrl.trim() ? { playlistUrl: playlistUrl.trim() } : {}),
           ...(!options.deriveEpgUrl && !options.clearEpgUrl && epgUrl.trim()
             ? { epgUrl: epgUrl.trim() }
@@ -787,6 +792,12 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         await importEpg(payload.source);
       }
       clearSourceForm();
+      if (source.sourceType !== payload.source.sourceType) {
+        showToast(
+          'success',
+          'Import method checked and saved. Import the playlist to load it using the new method.',
+        );
+      }
     } catch (caught) {
       showToast(
         'error',
@@ -2077,7 +2088,32 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               required
             />
           </div>
-          {editingConnection ? null : (
+          {editingConnection ? (
+            <div>
+              <label htmlFor="source-import-method">Import method</label>
+              <select
+                id="source-import-method"
+                value={newSourceType}
+                disabled={saving}
+                onChange={(event) =>
+                  setNewSourceType(event.target.value as 'm3u' | 'xtream')
+                }
+              >
+                <option value="m3u">M3U playlist</option>
+                <option value="xtream">
+                  Native Xtream API (parent series)
+                </option>
+              </select>
+              <p className="secret-note">
+                Native Xtream avoids importing every episode as a catalogue row.
+                Changing methods checks the provider API and selected categories
+                first; this can take a few minutes or wait for an active update.
+                Your source, edits and player links are kept. No change is saved
+                if the check fails. Leave the URL blank to use your existing
+                credentials.
+              </p>
+            </div>
+          ) : (
             <div className="source-type-choice">
               <span className="source-type-label">How to connect</span>
               <div className="epg-chips">
@@ -2431,6 +2467,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         <>
           <EpgSourcesPanel active />
           <AutomationSettings active />
+          <RefreshActivity sources={sources} />
         </>
       ) : null}
 

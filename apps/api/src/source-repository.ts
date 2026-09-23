@@ -20,6 +20,9 @@
 } from '@iptvmaster/core';
 import { createHash, randomBytes } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
+import { commitRefresh } from './commit-refresh.js';
+import type { ReportRefreshProgress } from './refresh-progress.js';
+import { assertNativeCredentials } from './source-import-method.js';
 
 import {
   reconcileChannels,
@@ -47,6 +50,7 @@ export interface CreateSourceInput {
 }
 
 export interface UpdateSourceInput {
+  sourceType?: 'm3u' | 'xtream';
   name: string;
   playlistUrl?: string;
   epgUrl?: string;
@@ -482,6 +486,8 @@ export interface SourceRepository {
   savePlaylistSnapshot(
     sourceId: string,
     inspection: PlaylistInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredSnapshotSummary>;
   listSourceHistory(sourceId: string, limit: number): Promise<SourceHistory>;
   activateSnapshot(
@@ -491,6 +497,8 @@ export interface SourceRepository {
   saveEpgSnapshot(
     sourceId: string,
     inspection: XmltvInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredEpgSummary>;
   getLatestEpg(sourceId: string): Promise<StoredEpgGuide>;
   getLatestPlaylistEntries(
@@ -629,6 +637,8 @@ export interface SourceRepository {
   saveEpgSnapshotForEpgSource(
     epgSourceId: string,
     inspection: XmltvInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredEpgSummary>;
   unlockEpgMapping(sourceId: string, channelId: string): Promise<boolean>;
   listOutputGroupPolicies(
@@ -1251,6 +1261,9 @@ export class PostgresSourceRepository implements SourceRepository {
         existing.encrypted_value ?? '',
       );
       const playlistUrl = input.playlistUrl ?? existingCredentials.playlistUrl;
+      if ((input.sourceType ?? existing.source_type) === 'xtream') {
+        assertNativeCredentials(playlistUrl);
+      }
       const derivedEpgUrl = input.deriveEpgUrl
         ? deriveXmltvUrl(playlistUrl)
         : undefined;
@@ -1284,6 +1297,7 @@ export class PostgresSourceRepository implements SourceRepository {
             SET name = $2, source_timezone = $3, display_timezone = $4,
                 import_live = COALESCE($5::boolean, import_live),
                 import_catalogue = COALESCE($6::boolean, import_catalogue),
+                source_type = COALESCE($7::text, source_type),
                 updated_at = NOW()
           WHERE id = $1
           RETURNING id, name, source_type, source_timezone, display_timezone,
@@ -1296,6 +1310,7 @@ export class PostgresSourceRepository implements SourceRepository {
           input.displayTimezone,
           input.importLive ?? null,
           input.importCatalogue ?? null,
+          input.sourceType ?? null,
         ],
       );
       const updated = updatedResult.rows[0];
@@ -1380,15 +1395,17 @@ export class PostgresSourceRepository implements SourceRepository {
   async savePlaylistSnapshot(
     sourceId: string,
     inspection: PlaylistInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredSnapshotSummary> {
     const client = await this.#pool.connect();
     let syncRunId: string | undefined;
     try {
       const runResult = await client.query<{ id: string }>(
-        `INSERT INTO sync_run (source_id, sync_type, status)
-         VALUES ($1, 'playlist', 'running')
+        `INSERT INTO sync_run (source_id, sync_type, status, started_at)
+         VALUES ($1, 'playlist', 'running', COALESCE($2::timestamptz, clock_timestamp()))
          RETURNING id`,
-        [sourceId],
+        [sourceId, startedAt ?? null],
       );
       syncRunId = runResult.rows[0]?.id;
       if (!syncRunId)
@@ -1464,6 +1481,7 @@ export class PostgresSourceRepository implements SourceRepository {
           );
         }
         if (!existingSnapshot.is_last_known_good) {
+          report?.('reconciling');
           await this.#activateStoredSnapshot(
             client,
             sourceId,
@@ -1477,11 +1495,11 @@ export class PostgresSourceRepository implements SourceRepository {
         );
         await client.query(
           `UPDATE sync_run
-           SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
+           SET status = 'succeeded', finished_at = clock_timestamp(), summary = $2::jsonb
            WHERE id = $1`,
           [syncRunId, JSON.stringify(summary)],
         );
-        await client.query('COMMIT');
+        await commitRefresh(client, syncRunId, report);
         return summary;
       }
 
@@ -1602,6 +1620,11 @@ export class PostgresSourceRepository implements SourceRepository {
            )`,
           [snapshot.id, JSON.stringify(values)],
         );
+        report?.(
+          'saving',
+          Math.min(offset + chunkSize, inspection.entries.length),
+          inspection.entries.length,
+        );
       }
 
       // Refreshed from every accepted import so the operator always browses
@@ -1621,6 +1644,7 @@ export class PostgresSourceRepository implements SourceRepository {
       // mutations. Catalogue encryption and insertion above can take minutes,
       // so acquiring the source row here keeps that staging time invisible to
       // ordinary group/channel edits.
+      report?.('reconciling');
       await lockSourceRow();
       await client.query(
         'UPDATE source_snapshot SET is_last_known_good = FALSE WHERE source_id = $1',
@@ -1649,11 +1673,11 @@ export class PostgresSourceRepository implements SourceRepository {
       const summary = toSnapshotSummary(snapshot, false);
       await client.query(
         `UPDATE sync_run
-         SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
+         SET status = 'succeeded', finished_at = clock_timestamp(), summary = $2::jsonb
          WHERE id = $1`,
         [syncRunId, JSON.stringify(summary)],
       );
-      await client.query('COMMIT');
+      await commitRefresh(client, syncRunId, report);
       return summary;
     } catch (error) {
       await this.#safeRollback(client);
@@ -1943,16 +1967,32 @@ export class PostgresSourceRepository implements SourceRepository {
   async saveEpgSnapshot(
     sourceId: string,
     inspection: XmltvInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredEpgSummary> {
     const epgSourceId = await this.#ensureProviderEpgSource(sourceId);
-    return this.#saveGuideSnapshot(epgSourceId, sourceId, inspection);
+    return this.#saveGuideSnapshot(
+      epgSourceId,
+      sourceId,
+      inspection,
+      report,
+      startedAt,
+    );
   }
 
   async saveEpgSnapshotForEpgSource(
     epgSourceId: string,
     inspection: XmltvInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredEpgSummary> {
-    return this.#saveGuideSnapshot(epgSourceId, null, inspection);
+    return this.#saveGuideSnapshot(
+      epgSourceId,
+      null,
+      inspection,
+      report,
+      startedAt,
+    );
   }
 
   async #ensureProviderEpgSource(sourceId: string): Promise<string> {
@@ -1974,15 +2014,17 @@ export class PostgresSourceRepository implements SourceRepository {
     epgSourceId: string,
     ownerSourceId: string | null,
     inspection: XmltvInspection,
+    report?: ReportRefreshProgress,
+    startedAt?: string,
   ): Promise<StoredEpgSummary> {
     const client = await this.#pool.connect();
     let syncRunId: string | undefined;
     try {
       const runResult = await client.query<{ id: string }>(
-        `INSERT INTO sync_run (source_id, epg_source_id, sync_type, status)
-         VALUES ($1, $2, 'epg', 'running')
+        `INSERT INTO sync_run (source_id, epg_source_id, sync_type, status, started_at)
+         VALUES ($1, $2, 'epg', 'running', COALESCE($3::timestamptz, clock_timestamp()))
          RETURNING id`,
-        [ownerSourceId, epgSourceId],
+        [ownerSourceId, epgSourceId, startedAt ?? null],
       );
       syncRunId = runResult.rows[0]?.id;
       if (!syncRunId)
@@ -2000,7 +2042,7 @@ export class PostgresSourceRepository implements SourceRepository {
         const summary = toEpgSummary(previous, true);
         await client.query(
           `UPDATE sync_run
-           SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
+           SET status = 'succeeded', finished_at = clock_timestamp(), summary = $2::jsonb
            WHERE id = $1`,
           [syncRunId, JSON.stringify(summary)],
         );
@@ -2094,8 +2136,14 @@ export class PostgresSourceRepository implements SourceRepository {
             AND channel.upstream_id = item.channel_id`,
           [epgSourceId, JSON.stringify(values)],
         );
+        report?.(
+          'saving',
+          Math.min(offset + programmeChunkSize, inspection.programmes.length),
+          inspection.programmes.length,
+        );
       }
 
+      report?.('reconciling');
       await client.query(
         `UPDATE epg_mapping mapping
          SET epg_channel_id = NULL, updated_at = NOW()
@@ -2164,11 +2212,11 @@ export class PostgresSourceRepository implements SourceRepository {
       const summary = toEpgSummary(state, false);
       await client.query(
         `UPDATE sync_run
-         SET status = 'succeeded', finished_at = NOW(), summary = $2::jsonb
+         SET status = 'succeeded', finished_at = clock_timestamp(), summary = $2::jsonb
          WHERE id = $1`,
         [syncRunId, JSON.stringify(summary)],
       );
-      await client.query('COMMIT');
+      await commitRefresh(client, syncRunId, report);
       return summary;
     } catch (error) {
       await this.#safeRollback(client);

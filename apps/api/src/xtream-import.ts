@@ -3,6 +3,7 @@
   guardedFetch,
   mediaCategoryKey,
   parseXtreamInput,
+  retainedPlaylistFingerprint,
   PlaylistEntryLimitError,
   ProviderHttpError,
   xtreamPlayerApiUrl,
@@ -13,7 +14,6 @@
   type PlaylistInspection,
   type XtreamAccount,
 } from '@iptvmaster/core';
-import { createHash } from 'node:crypto';
 
 const DEFAULT_MAX_RESPONSE_BYTES = 128 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 90_000;
@@ -22,7 +22,6 @@ const MAX_PROVIDER_ITEMS = 500_000;
 interface FetchedXtreamPayload {
   payload: unknown;
   totalBytes: number;
-  fingerprint: string;
 }
 
 export interface XtreamPlaylistInspectionOptions {
@@ -93,7 +92,6 @@ async function boundedJson(
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
-  const hash = createHash('sha256');
   let totalBytes = 0;
   while (true) {
     const next = await reader.read();
@@ -103,7 +101,6 @@ async function boundedJson(
       await reader.cancel();
       throw new Error('Xtream metadata response is too large');
     }
-    hash.update(next.value);
     chunks.push(next.value);
   }
   const body = new Uint8Array(totalBytes);
@@ -116,7 +113,6 @@ async function boundedJson(
     return {
       payload: JSON.parse(new TextDecoder().decode(body)),
       totalBytes,
-      fingerprint: hash.digest('hex'),
     };
   } catch {
     throw new Error('Xtream metadata response is not valid JSON');
@@ -222,7 +218,6 @@ export async function inspectRemoteXtreamPlaylist(
     series: 0,
     unknown: 0,
   };
-  const fingerprint = createHash('sha256');
   let totalBytes = 0;
   let skippedEntries = 0;
   let lineNumber = 0;
@@ -230,7 +225,6 @@ export async function inspectRemoteXtreamPlaylist(
   const fetched = async (action: string): Promise<unknown> => {
     const result = await fetchAction(account, action, fetchOptions);
     totalBytes += result.totalBytes;
-    fingerprint.update(action).update('\0').update(result.fingerprint);
     return result.payload;
   };
   const retain = (entry: M3uEntry, selected: boolean): void => {
@@ -401,7 +395,7 @@ export async function inspectRemoteXtreamPlaylist(
   }
 
   return {
-    fingerprint: fingerprint.digest('hex'),
+    fingerprint: retainedPlaylistFingerprint(entries),
     totalBytes,
     entries,
     issues: [],

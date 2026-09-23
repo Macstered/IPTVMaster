@@ -3157,6 +3157,30 @@ strong {
   font-size: 12px;
   line-height: 1.5;
 }
+.refresh-activity {
+  margin-top: 1rem;
+}
+
+.refresh-activity ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.refresh-activity li {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.refresh-activity small {
+  color: var(--text-muted);
+}
+
 .automation-settings {
   margin-top: 20px;
   padding-top: 20px;

@@ -17,10 +17,15 @@ import {
   type ProviderRetryOptions,
 } from './provider-retry.js';
 import type { ExclusiveBackgroundRun } from './background-work.js';
+import {
+  RefreshProgress,
+  type RefreshProgressSnapshot,
+} from './refresh-progress.js';
 
 export class EpgNotConfiguredError extends Error {}
 
 export interface EpgRefreshResult {
+  progress?: RefreshProgressSnapshot;
   status: 'completed' | 'already-running';
   sourceId: string;
   startedAt: string;
@@ -31,6 +36,7 @@ export interface EpgRefreshResult {
 }
 
 export interface EpgRefreshState {
+  progress?: RefreshProgressSnapshot;
   sourceId: string;
   status: 'running' | 'succeeded' | 'failed' | 'rejected';
   startedAt: string;
@@ -48,6 +54,8 @@ export class EpgRefreshCoordinator {
   readonly #retryOptions: Partial<ProviderRetryOptions>;
   readonly #running = new Map<string, Promise<EpgRefreshResult>>();
   readonly #states = new Map<string, EpgRefreshState>();
+  readonly #progress = new Map<string, RefreshProgress>();
+  readonly #runExclusive: ExclusiveBackgroundRun;
 
   constructor(
     repository: SourceRepository,
@@ -55,13 +63,21 @@ export class EpgRefreshCoordinator {
       epgUrl: string,
     ) => Promise<XmltvInspection> = inspectRemoteXmltv,
     retryOptions: Partial<ProviderRetryOptions> = {},
+    runExclusive: ExclusiveBackgroundRun = (work) => work(),
   ) {
     this.#repository = repository;
     this.#inspector = inspector;
     this.#retryOptions = retryOptions;
+    this.#runExclusive = runExclusive;
   }
 
   async refreshEpgSource(epgSourceId: string): Promise<EpgRefreshResult> {
+    // The provider card and guide card must share one admission key.
+    const target =
+      await this.#repository.getEpgSourceRefreshTarget(epgSourceId);
+    if (target?.kind === 'provider' && target.ownerSourceId) {
+      return this.refresh(target.ownerSourceId);
+    }
     const key = `guide:${epgSourceId}`;
     if (this.#running.has(key)) {
       return {
@@ -86,58 +102,72 @@ export class EpgRefreshCoordinator {
     const startedAt = new Date().toISOString();
     let attempts = 0;
     this.#states.set(key, { sourceId: key, status: 'running', startedAt });
-    try {
-      const target =
-        await this.#repository.getEpgSourceRefreshTarget(epgSourceId);
-      if (!target?.epgUrl) {
-        throw new EpgNotConfiguredError('EPG source has no XMLTV URL');
+    const progress = new RefreshProgress();
+    this.#progress.set(key, progress);
+    return this.#runExclusive(async () => {
+      try {
+        progress.report('downloading');
+        const target =
+          await this.#repository.getEpgSourceRefreshTarget(epgSourceId);
+        if (!target?.epgUrl) {
+          throw new EpgNotConfiguredError('EPG source has no XMLTV URL');
+        }
+        const inspection = await withProviderRetry(() => {
+          attempts += 1;
+          return this.#inspector(target.epgUrl!);
+        }, this.#retryOptions);
+        progress.report('saving', 0, inspection.programmes.length);
+        const summary =
+          target.kind === 'provider' && target.ownerSourceId
+            ? await this.#repository.saveEpgSnapshot(
+                target.ownerSourceId,
+                inspection,
+                progress.report,
+                startedAt,
+              )
+            : await this.#repository.saveEpgSnapshotForEpgSource(
+                epgSourceId,
+                inspection,
+                progress.report,
+                startedAt,
+              );
+        progress.report('completed');
+        const finishedAt = new Date().toISOString();
+        this.#states.set(key, {
+          sourceId: key,
+          status: 'succeeded',
+          startedAt,
+          finishedAt,
+          unchanged: summary.unchanged,
+          channelCount: summary.channelCount,
+          programmeCount: summary.programmeCount,
+          attempts,
+        });
+        return {
+          status: 'completed',
+          progress: progress.snapshot(),
+          sourceId: key,
+          startedAt,
+          finishedAt,
+          inspection,
+          summary,
+          attempts,
+        };
+      } catch (error) {
+        progress.report('failed');
+        const finishedAt = new Date().toISOString();
+        this.#states.set(key, {
+          sourceId: key,
+          status:
+            error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
+          startedAt,
+          finishedAt,
+          safeError: safeRefreshError(error),
+          attempts,
+        });
+        throw error;
       }
-      const inspection = await withProviderRetry(() => {
-        attempts += 1;
-        return this.#inspector(target.epgUrl!);
-      }, this.#retryOptions);
-      const summary =
-        target.kind === 'provider' && target.ownerSourceId
-          ? await this.#repository.saveEpgSnapshot(
-              target.ownerSourceId,
-              inspection,
-            )
-          : await this.#repository.saveEpgSnapshotForEpgSource(
-              epgSourceId,
-              inspection,
-            );
-      const finishedAt = new Date().toISOString();
-      this.#states.set(key, {
-        sourceId: key,
-        status: 'succeeded',
-        startedAt,
-        finishedAt,
-        unchanged: summary.unchanged,
-        channelCount: summary.channelCount,
-        programmeCount: summary.programmeCount,
-        attempts,
-      });
-      return {
-        status: 'completed',
-        sourceId: key,
-        startedAt,
-        finishedAt,
-        inspection,
-        summary,
-        attempts,
-      };
-    } catch (error) {
-      const finishedAt = new Date().toISOString();
-      this.#states.set(key, {
-        sourceId: key,
-        status: error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
-        startedAt,
-        finishedAt,
-        safeError: safeRefreshError(error),
-        attempts,
-      });
-      throw error;
-    }
+    });
   }
 
   async refresh(sourceId: string): Promise<EpgRefreshResult> {
@@ -159,60 +189,76 @@ export class EpgRefreshCoordinator {
   }
 
   listStates(): EpgRefreshState[] {
-    return [...this.#states.values()].sort((left, right) =>
-      left.sourceId.localeCompare(right.sourceId),
-    );
+    return [...this.#states.values()]
+      .map((state) => ({
+        ...state,
+        progress: this.#progress.get(state.sourceId)?.snapshot(),
+      }))
+      .sort((left, right) => left.sourceId.localeCompare(right.sourceId));
   }
 
   async #execute(sourceId: string): Promise<EpgRefreshResult> {
     const startedAt = new Date().toISOString();
     let attempts = 0;
     this.#states.set(sourceId, { sourceId, status: 'running', startedAt });
-    try {
-      const credentials = await this.#repository.getSourceCredentials(sourceId);
-      if (!credentials?.epgUrl) {
-        throw new EpgNotConfiguredError('Source has no XMLTV URL');
+    const progress = new RefreshProgress();
+    this.#progress.set(sourceId, progress);
+    return this.#runExclusive(async () => {
+      try {
+        progress.report('downloading');
+        const credentials =
+          await this.#repository.getSourceCredentials(sourceId);
+        if (!credentials?.epgUrl) {
+          throw new EpgNotConfiguredError('Source has no XMLTV URL');
+        }
+        const inspection = await withProviderRetry(() => {
+          attempts += 1;
+          return this.#inspector(credentials.epgUrl!);
+        }, this.#retryOptions);
+        progress.report('saving', 0, inspection.programmes.length);
+        const summary = await this.#repository.saveEpgSnapshot(
+          sourceId,
+          inspection,
+          progress.report,
+          startedAt,
+        );
+        progress.report('completed');
+        const finishedAt = new Date().toISOString();
+        this.#states.set(sourceId, {
+          sourceId,
+          status: 'succeeded',
+          startedAt,
+          finishedAt,
+          unchanged: summary.unchanged,
+          channelCount: summary.channelCount,
+          programmeCount: summary.programmeCount,
+          attempts,
+        });
+        return {
+          status: 'completed',
+          progress: progress.snapshot(),
+          sourceId,
+          startedAt,
+          finishedAt,
+          inspection,
+          summary,
+          attempts,
+        };
+      } catch (error) {
+        progress.report('failed');
+        const finishedAt = new Date().toISOString();
+        this.#states.set(sourceId, {
+          sourceId,
+          status:
+            error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
+          startedAt,
+          finishedAt,
+          safeError: safeRefreshError(error),
+          attempts,
+        });
+        throw error;
       }
-      const inspection = await withProviderRetry(() => {
-        attempts += 1;
-        return this.#inspector(credentials.epgUrl!);
-      }, this.#retryOptions);
-      const summary = await this.#repository.saveEpgSnapshot(
-        sourceId,
-        inspection,
-      );
-      const finishedAt = new Date().toISOString();
-      this.#states.set(sourceId, {
-        sourceId,
-        status: 'succeeded',
-        startedAt,
-        finishedAt,
-        unchanged: summary.unchanged,
-        channelCount: summary.channelCount,
-        programmeCount: summary.programmeCount,
-        attempts,
-      });
-      return {
-        status: 'completed',
-        sourceId,
-        startedAt,
-        finishedAt,
-        inspection,
-        summary,
-        attempts,
-      };
-    } catch (error) {
-      const finishedAt = new Date().toISOString();
-      this.#states.set(sourceId, {
-        sourceId,
-        status: error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
-        startedAt,
-        finishedAt,
-        safeError: safeRefreshError(error),
-        attempts,
-      });
-      throw error;
-    }
+    });
   }
 }
 
@@ -230,7 +276,6 @@ export class EpgScheduler {
   readonly #repository: SourceRepository;
   readonly #coordinator: EpgRefreshCoordinator;
   readonly #logger: PlaylistSchedulerLogger;
-  readonly #runExclusive: ExclusiveBackgroundRun;
   #intervalMs: number;
   readonly #initialDelayMs: number;
   #timer?: NodeJS.Timeout;
@@ -248,7 +293,6 @@ export class EpgScheduler {
     options: {
       intervalMs: number;
       initialDelayMs: number;
-      runExclusive?: ExclusiveBackgroundRun;
     },
   ) {
     this.#repository = repository;
@@ -256,7 +300,6 @@ export class EpgScheduler {
     this.#logger = logger;
     this.#intervalMs = options.intervalMs;
     this.#initialDelayMs = options.initialDelayMs;
-    this.#runExclusive = options.runExclusive ?? ((work) => work());
   }
 
   start(): void {
@@ -312,59 +355,59 @@ export class EpgScheduler {
     this.#running = true;
     this.#lastCycleStartedAt = new Date().toISOString();
     try {
-      await this.#runExclusive(async () => {
-        const sources = await this.#repository.listSources();
-        for (const source of sources.filter(
-          (candidate) => candidate.enabled && candidate.hasEpgUrl,
+      const sources = await this.#repository.listSources();
+      for (const source of sources.filter(
+        (candidate) => candidate.enabled && candidate.hasEpgUrl,
+      )) {
+        try {
+          const result = await this.#coordinator.refresh(source.id);
+          this.#logger.info(
+            {
+              sourceId: source.id,
+              unchanged: result.summary?.unchanged,
+              programmeCount: result.summary?.programmeCount,
+              skipped: result.status === 'already-running',
+              progress: result.progress,
+            },
+            'Automatic EPG refresh finished',
+          );
+        } catch (error) {
+          this.#logger.warn(
+            { sourceId: source.id, safeError: safeRefreshError(error) },
+            'Automatic EPG refresh failed',
+          );
+        }
+      }
+      try {
+        const guides = await this.#repository.listEpgSources();
+        for (const guide of guides.filter(
+          (candidate) => candidate.kind === 'custom' && candidate.enabled,
         )) {
           try {
-            const result = await this.#coordinator.refresh(source.id);
+            const result = await this.#coordinator.refreshEpgSource(guide.id);
             this.#logger.info(
               {
-                sourceId: source.id,
+                epgSourceId: guide.id,
                 unchanged: result.summary?.unchanged,
                 programmeCount: result.summary?.programmeCount,
                 skipped: result.status === 'already-running',
+                progress: result.progress,
               },
-              'Automatic EPG refresh finished',
+              'Automatic custom EPG refresh finished',
             );
           } catch (error) {
             this.#logger.warn(
-              { sourceId: source.id, safeError: safeRefreshError(error) },
-              'Automatic EPG refresh failed',
+              { epgSourceId: guide.id, safeError: safeRefreshError(error) },
+              'Automatic custom EPG refresh failed',
             );
           }
         }
-        try {
-          const guides = await this.#repository.listEpgSources();
-          for (const guide of guides.filter(
-            (candidate) => candidate.kind === 'custom' && candidate.enabled,
-          )) {
-            try {
-              const result = await this.#coordinator.refreshEpgSource(guide.id);
-              this.#logger.info(
-                {
-                  epgSourceId: guide.id,
-                  unchanged: result.summary?.unchanged,
-                  programmeCount: result.summary?.programmeCount,
-                  skipped: result.status === 'already-running',
-                },
-                'Automatic custom EPG refresh finished',
-              );
-            } catch (error) {
-              this.#logger.warn(
-                { epgSourceId: guide.id, safeError: safeRefreshError(error) },
-                'Automatic custom EPG refresh failed',
-              );
-            }
-          }
-        } catch (error) {
-          this.#logger.warn(
-            { safeError: safeRefreshError(error) },
-            'Could not list EPG sources for automatic refresh',
-          );
-        }
-      });
+      } catch (error) {
+        this.#logger.warn(
+          { safeError: safeRefreshError(error) },
+          'Could not list EPG sources for automatic refresh',
+        );
+      }
     } finally {
       this.#running = false;
       this.#lastCycleFinishedAt = new Date().toISOString();
