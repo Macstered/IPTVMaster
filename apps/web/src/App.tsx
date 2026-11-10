@@ -1,14 +1,22 @@
-import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
+import {
+  type FormEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import {
-  IconChevronDown,
-  IconChevronUp,
   IconClock,
+  IconFilm,
   IconGuide,
   IconHistory,
   IconHome,
+  IconLink,
   IconPlay,
   IconRows,
+  IconServer,
 } from './icons.js';
 
 import {
@@ -17,10 +25,8 @@ import {
   type WorkspaceView,
 } from './SourceSetup.js';
 import { TOAST_EVENT, type ToastDetail } from './toast.js';
-import {
-  OverviewStatus,
-  type SystemStatus,
-} from './workspaces/OverviewStatus.js';
+import type { HomeDestination } from './workspaces/HomeWorkspace.js';
+import type { SystemStatus } from './workspaces/status.js';
 
 interface PreviewResult {
   originalName: string;
@@ -60,9 +66,9 @@ const workspaceDetails: Record<
   { label: string; title: string; subtitle: string; icon: ReactNode }
 > = {
   overview: {
-    label: 'Overview',
-    title: 'Playlist overview',
-    subtitle: 'Manage providers, refresh sources, and copy your player URLs.',
+    label: 'Home',
+    title: 'Home',
+    subtitle: '',
     icon: <IconHome />,
   },
   lineup: {
@@ -74,32 +80,53 @@ const workspaceDetails: Record<
   },
   catalogue: {
     label: 'Movies & series',
-    title: 'Catalogue',
-    subtitle:
-      'Choose which film and series categories your provider publishes to you.',
-    icon: <IconRows />,
+    title: 'Movies & series',
+    subtitle: 'Choose which film and series categories reach your player.',
+    icon: <IconFilm />,
   },
   events: {
     label: 'Live events',
-    title: 'Live event rules',
-    subtitle: 'Control daily event groups and preview localized event times.',
+    title: 'Live events',
+    subtitle:
+      'Choose which groups hold daily events and how their times are shown.',
     icon: <IconClock />,
   },
   epg: {
-    label: 'EPG mappings',
-    title: 'EPG mapping',
-    subtitle:
-      'Review guide coverage and resolve channels that need a manual match.',
+    label: 'Guide',
+    title: 'Guide',
+    subtitle: 'Give every channel its programme guide.',
     icon: <IconGuide />,
   },
-  updates: {
-    label: 'Updates',
-    title: 'Update history',
+  links: {
+    label: 'Player links',
+    title: 'Player links',
+    subtitle: 'The private links your player loads channels and guide from.',
+    icon: <IconLink />,
+  },
+  providers: {
+    label: 'Providers',
+    title: 'Providers',
     subtitle:
-      'Review automatic refreshes and restore a retained playlist snapshot.',
+      'Where channels and guide data come from, and how often they are checked.',
+    icon: <IconServer />,
+  },
+  updates: {
+    label: 'History',
+    title: 'History',
+    subtitle: 'What changed, and a way back to an earlier playlist.',
     icon: <IconHistory />,
   },
 };
+
+const plainWorkspaces: readonly WorkspaceView[] = [
+  'overview',
+  'catalogue',
+  'events',
+  'epg',
+  'links',
+  'providers',
+  'updates',
+];
 
 function routeFromHash(): { workspace: WorkspaceView; lineupView: LineupView } {
   const fragment = window.location.hash.replace(/^#\/?/, '');
@@ -110,16 +137,8 @@ function routeFromHash(): { workspace: WorkspaceView; lineupView: LineupView } {
       lineupView: tail === 'channels' ? 'channels' : 'order',
     };
   }
-  if (
-    head === 'overview' ||
-    head === 'catalogue' ||
-    head === 'events' ||
-    head === 'epg' ||
-    head === 'updates'
-  ) {
-    return { workspace: head, lineupView: 'order' };
-  }
-  return { workspace: 'overview', lineupView: 'order' };
+  const workspace = plainWorkspaces.find((candidate) => candidate === head);
+  return { workspace: workspace ?? 'overview', lineupView: 'order' };
 }
 
 function hashForRoute(
@@ -129,12 +148,15 @@ function hashForRoute(
   return workspace === 'lineup' ? `#/lineup/${lineupView}` : `#/${workspace}`;
 }
 
-const workspaceOrder: WorkspaceView[] = [
+const primaryNavigation: readonly WorkspaceView[] = [
   'overview',
   'lineup',
   'catalogue',
-  'events',
   'epg',
+];
+const secondaryNavigation: readonly WorkspaceView[] = [
+  'links',
+  'providers',
   'updates',
 ];
 
@@ -151,7 +173,8 @@ const lineupDetails: Record<
   channels: {
     label: 'Group & channel editor',
     title: 'Group & channel editor',
-    subtitle: 'Edit provider groups, custom categories, and channel details.',
+    subtitle:
+      'Rename groups and channels, and review what the provider changed.',
   },
 };
 
@@ -215,16 +238,15 @@ export function App({ authUsername, onLogout }: AppProps) {
   const [lineupView, setLineupView] = useState<LineupView>(
     initialRoute.lineupView,
   );
-  const [lineupMenuOpen, setLineupMenuOpen] = useState(
-    initialRoute.workspace === 'lineup',
-  );
+  // Pages draw their provider picker and their main action into the shell.
+  const [switcherSlot, setSwitcherSlot] = useState<HTMLElement | null>(null);
+  const [actionSlot, setActionSlot] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
     function onHashChange() {
       const route = routeFromHash();
       setWorkspace(route.workspace);
       setLineupView(route.lineupView);
-      if (route.workspace === 'lineup') setLineupMenuOpen(true);
     }
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
@@ -237,21 +259,20 @@ export function App({ authUsername, onLogout }: AppProps) {
   const [loading, setLoading] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    async function loadStatus() {
-      try {
-        const response = await fetch('/api/v1/system/status');
-        if (!response.ok) return;
-        const payload = (await response.json()) as SystemStatus;
-        if (active) setSystemStatus(payload);
-      } catch {
-        // Status polling is advisory; the workspaces surface real errors.
-      }
+  const loadStatus = useCallback(async () => {
+    try {
+      const response = await fetch('/api/v1/system/status');
+      if (!response.ok) return;
+      setSystemStatus((await response.json()) as SystemStatus);
+    } catch {
+      // Status polling is advisory; the workspaces surface real errors.
     }
+  }, []);
+
+  useEffect(() => {
     void loadStatus();
-    // A background tab still polls otherwise, and every open overview costs
-    // the server a pass over all channels each minute. Skip while hidden and
+    // A background tab still polls otherwise, and every open page costs the
+    // server a pass over all channels each minute. Skip while hidden and
     // catch up as soon as the tab is looked at again.
     const handle = window.setInterval(() => {
       if (document.visibilityState !== 'hidden') void loadStatus();
@@ -261,11 +282,10 @@ export function App({ authUsername, onLogout }: AppProps) {
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
-      active = false;
       window.clearInterval(handle);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [workspace]);
+  }, [workspace, loadStatus]);
 
   const reviewPendingTotal =
     systemStatus?.sources.reduce(
@@ -282,20 +302,97 @@ export function App({ authUsername, onLogout }: AppProps) {
     workspace === 'lineup'
       ? { ...workspaceDetails.lineup, ...lineupDetails[lineupView] }
       : workspaceDetails[workspace];
+  const inChannels = workspace === 'lineup' || workspace === 'events';
+
+  // On a phone the navigation is one scrolling row; keep the open page in it.
+  const currentLink = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    currentLink.current?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, [workspace]);
 
   function openWorkspace(nextWorkspace: WorkspaceView) {
     setWorkspace(nextWorkspace);
-    if (nextWorkspace !== 'lineup') setLineupMenuOpen(false);
     window.location.hash = hashForRoute(nextWorkspace, lineupView);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0 });
   }
 
   function openLineup(nextLineupView: LineupView) {
     setLineupView(nextLineupView);
-    setLineupMenuOpen(true);
     setWorkspace('lineup');
     window.location.hash = hashForRoute('lineup', nextLineupView);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0 });
+  }
+
+  function navigate(destination: HomeDestination) {
+    if (destination === 'review') openLineup('channels');
+    else if (destination === 'guide') openWorkspace('epg');
+    else if (destination === 'history') openWorkspace('updates');
+    else openWorkspace(destination);
+  }
+
+  const channelPages = [
+    ...(Object.keys(lineupDetails) as LineupView[]).map((view) => ({
+      key: view,
+      label: lineupDetails[view].label,
+      current: workspace === 'lineup' && lineupView === view,
+      open: () => openLineup(view),
+    })),
+    {
+      key: 'events',
+      label: workspaceDetails.events.label,
+      current: workspace === 'events',
+      open: () => openWorkspace('events'),
+    },
+  ];
+
+  function navigationLink(item: WorkspaceView) {
+    const details = workspaceDetails[item];
+    const current = item === 'lineup' ? inChannels : workspace === item;
+    const pending =
+      item === 'lineup'
+        ? { count: reviewPendingTotal, what: 'provider changes to review' }
+        : item === 'epg'
+          ? { count: epgPendingTotal, what: 'channels without guide data' }
+          : { count: 0, what: '' };
+    return (
+      <div className="nav-section" key={item}>
+        <button
+          className={`nav-link ${current ? 'active' : ''}`}
+          type="button"
+          ref={current ? currentLink : undefined}
+          aria-current={current && item !== 'lineup' ? 'page' : undefined}
+          onClick={() =>
+            item === 'lineup' ? openLineup(lineupView) : openWorkspace(item)
+          }
+        >
+          <span aria-hidden="true">{details.icon}</span>
+          {details.label}
+          {pending.count > 0 ? (
+            <span
+              className="nav-badge"
+              title={`${pending.count.toLocaleString()} ${pending.what}`}
+            >
+              {pending.count.toLocaleString()}
+            </span>
+          ) : null}
+        </button>
+        {item === 'lineup' && inChannels ? (
+          <div className="nav-submenu">
+            {channelPages.map((page) => (
+              <button
+                className={`nav-submenu-link ${page.current ? 'active' : ''}`}
+                type="button"
+                aria-current={page.current ? 'page' : undefined}
+                onClick={page.open}
+                key={page.key}
+              >
+                {page.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   async function preview(event: FormEvent) {
@@ -336,109 +433,25 @@ export function App({ authUsername, onLogout }: AppProps) {
         <button
           className="brand"
           type="button"
-          aria-label="Open IPTVMaster overview"
+          aria-label="Open IPTVMaster home"
           onClick={() => openWorkspace('overview')}
         >
           <span className="brand-mark">
-            <IconPlay width={18} height={18} />
+            <IconPlay width={14} height={14} />
           </span>
-          <span>
-            <strong>IPTVMaster</strong>
-            <small>Local playlist control</small>
-          </span>
+          <strong>IPTVMaster</strong>
         </button>
 
+        <div className="provider-slot" ref={setSwitcherSlot} />
+
         <nav aria-label="Main navigation">
-          {workspaceOrder.map((item) => {
-            const details = workspaceDetails[item];
-            if (item === 'lineup') {
-              return (
-                <div
-                  className={`nav-section ${lineupMenuOpen ? 'open' : ''}`}
-                  key={item}
-                >
-                  <button
-                    className={`nav-link ${workspace === item ? 'active' : ''}`}
-                    type="button"
-                    aria-expanded={lineupMenuOpen}
-                    onClick={() => {
-                      if (workspace !== 'lineup') {
-                        openLineup(lineupView);
-                      } else {
-                        setLineupMenuOpen((current) => !current);
-                      }
-                    }}
-                  >
-                    <span aria-hidden="true">{details.icon}</span>
-                    {details.label}
-                    {reviewPendingTotal > 0 ? (
-                      <span
-                        className="nav-badge"
-                        title={`${reviewPendingTotal} provider changes to review`}
-                      >
-                        {reviewPendingTotal}
-                      </span>
-                    ) : null}
-                    <span className="nav-chevron" aria-hidden="true">
-                      {lineupMenuOpen ? <IconChevronUp /> : <IconChevronDown />}
-                    </span>
-                  </button>
-                  <div className="nav-submenu" hidden={!lineupMenuOpen}>
-                    {(Object.keys(lineupDetails) as LineupView[]).map(
-                      (subpage) => (
-                        <button
-                          className={`nav-submenu-link ${
-                            workspace === 'lineup' && lineupView === subpage
-                              ? 'active'
-                              : ''
-                          }`}
-                          type="button"
-                          aria-current={
-                            workspace === 'lineup' && lineupView === subpage
-                              ? 'page'
-                              : undefined
-                          }
-                          onClick={() => openLineup(subpage)}
-                          key={subpage}
-                        >
-                          <span aria-hidden="true">•</span>
-                          {lineupDetails[subpage].label}
-                        </button>
-                      ),
-                    )}
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <button
-                className={`nav-link ${workspace === item ? 'active' : ''}`}
-                type="button"
-                aria-current={workspace === item ? 'page' : undefined}
-                onClick={() => openWorkspace(item)}
-                key={item}
-              >
-                <span aria-hidden="true">{details.icon}</span>
-                {details.label}
-                {item === 'epg' && epgPendingTotal > 0 ? (
-                  <span
-                    className="nav-badge"
-                    title={`${epgPendingTotal} channels without EPG`}
-                  >
-                    {epgPendingTotal}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+          {primaryNavigation.map(navigationLink)}
+          <div className="nav-divider" />
+          {secondaryNavigation.map(navigationLink)}
         </nav>
 
-        <div className="status-card">
-          <span className="status-dot" />
-          <div>
-            <strong>{authUsername ?? 'Foundation running'}</strong>
-            <small>{authUsername ? 'Local administrator' : 'Local mode'}</small>
-          </div>
+        <div className="sidebar-foot">
+          <span>{authUsername ?? 'Local mode'}</span>
           {onLogout ? (
             <button className="sign-out" type="button" onClick={onLogout}>
               Sign out
@@ -448,23 +461,25 @@ export function App({ authUsername, onLogout }: AppProps) {
       </aside>
 
       <main id="top" className={`workspace workspace-${workspace}`}>
-        <header>
+        <header className="page-header">
           <div>
             <h1>{activeWorkspace.title}</h1>
-            <p className="subtitle">{activeWorkspace.subtitle}</p>
+            {activeWorkspace.subtitle ? (
+              <p className="subtitle">{activeWorkspace.subtitle}</p>
+            ) : null}
           </div>
-          <span className="environment">LOCAL</span>
+          <div className="page-actions" ref={setActionSlot} />
         </header>
 
-        {workspace === 'overview' ? (
-          <OverviewStatus
-            status={systemStatus}
-            onOpenLineup={() => openLineup('channels')}
-            onOpenEpg={() => openWorkspace('epg')}
-          />
-        ) : null}
-
-        <SourceSetup workspace={workspace} lineupView={lineupView} />
+        <SourceSetup
+          workspace={workspace}
+          lineupView={lineupView}
+          status={systemStatus}
+          switcherSlot={switcherSlot}
+          actionSlot={actionSlot}
+          onNavigate={navigate}
+          onRefreshStatus={loadStatus}
+        />
 
         {workspace === 'events' ? (
           <section className="content-grid single-panel-grid">

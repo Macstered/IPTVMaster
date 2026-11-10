@@ -38,9 +38,10 @@ speed as a prediction for all real provider updates.
 
 ## Moving an existing source to native Xtream
 
-Under **Manage connection → Import method**, choose **Native Xtream API (parent
-series)** if the provider offers a compatible API. Leave the URL blank to reuse
-the saved login. The saved URL must contain usable Xtream credentials.
+On **Providers**, open **More settings** on the provider and set **How the
+playlist is read** to **Through the Xtream API (series as shows)** if the
+provider offers a compatible API. The saved playlist link must contain usable
+Xtream credentials.
 
 Saving the change queues a preflight behind active work. It fetches the proposed
 format, checks selected catalogue category names, and applies the live-count

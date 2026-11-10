@@ -5,6 +5,7 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import {
   channelLogoSource,
@@ -21,6 +22,9 @@ interface EpgSource {
 interface EpgWorkspaceProps {
   source: EpgSource | undefined;
   active: boolean;
+  /** Where the page draws its main action: beside the page title. */
+  actionSlot: HTMLElement | null;
+  onOpenProviders: () => void;
   onActivityChanged?: () => void;
 }
 
@@ -162,6 +166,7 @@ function EpgChannelPicker({
   return (
     <div className="epg-picker" ref={containerRef}>
       <input
+        className="ui-input"
         role="combobox"
         aria-expanded={open}
         aria-autocomplete="list"
@@ -221,6 +226,8 @@ function EpgChannelPicker({
 export function EpgWorkspace({
   source,
   active,
+  actionSlot,
+  onOpenProviders,
   onActivityChanged,
 }: EpgWorkspaceProps) {
   const [review, setReview] = useState<EpgMappingReview | null>(null);
@@ -231,12 +238,13 @@ export function EpgWorkspace({
   const [changingMatched, setChangingMatched] = useState<string | null>(null);
 
   const sourceId = source?.id ?? null;
-  const serverView = filter === 'excluded' ? 'excluded' : 'mappable';
+  // The server filters before it limits, so each view finds its own rows.
+  const serverView = filter === 'all' ? 'mappable' : filter;
 
   const load = useCallback(
     async (
       id: string,
-      view: 'mappable' | 'excluded',
+      view: 'mappable' | Exclude<EpgFilter, 'all'>,
       searchValue: string,
     ): Promise<void> => {
       const parameters = new URLSearchParams({ limit: '200', view });
@@ -350,17 +358,7 @@ export function EpgWorkspace({
   const attentionCount = review
     ? review.missingCount + review.ambiguousCount
     : 0;
-  const visible =
-    filter === 'attention'
-      ? mappings.filter(
-          (mapping) =>
-            mapping.status === 'missing' || mapping.status === 'ambiguous',
-        )
-      : filter === 'matched'
-        ? mappings.filter((mapping) => mapping.status === 'matched')
-        : filter === 'manual'
-          ? mappings.filter((mapping) => mapping.manuallyLocked)
-          : mappings;
+  const visible = mappings;
   const separatorSuggestions = mappings.filter(
     (mapping) =>
       (mapping.status === 'missing' || mapping.status === 'ambiguous') &&
@@ -369,69 +367,100 @@ export function EpgWorkspace({
   const busy = savingBulk || savingChannel !== null;
 
   const filterChips: Array<{ key: EpgFilter; label: string }> = [
-    { key: 'attention', label: `Needs attention (${attentionCount})` },
-    { key: 'matched', label: `Matched (${review?.matchedCount ?? 0})` },
-    { key: 'manual', label: `Manual (${review?.manualCount ?? 0})` },
-    { key: 'excluded', label: `Excluded (${review?.excludedCount ?? 0})` },
-    { key: 'all', label: 'All mappable' },
+    {
+      key: 'attention',
+      label: `Needs attention ${attentionCount.toLocaleString()}`,
+    },
+    {
+      key: 'matched',
+      label: `Matched ${(review?.matchedCount ?? 0).toLocaleString()}`,
+    },
+    {
+      key: 'manual',
+      label: `Set by you ${(review?.manualCount ?? 0).toLocaleString()}`,
+    },
+    {
+      key: 'excluded',
+      label: `No guide needed ${(review?.excludedCount ?? 0).toLocaleString()}`,
+    },
+    { key: 'all', label: 'All' },
   ];
+  const coverage =
+    review && review.total > 0 ? review.matchedCount / review.total : 0;
 
   return (
-    <section className="epg-mapping-review" id="epg-mappings">
-      <div className="subsection-heading epg-mapping-heading">
-        <div>
-          <small>EPG MAPPINGS</small>
-          <strong>Pair playlist channels with XMLTV</strong>
-        </div>
-        {review ? (
-          <span className="channel-count">
+    <div className="ui-page guide-page" id="epg-mappings">
+      {actionSlot
+        ? createPortal(
+            <button
+              className="ui-button"
+              type="button"
+              onClick={onOpenProviders}
+            >
+              Guide sources
+            </button>,
+            actionSlot,
+          )
+        : null}
+
+      {review ? (
+        <div className="ui-status ui-soft">
+          <div className="ui-meter guide-meter">
+            <div style={{ width: `${Math.round(coverage * 100)}%` }} />
+          </div>
+          <span>
             {review.matchedCount.toLocaleString()} of{' '}
-            {review.total.toLocaleString()} mappable matched
+            {review.total.toLocaleString()} channels have guide data
             {review.excludedCount > 0
-              ? ` · ${review.excludedCount.toLocaleString()} excluded`
+              ? `, ${review.excludedCount.toLocaleString()} more need none`
               : ''}
           </span>
-        ) : null}
-      </div>
-      <div className="epg-chips" role="tablist" aria-label="EPG mapping filter">
-        {filterChips.map((chip) => (
-          <button
-            key={chip.key}
-            type="button"
-            role="tab"
-            aria-selected={filter === chip.key}
-            className={`epg-chip ${filter === chip.key ? 'active' : ''}`}
-            onClick={() => setFilter(chip.key)}
-          >
-            {chip.label}
-          </button>
-        ))}
-      </div>
-      <div className="channel-search epg-live-search">
+        </div>
+      ) : null}
+
+      <div className="guide-filters">
+        <div className="ui-chips" role="group" aria-label="Which channels">
+          {filterChips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              className="ui-chip"
+              aria-pressed={filter === chip.key}
+              onClick={() => setFilter(chip.key)}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
         <input
-          aria-label="Filter playlist channels"
-          placeholder="Filter by channel, group, TVG ID, or guide name"
+          className="ui-input"
+          type="search"
+          aria-label="Find a channel"
+          placeholder="Find a channel, group or guide ID"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
-        <small>{visible.length.toLocaleString()} shown</small>
       </div>
+
       {filter !== 'excluded' && separatorSuggestions.length > 0 ? (
-        <div className="epg-suggestion">
-          <p>
-            {separatorSuggestions.length === 1
-              ? '1 unmatched channel looks like a decorative separator'
-              : `${separatorSuggestions.length} unmatched channels look like decorative separators`}
-            {': '}
-            {separatorSuggestions
-              .slice(0, 6)
-              .map((mapping) => mapping.channelName)
-              .join(', ')}
-            {separatorSuggestions.length > 6 ? ', …' : ''}. Separators never
-            carry guide data.
-          </p>
+        <div className="ui-card ui-row guide-suggestion">
+          <div className="ui-grow">
+            <div className="ui-title">
+              {separatorSuggestions.length === 1
+                ? '1 of these looks like a separator'
+                : `${separatorSuggestions.length.toLocaleString()} of these look like separators`}
+            </div>
+            <div>
+              Names like{' '}
+              {separatorSuggestions
+                .slice(0, 3)
+                .map((mapping) => mapping.channelName)
+                .join(', ')}{' '}
+              never carry guide data.
+            </div>
+          </div>
           <button
-            className="secondary-button compact"
+            className="ui-button primary"
             type="button"
             disabled={busy}
             onClick={() =>
@@ -442,180 +471,193 @@ export function EpgWorkspace({
             }
           >
             {savingBulk
-              ? 'Excluding…'
-              : `Exclude ${separatorSuggestions.length === 1 ? 'it' : `all ${separatorSuggestions.length}`} from EPG`}
+              ? 'Marking…'
+              : separatorSuggestions.length === 1
+                ? 'Mark it as no guide needed'
+                : `Mark all ${separatorSuggestions.length.toLocaleString()} as no guide needed`}
           </button>
         </div>
       ) : null}
-      <div className="epg-mapping-list" aria-live="polite">
-        {visible.map((mapping) => {
-          const isSaving = savingChannel === mapping.channelId;
-          const isMatched = mapping.status === 'matched';
-          const isChanging = changingMatched === mapping.channelId;
-          return (
-            <article
-              className={`epg-mapping-row ${isMatched && !isChanging ? 'compact' : ''}`}
-              key={mapping.channelId}
-            >
-              <ChannelLogo
-                src={channelLogoSource(
-                  sourceId ?? undefined,
-                  mapping.channelId,
-                  Boolean(mapping.logoUrl),
-                )}
-                name={mapping.channelName}
-              />
-              <div className="epg-playlist-channel">
-                <strong>{mapping.channelName}</strong>
-                <span>
-                  {mapping.providerGroup || '(Ungrouped)'}
-                  {mapping.tvgId ? ` · ${mapping.tvgId}` : ''}
+
+      <div className="ui-card">
+        <div className="guide-table" aria-live="polite">
+          <div className="guide-row guide-head">
+            <span />
+            <span>Channel</span>
+            <span>Group</span>
+            <span>Guide channel</span>
+            <span />
+          </div>
+          {visible.map((mapping) => {
+            const isSaving = savingChannel === mapping.channelId;
+            const isMatched = mapping.status === 'matched';
+            const isExcluded = mapping.status === 'excluded';
+            const isChanging = changingMatched === mapping.channelId;
+            const settled = isExcluded || (isMatched && !isChanging);
+            return (
+              <div className="guide-row" key={mapping.channelId}>
+                <ChannelLogo
+                  src={channelLogoSource(
+                    sourceId ?? undefined,
+                    mapping.channelId,
+                    Boolean(mapping.logoUrl),
+                  )}
+                  name={mapping.channelName}
+                />
+                <span className="ui-clip ui-strong" title={mapping.tvgId}>
+                  {mapping.channelName}
                 </span>
-              </div>
-              <span className={`epg-mapping-status ${mapping.status}`}>
-                {mapping.manuallyLocked ? 'manual lock' : mapping.status}
-              </span>
-              {mapping.status === 'excluded' ? (
-                <div className="epg-mapping-control">
-                  <button
-                    className="secondary-button compact"
-                    type="button"
-                    disabled={busy}
-                    onClick={() =>
-                      void setExclusion([mapping.channelId], false)
-                    }
-                  >
-                    Re-include in EPG
-                  </button>
-                </div>
-              ) : isMatched && !isChanging ? (
-                <div className="epg-mapping-control epg-matched-control">
-                  <small className="epg-mapping-note matched">
-                    {mapping.epgDisplayName} · {mapping.epgChannelId}
-                    {mapping.epgSourceName ? ` · ${mapping.epgSourceName}` : ''}
-                  </small>
-                  <button
-                    className="secondary-button compact"
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setChangingMatched(mapping.channelId)}
-                  >
-                    Change
-                  </button>
-                </div>
-              ) : (
-                <div className="epg-mapping-control epg-open-control">
-                  {mapping.candidates && mapping.candidates.length > 0 ? (
-                    <div className="epg-candidates">
-                      {mapping.candidates.map((candidate) => (
-                        <button
-                          key={candidate.id}
-                          type="button"
-                          className="epg-candidate"
-                          disabled={busy}
-                          title={`Lock ${mapping.channelName} to ${candidate.displayName}`}
-                          onClick={() =>
+                <span className="ui-clip ui-muted">
+                  {mapping.providerGroup || '(Ungrouped)'}
+                </span>
+                <div className="guide-match">
+                  {isExcluded ? (
+                    <span className="ui-muted">No guide needed</span>
+                  ) : settled ? (
+                    <span className="ui-clip">
+                      {mapping.epgDisplayName}
+                      <span className="ui-muted">
+                        {' '}
+                        · {mapping.epgChannelId}
+                        {mapping.epgSourceName
+                          ? ` · ${mapping.epgSourceName}`
+                          : ''}
+                        {mapping.manuallyLocked ? ' · set by you' : ''}
+                      </span>
+                    </span>
+                  ) : (
+                    <>
+                      {mapping.candidates && mapping.candidates.length > 0 ? (
+                        <div className="guide-candidates">
+                          <span className="ui-warn-text">
+                            {mapping.candidates.length} possible
+                          </span>
+                          {mapping.candidates.map((candidate) => (
+                            <button
+                              key={candidate.id}
+                              type="button"
+                              className="ui-button small"
+                              disabled={busy}
+                              title={`Use ${candidate.displayName}${
+                                candidate.epgSourceName
+                                  ? ` from ${candidate.epgSourceName}`
+                                  : ''
+                              } for ${mapping.channelName}`}
+                              onClick={() =>
+                                void saveMapping(
+                                  mapping.channelId,
+                                  candidate.id,
+                                  candidate.epgSourceId,
+                                )
+                              }
+                            >
+                              {candidate.id}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      {sourceId ? (
+                        <EpgChannelPicker
+                          sourceId={sourceId}
+                          disabled={busy && !isSaving}
+                          placeholder={
+                            isSaving ? 'Saving…' : 'Search all guides'
+                          }
+                          onPick={(channel) =>
                             void saveMapping(
                               mapping.channelId,
-                              candidate.id,
-                              candidate.epgSourceId,
+                              channel.id,
+                              channel.epgSourceId,
                             )
                           }
-                        >
-                          <strong>{candidate.displayName}</strong>
-                          <small>
-                            {candidate.id}
-                            {candidate.epgSourceName
-                              ? ` · ${candidate.epgSourceName}`
-                              : ''}
-                          </small>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {sourceId ? (
-                    <EpgChannelPicker
-                      sourceId={sourceId}
-                      disabled={busy && !isSaving}
-                      placeholder={isSaving ? 'Saving…' : 'Search XMLTV guide…'}
-                      onPick={(channel) =>
-                        void saveMapping(
-                          mapping.channelId,
-                          channel.id,
-                          channel.epgSourceId,
-                        )
-                      }
-                    />
-                  ) : null}
-                  {mapping.manuallyLocked || isChanging ? (
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        mapping.manuallyLocked
-                          ? void unlockMapping(mapping.channelId)
-                          : setChangingMatched(null)
-                      }
-                    >
-                      {mapping.manuallyLocked ? 'Use automatic' : 'Cancel'}
-                    </button>
-                  ) : null}
-                  {!isMatched ? (
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      title="Exclude this channel from EPG matching and coverage counts"
-                      disabled={busy}
-                      onClick={() =>
-                        void setExclusion([mapping.channelId], true)
-                      }
-                    >
-                      No EPG
-                    </button>
-                  ) : null}
+                        />
+                      ) : null}
+                      {mapping.eventLike ? (
+                        <small className="ui-muted">
+                          Looks like a live event. Mark its group as live events
+                          under Channels instead of matching a guide.
+                        </small>
+                      ) : null}
+                    </>
+                  )}
                 </div>
-              )}
-              {mapping.status === 'excluded' ? (
-                <small className="epg-mapping-note">
-                  Excluded from EPG matching and coverage counts.
-                </small>
-              ) : mapping.eventLike ? (
-                <small className="epg-mapping-note">
-                  Looks like a live-event stream. Mark its provider group as an
-                  event group in the Live events workspace instead of mapping
-                  guide data.
-                </small>
-              ) : mapping.status === 'ambiguous' ? (
-                <small className="epg-mapping-note">
-                  Multiple guide channels share the same normalized identity.
-                  Pick the correct one above.
-                </small>
-              ) : null}
-            </article>
-          );
-        })}
-        {review && visible.length === 0 ? (
-          <p className="empty-groups">
-            {filter === 'excluded'
-              ? 'No channels are excluded from EPG matching.'
-              : filter === 'attention'
-                ? review.total === 0
-                  ? 'Import the playlist and XMLTV guide from Overview first.'
-                  : 'Every mappable channel has guide data. Nothing needs attention.'
-                : 'No channels match this filter or search.'}
-          </p>
-        ) : null}
-        {review === null ? (
-          <p className="empty-groups">Loading EPG coverage…</p>
-        ) : null}
+                <div className="guide-actions">
+                  {isExcluded ? (
+                    <button
+                      className="ui-button quiet"
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void setExclusion([mapping.channelId], false)
+                      }
+                    >
+                      Needs a guide
+                    </button>
+                  ) : settled ? (
+                    <button
+                      className="ui-button quiet"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setChangingMatched(mapping.channelId)}
+                    >
+                      Change
+                    </button>
+                  ) : (
+                    <>
+                      {mapping.manuallyLocked || isChanging ? (
+                        <button
+                          className="ui-button quiet"
+                          type="button"
+                          disabled={busy}
+                          onClick={() =>
+                            mapping.manuallyLocked
+                              ? void unlockMapping(mapping.channelId)
+                              : setChangingMatched(null)
+                          }
+                        >
+                          {mapping.manuallyLocked ? 'Use automatic' : 'Cancel'}
+                        </button>
+                      ) : null}
+                      {!isMatched ? (
+                        <button
+                          className="ui-button quiet"
+                          type="button"
+                          title="Leave this channel out of guide matching and the coverage count"
+                          disabled={busy}
+                          onClick={() =>
+                            void setExclusion([mapping.channelId], true)
+                          }
+                        >
+                          No guide needed
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {review && visible.length === 0 ? (
+            <div className="ui-row ui-soft">
+              {filter === 'excluded'
+                ? 'No channels are marked as needing no guide.'
+                : filter === 'attention'
+                  ? review.total === 0
+                    ? 'Refresh the playlist and the guide on the Providers page first.'
+                    : 'Every channel has guide data. Nothing needs attention.'
+                  : 'No channels match this filter or search.'}
+            </div>
+          ) : null}
+          {review === null ? (
+            <div className="ui-row ui-soft">Loading…</div>
+          ) : null}
+          {review?.truncated ? (
+            <div className="ui-row ui-muted">
+              Showing the first 200 channels. Search to narrow the list.
+            </div>
+          ) : null}
+        </div>
       </div>
-      {review?.truncated ? (
-        <small className="channel-limit-note">
-          Showing the first 200 channels for this filter. Narrow the search to
-          see the rest.
-        </small>
-      ) : null}
-    </section>
+    </div>
   );
 }

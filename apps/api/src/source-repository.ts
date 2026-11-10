@@ -324,7 +324,24 @@ export interface ReconciliationReview {
 
 export type EpgMappingStatus = 'matched' | 'missing' | 'ambiguous' | 'excluded';
 
-export type EpgMappingReviewView = 'mappable' | 'excluded';
+export type EpgMappingReviewView =
+  'mappable' | 'attention' | 'matched' | 'manual' | 'excluded';
+
+/**
+ * Whether a mapping belongs in a filtered view of the guide review. Applied
+ * before the page limit, so a filter still finds its rows in a long list.
+ */
+export function inEpgReviewView(
+  mapping: { status: string; manuallyLocked: boolean },
+  view: EpgMappingReviewView,
+): boolean {
+  if (view === 'attention') {
+    return mapping.status === 'missing' || mapping.status === 'ambiguous';
+  }
+  if (view === 'matched') return mapping.status === 'matched';
+  if (view === 'manual') return mapping.manuallyLocked;
+  return true;
+}
 
 export interface EpgGuideChannelSummary {
   id: string;
@@ -631,6 +648,10 @@ export interface SourceRepository {
     epgUrl: string,
   ): Promise<EpgSourceSummary>;
   removeEpgSource(epgSourceId: string): Promise<boolean>;
+  updateCustomEpgSourceUrl?(
+    epgSourceId: string,
+    epgUrl: string,
+  ): Promise<boolean>;
   getEpgSourceRefreshTarget(
     epgSourceId: string,
   ): Promise<EpgSourceRefreshTarget | null>;
@@ -4065,16 +4086,17 @@ export class PostgresSourceRepository implements SourceRepository {
     const visible = mappings
       .filter(
         (mapping) =>
-          !normalizedSearch ||
-          [
-            mapping.channelName,
-            mapping.providerGroup,
-            mapping.tvgId ?? '',
-            mapping.epgChannelId ?? '',
-            mapping.epgDisplayName ?? '',
-          ].some((value) =>
-            value.toLocaleLowerCase('en-US').includes(normalizedSearch),
-          ),
+          inEpgReviewView(mapping, view) &&
+          (!normalizedSearch ||
+            [
+              mapping.channelName,
+              mapping.providerGroup,
+              mapping.tvgId ?? '',
+              mapping.epgChannelId ?? '',
+              mapping.epgDisplayName ?? '',
+            ].some((value) =>
+              value.toLocaleLowerCase('en-US').includes(normalizedSearch),
+            )),
       )
       .sort(
         (left, right) =>
@@ -4297,6 +4319,22 @@ export class PostgresSourceRepository implements SourceRepository {
     } finally {
       client.release();
     }
+  }
+
+  async updateCustomEpgSourceUrl(
+    epgSourceId: string,
+    epgUrl: string,
+  ): Promise<boolean> {
+    const result = await this.#pool.query(
+      `UPDATE secret_value
+          SET encrypted_value = $2
+        WHERE id = (
+          SELECT credential_ref FROM epg_source
+           WHERE id = $1 AND kind = 'custom'
+        )`,
+      [epgSourceId, encryptSecret(JSON.stringify({ epgUrl }), this.#masterKey)],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getEpgSourceRefreshTarget(

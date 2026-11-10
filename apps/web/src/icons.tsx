@@ -144,3 +144,31 @@ export function IconEyeOff(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+export function IconLink(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
+      <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
+    </Icon>
+  );
+}
+
+export function IconServer(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="4" width="18" height="7" rx="1" />
+      <rect x="3" y="13" width="18" height="7" rx="1" />
+      <path d="M7 7.5h.01M7 16.5h.01" />
+    </Icon>
+  );
+}
+
+export function IconFilm(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="5" width="18" height="14" rx="1" />
+      <path d="m10 9 5 3-5 3z" />
+    </Icon>
+  );
+}
