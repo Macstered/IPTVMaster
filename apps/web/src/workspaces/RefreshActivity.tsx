@@ -104,29 +104,25 @@ export function RefreshActivity({
     );
   if (!jobs.length && !unavailable) return null;
   return (
-    <section className="refresh-activity" aria-label="Refresh progress">
-      <h3>Refresh progress</h3>
-      <p className="secret-note">
-        Elapsed time includes waiting and downloading. Saving counts are not an
-        estimate of time remaining.
-      </p>
+    <section className="ui-section" aria-label="Refresh progress">
+      <h2>Refresh progress</h2>
       {unavailable ? (
-        <p role="status">
+        <p className="ui-note" role="status">
           Progress is temporarily unavailable. The last known state is shown
           below.
         </p>
       ) : null}
-      <ul>
+      <div className="ui-card">
         {jobs.map((job) => {
           const progress = job.progress;
           const label =
             job.status === 'rejected'
-              ? 'Rejected — previous data kept'
+              ? 'Rejected, previous data kept'
               : job.status === 'failed'
-                ? 'Failed — previous data kept'
+                ? 'Failed, previous data kept'
                 : job.status === 'succeeded'
                   ? job.unchanged
-                    ? 'Completed — no changes'
+                    ? 'Completed, no changes'
                     : 'Completed'
                   : (stageLabels[progress?.stage ?? ''] ?? 'Updating');
           const timings = Object.entries(progress?.stageDurationsMs ?? {})
@@ -136,27 +132,41 @@ export function RefreshActivity({
             )
             .join(' · ');
           return (
-            <li key={`${job.kind}:${job.sourceId}`}>
-              <strong>
-                {names.get(job.sourceId) ?? 'Custom guide'} · {job.kind}
-              </strong>
-              <span>
-                {label}
-                {progress ? ` · ${duration(progress.elapsedMs)}` : ''}
-              </span>
-              {progress?.total !== undefined &&
-              progress.processed !== undefined ? (
-                <small>
-                  {progress.processed.toLocaleString()} /{' '}
-                  {progress.total.toLocaleString()} entries saved
-                </small>
-              ) : null}
-              {timings ? <small>{timings}</small> : null}
-              {job.safeError ? <small>{job.safeError}</small> : null}
-            </li>
+            <div className="ui-row" key={`${job.kind}:${job.sourceId}`}>
+              <span
+                className={`ui-dot ${
+                  job.status === 'running'
+                    ? 'busy'
+                    : job.status === 'succeeded'
+                      ? 'ok'
+                      : 'warn'
+                }`}
+              />
+              <div className="ui-grow">
+                <div className="ui-strong">
+                  {names.get(job.sourceId) ?? 'Custom guide'} · {job.kind}
+                </div>
+                <div className="ui-soft">
+                  {label}
+                  {progress ? ` · ${duration(progress.elapsedMs)}` : ''}
+                  {progress?.total !== undefined &&
+                  progress.processed !== undefined
+                    ? ` · ${progress.processed.toLocaleString()} of ${progress.total.toLocaleString()} entries saved`
+                    : ''}
+                </div>
+                {timings ? <div className="ui-muted">{timings}</div> : null}
+                {job.safeError ? (
+                  <div className="ui-danger">{job.safeError}</div>
+                ) : null}
+              </div>
+            </div>
           );
         })}
-      </ul>
+      </div>
+      <p className="ui-note">
+        Elapsed time includes waiting and downloading. Saved counts are not an
+        estimate of the time left.
+      </p>
     </section>
   );
 }

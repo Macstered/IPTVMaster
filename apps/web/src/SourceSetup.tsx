@@ -1,7 +1,8 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { channelLogoSource, ChannelLogo } from './components/ChannelLogo.js';
-import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
+import { IconChevronDown, IconChevronUp, IconGrip } from './icons.js';
 import { showToast } from './toast.js';
 import { AutomationSettings } from './workspaces/AutomationSettings.js';
 import { RefreshActivity } from './workspaces/RefreshActivity.js';
@@ -9,14 +10,35 @@ import { CataloguePanel } from './workspaces/CataloguePanel.js';
 import { ChannelsWorkspace } from './workspaces/ChannelsWorkspace.js';
 import { EpgSourcesPanel } from './workspaces/EpgSourcesPanel.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
+import {
+  HomeWorkspace,
+  type HomeDestination,
+} from './workspaces/HomeWorkspace.js';
+import { PlayerLinksWorkspace } from './workspaces/PlayerLinksWorkspace.js';
+import { ProviderCard } from './workspaces/ProviderCard.js';
+import type { SystemStatus } from './workspaces/status.js';
 
 export type WorkspaceView =
-  'overview' | 'lineup' | 'catalogue' | 'events' | 'epg' | 'updates';
+  | 'overview'
+  | 'lineup'
+  | 'catalogue'
+  | 'events'
+  | 'epg'
+  | 'links'
+  | 'providers'
+  | 'updates';
 export type LineupView = 'order' | 'channels';
 
 interface SourceSetupProps {
   workspace: WorkspaceView;
   lineupView: LineupView;
+  status: SystemStatus | null;
+  /** Where the provider picker is drawn: the sidebar. */
+  switcherSlot: HTMLElement | null;
+  /** Where a page draws its main action: beside the page title. */
+  actionSlot: HTMLElement | null;
+  onNavigate: (destination: HomeDestination) => void;
+  onRefreshStatus: () => void;
 }
 
 interface Capabilities {
@@ -72,11 +94,6 @@ interface GroupSummary {
   sourceTimeZone: string;
   displayTimeZone: string;
   numericDateOrder: 'month-day' | 'day-month';
-}
-
-interface SourceImportScope {
-  importLive: boolean;
-  importCatalogue: boolean;
 }
 
 interface RemovedGroupSummary {
@@ -245,30 +262,6 @@ interface SourceHistory {
   activity: SourceActivityEvent[];
 }
 
-interface CreatedOutputProfile {
-  id: string;
-  name: string;
-  accessToken: string;
-  playlistPath: string;
-  epgPath: string;
-}
-
-interface ActiveOutputProfile {
-  id: string;
-  name: string;
-  sourceIds: string[];
-  mediaTypes: Array<'live' | 'vod' | 'series'>;
-  createdAt: string;
-  recoverable: boolean;
-  accessToken?: string;
-}
-
-const MEDIA_TYPE_LABELS: Record<'live' | 'vod' | 'series', string> = {
-  live: 'Live TV',
-  vod: 'Movies',
-  series: 'Series',
-};
-
 async function readJson<T>(response: Response): Promise<T> {
   const value: unknown = await response.json();
   if (!response.ok) {
@@ -286,8 +279,6 @@ async function readJson<T>(response: Response): Promise<T> {
 
 const BROWSER_TIME_ZONE =
   Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-
-const TRANSPORT_NOTICE_KEY = 'iptvmaster:transport-notice';
 
 const TIMEZONE_CHOICES: string[] =
   (
@@ -310,31 +301,29 @@ function formatEventTime(value: string | undefined, timeZone: string): string {
   }).format(new Date(value));
 }
 
-export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
+export function SourceSetup({
+  workspace,
+  lineupView,
+  status,
+  switcherSlot,
+  actionSlot,
+  onNavigate,
+  onRefreshStatus,
+}: SourceSetupProps) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [sources, setSources] = useState<SafeSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [showSourceForm, setShowSourceForm] = useState(false);
-  const [editingConnection, setEditingConnection] = useState<SafeSource | null>(
-    null,
-  );
   const [name, setName] = useState('Home provider');
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [newSourceType, setNewSourceType] = useState<'m3u' | 'xtream'>('m3u');
   const [xtreamServer, setXtreamServer] = useState('');
   const [xtreamUsername, setXtreamUsername] = useState('');
   const [xtreamPassword, setXtreamPassword] = useState('');
-  const [importScope, setImportScope] = useState<SourceImportScope>({
-    importLive: true,
-    importCatalogue: true,
-  });
   const [epgUrl, setEpgUrl] = useState('');
   const [providerTimezone, setProviderTimezone] = useState(BROWSER_TIME_ZONE);
   const [saving, setSaving] = useState(false);
   const [removingSourceId, setRemovingSourceId] = useState<string | null>(null);
-  const [confirmingRemoval, setConfirmingRemoval] = useState<string | null>(
-    null,
-  );
   const [inspectingId, setInspectingId] = useState<string | null>(null);
   const [importingEpgId, setImportingEpgId] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(
@@ -418,36 +407,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [restoringSnapshot, setRestoringSnapshot] = useState<string | null>(
     null,
   );
-  const [creatingOutput, setCreatingOutput] = useState(false);
-  const [outputSourceIds, setOutputSourceIds] = useState<string[]>([]);
-  const [outputName, setOutputName] = useState('My playlist');
-  const [outputMediaTypes, setOutputMediaTypes] = useState<
-    Array<'live' | 'vod' | 'series'>
-  >(['live']);
-  const [outputProfiles, setOutputProfiles] = useState<ActiveOutputProfile[]>(
-    [],
-  );
-  const [transportNoticeDismissed, setTransportNoticeDismissed] = useState(
-    () => {
-      try {
-        return localStorage.getItem(TRANSPORT_NOTICE_KEY) === 'dismissed';
-      } catch {
-        return false;
-      }
-    },
-  );
   const [collapsedSections, setCollapsedSections] = useState<
     Record<string, boolean>
   >({});
-
-  function dismissTransportNotice() {
-    setTransportNoticeDismissed(true);
-    try {
-      localStorage.setItem(TRANSPORT_NOTICE_KEY, 'dismissed');
-    } catch {
-      // Private browsing modes can refuse storage; the notice simply returns.
-    }
-  }
 
   async function loadGroups(sourceId: string) {
     const response = await fetch(`/api/v1/sources/${sourceId}/groups`);
@@ -549,14 +511,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     );
   }
 
-  async function loadOutputProfiles() {
-    const response = await fetch('/api/v1/output-profiles');
-    const payload = await readJson<{ profiles: ActiveOutputProfile[] }>(
-      response,
-    );
-    setOutputProfiles(payload.profiles);
-  }
-
   useEffect(() => {
     let active = true;
     async function load() {
@@ -574,10 +528,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           if (active) {
             setSources(payload.sources);
             const firstSource = payload.sources[0];
-            const initialLoads: Promise<void>[] = [loadOutputProfiles()];
+            const initialLoads: Promise<void>[] = [];
             if (firstSource) {
               setSelectedSourceId(firstSource.id);
-              setOutputSourceIds([firstSource.id]);
               initialLoads.push(
                 loadGroups(firstSource.id),
                 loadRemovedGroups(firstSource.id),
@@ -605,23 +558,13 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     };
   }, []);
 
-  // Revalidate page-owned data when a workspace becomes visible. Previously
-  // these requests only ran during the initial application bootstrap, so a
-  // route reached after an import or output-profile change could stay empty
-  // until the whole browser page was refreshed.
+  // Home and History show recent activity, which automatic refreshes add to
+  // while the page is open elsewhere.
   useEffect(() => {
-    if (capabilities?.sourcePersistence !== true) return;
-    if (workspace === 'overview') {
-      void loadOutputProfiles().catch((caught: unknown) =>
-        showToast(
-          'error',
-          caught instanceof Error
-            ? caught.message
-            : 'Could not refresh output URLs',
-        ),
-      );
-    }
-  }, [capabilities?.sourcePersistence, workspace]);
+    if (selectedSourceId === null) return;
+    if (workspace !== 'overview' && workspace !== 'updates') return;
+    void loadSourceHistory(selectedSourceId).catch(() => undefined);
+  }, [selectedSourceId, workspace]);
 
   useEffect(() => {
     if (workspace !== 'lineup' || selectedSourceId === null) return;
@@ -667,7 +610,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   }
 
   function clearSourceForm() {
-    setEditingConnection(null);
     setName('Home provider');
     setPlaylistUrl('');
     setEpgUrl('');
@@ -678,80 +620,8 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setShowSourceForm(false);
   }
 
-  async function beginConnectionEdit(source: SafeSource) {
-    setNewSourceType(source.sourceType);
-    setEditingConnection(source);
-    setShowSourceForm(false);
-    setName(source.name);
-    setPlaylistUrl('');
-    setEpgUrl('');
-    setImportScope({
-      importLive: source.importLive,
-      importCatalogue: source.importCatalogue,
-    });
-    await selectSource(source);
-  }
-
-  async function updateSourceConnection(
-    source: SafeSource,
-    options: { deriveEpgUrl?: boolean; clearEpgUrl?: boolean } = {},
-  ) {
-    setSaving(true);
-    try {
-      const response = await fetch(`/api/v1/sources/${source.id}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          ...(newSourceType !== source.sourceType
-            ? { sourceType: newSourceType }
-            : {}),
-          ...(playlistUrl.trim() ? { playlistUrl: playlistUrl.trim() } : {}),
-          ...(!options.deriveEpgUrl && !options.clearEpgUrl && epgUrl.trim()
-            ? { epgUrl: epgUrl.trim() }
-            : {}),
-          ...(options.deriveEpgUrl ? { deriveEpgUrl: true } : {}),
-          ...(options.clearEpgUrl ? { clearEpgUrl: true } : {}),
-          importLive: importScope.importLive,
-          importCatalogue: importScope.importCatalogue,
-          sourceTimezone: source.sourceTimezone,
-          displayTimezone: source.displayTimezone,
-        }),
-      });
-      const payload = await readJson<{ source: SafeSource }>(response);
-      setSources((current) =>
-        current.map((candidate) =>
-          candidate.id === source.id ? payload.source : candidate,
-        ),
-      );
-      if (options.deriveEpgUrl || epgUrl.trim()) {
-        await importEpg(payload.source);
-      }
-      clearSourceForm();
-      if (source.sourceType !== payload.source.sourceType) {
-        showToast(
-          'success',
-          'Import method checked and saved. Import the playlist to load it using the new method.',
-        );
-      }
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not update provider connection',
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function saveSource(event: FormEvent) {
     event.preventDefault();
-    if (editingConnection) {
-      await updateSourceConnection(editingConnection);
-      return;
-    }
     setSaving(true);
     try {
       const response = await fetch('/api/v1/sources', {
@@ -779,9 +649,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       const payload = await readJson<{ source: SafeSource }>(response);
       setSources((current) => [...current, payload.source]);
       clearSourceForm();
-      setOutputSourceIds((current) =>
-        current.length > 0 ? current : [payload.source.id],
-      );
+      onRefreshStatus();
       await selectSource(payload.source);
     } catch (caught) {
       showToast(
@@ -794,7 +662,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   }
 
   async function removeSource(source: SafeSource) {
-    setConfirmingRemoval(null);
     setRemovingSourceId(source.id);
     try {
       const response = await fetch(`/api/v1/sources/${source.id}`, {
@@ -808,10 +675,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       );
       showToast('success', `${source.name} removed`);
       setSources(remaining);
-      setOutputSourceIds((current) =>
-        current.filter((sourceId) => sourceId !== source.id),
-      );
-      await loadOutputProfiles();
+      onRefreshStatus();
       clearSourceForm();
       if (selectedSourceId === source.id) {
         const nextSource = remaining[0] ?? null;
@@ -827,7 +691,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       if (payload.revokedOutputProfiles > 0) {
         showToast(
           'success',
-          `${payload.revokedOutputProfiles} output URL${
+          `${payload.revokedOutputProfiles} player link${
             payload.revokedOutputProfiles === 1 ? ' was' : 's were'
           } revoked because it included this provider.`,
         );
@@ -862,6 +726,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         loadSourceHistory(source.id),
         loadEventReview(source.id),
       ]);
+      onRefreshStatus();
     } catch (caught) {
       showToast(
         'error',
@@ -888,6 +753,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         `Guide imported: ${payload.inspection.channelCount.toLocaleString()} EPG channels`,
       );
       await Promise.all([loadSourceHistory(source.id)]);
+      onRefreshStatus();
     } catch (caught) {
       showToast(
         'error',
@@ -1438,16 +1304,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }));
   }
 
-  function toggleOutputSource(sourceId: string) {
-    setOutputSourceIds((current) =>
-      current.includes(sourceId)
-        ? current.length === 1
-          ? current
-          : current.filter((id) => id !== sourceId)
-        : [...current, sourceId],
-    );
-  }
-
   function toggleChannelSelection(channelId: string) {
     setSelectedChannelIds((current) =>
       current.includes(channelId)
@@ -1588,57 +1444,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }
   }
 
-  async function createOutputProfile() {
-    if (outputSourceIds.length === 0) return;
-    setCreatingOutput(true);
-    try {
-      const response = await fetch('/api/v1/output-profiles', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          sourceIds: outputSourceIds,
-          name: outputName.trim() || 'My playlist',
-          mediaTypes: outputMediaTypes,
-        }),
-      });
-      await readJson<{ profile: CreatedOutputProfile }>(response);
-      showToast('success', 'Output URLs created');
-      await loadOutputProfiles();
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not create output URL',
-      );
-    } finally {
-      setCreatingOutput(false);
-    }
-  }
-
-  async function revokeOutputProfile(profileId: string) {
-    setCreatingOutput(true);
-    try {
-      const response = await fetch(`/api/v1/output-profiles/${profileId}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok) {
-        await readJson<unknown>(response);
-      }
-      showToast('success', 'Output URL revoked');
-      await loadOutputProfiles();
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not revoke output URL',
-      );
-    } finally {
-      setCreatingOutput(false);
-    }
-  }
-
   const normalizedFilter = groupFilter.trim().toLocaleLowerCase();
   const matchingGroups = groups.filter(
     (group) =>
@@ -1684,595 +1489,370 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     (group) => group.providerGroup === editingEventGroup,
   );
 
+  const sourcePersistence = capabilities?.sourcePersistence === true;
+  const providerBusy =
+    inspectingId !== null ||
+    importingEpgId !== null ||
+    removingSourceId !== null;
+  const snapshots = sourceHistory?.snapshots ?? [];
+  const activity = sourceHistory?.activity ?? [];
+
   return (
     <section
-      className={`panel source-panel source-workspace source-workspace-${workspace}`}
+      className={`source-workspace source-workspace-${workspace}`}
       id="source-setup"
     >
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">PRIVATE SOURCE</p>
-          <h2>Provider connection</h2>
-        </div>
-        <span
-          className={`pill ${capabilities?.sourcePersistence ? 'ready' : ''}`}
-        >
-          {capabilities === null
-            ? 'Checking…'
-            : capabilities.sourcePersistence
-              ? 'Encrypted storage ready'
-              : 'Preview mode'}
-        </span>
-      </div>
-
-      {workspace === 'overview' &&
-      capabilities &&
-      capabilities.secureTransport === false &&
-      !transportNoticeDismissed ? (
-        <div className="transport-notice" role="status">
-          <div>
-            <strong>Running over plain HTTP</strong>
-            <p>
-              This is the normal setup for a trusted home network. Sign-in,
-              provider URLs, and output addresses are readable to anything else
-              on the network, so if that matters to you, docs/HTTPS.md explains
-              the optional TLS deployment.
-            </p>
-          </div>
-          <button
-            className="secondary-button compact"
-            type="button"
-            onClick={dismissTransportNotice}
-          >
-            Got it
-          </button>
-        </div>
-      ) : null}
+      {switcherSlot && primarySource
+        ? createPortal(
+            <label className="provider-switcher">
+              <span>Provider</span>
+              {sources.length > 1 ? (
+                <select
+                  value={primarySource.id}
+                  onChange={(event) => {
+                    const nextSource = sources.find(
+                      (source) => source.id === event.target.value,
+                    );
+                    if (nextSource) void selectSource(nextSource);
+                  }}
+                >
+                  {sources.map((source) => (
+                    <option value={source.id} key={source.id}>
+                      {source.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <strong>{primarySource.name}</strong>
+              )}
+            </label>,
+            switcherSlot,
+          )
+        : null}
 
       {capabilities && !capabilities.sourcePersistence ? (
-        <p className="panel-copy">
-          Start the Docker Compose stack with a database and master key to
-          enable encrypted provider setup. Event-time preview remains available
-          below.
+        <p className="ui-note">
+          Start the Docker Compose stack with a database and master key to add
+          providers. The event-time preview under Channels, Live events works
+          without them.
         </p>
       ) : null}
 
-      {capabilities?.sourcePersistence &&
-      (sources.length === 0 || showSourceForm || editingConnection !== null) ? (
-        <form className="source-form" onSubmit={saveSource}>
-          <div>
-            <label htmlFor="source-name">Source name</label>
-            <input
-              id="source-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              required
-            />
-          </div>
-          {editingConnection ? (
-            <div>
-              <label htmlFor="source-import-method">Import method</label>
-              <select
-                id="source-import-method"
-                value={newSourceType}
-                disabled={saving}
-                onChange={(event) =>
-                  setNewSourceType(event.target.value as 'm3u' | 'xtream')
-                }
-              >
-                <option value="m3u">M3U playlist</option>
-                <option value="xtream">
-                  Native Xtream API (parent series)
-                </option>
-              </select>
-              <p className="secret-note">
-                Native Xtream avoids importing every episode as a catalogue row.
-                Changing methods checks the provider API and selected categories
-                first; this can take a few minutes or wait for an active update.
-                Your source, edits and player links are kept. No change is saved
-                if the check fails. Leave the URL blank to use your existing
-                credentials.
-              </p>
-            </div>
-          ) : (
-            <div className="source-type-choice">
-              <span className="source-type-label">How to connect</span>
-              <div className="epg-chips">
+      <HomeWorkspace
+        active={workspace === 'overview' && sourcePersistence}
+        status={status}
+        sources={sources}
+        activity={activity}
+        actionSlot={actionSlot}
+        onNavigate={onNavigate}
+        onRefreshStatus={onRefreshStatus}
+      />
+
+      {workspace === 'providers' && sourcePersistence ? (
+        <div className="ui-page">
+          {actionSlot && sources.length > 0 && !showSourceForm
+            ? createPortal(
                 <button
+                  className="ui-button primary"
                   type="button"
-                  className={`epg-chip ${newSourceType === 'm3u' ? 'active' : ''}`}
-                  onClick={() => setNewSourceType('m3u')}
+                  onClick={() => {
+                    clearSourceForm();
+                    setShowSourceForm(true);
+                  }}
                 >
-                  M3U URL
-                </button>
-                <button
-                  type="button"
-                  className={`epg-chip ${newSourceType === 'xtream' ? 'active' : ''}`}
-                  onClick={() => setNewSourceType('xtream')}
-                >
-                  Xtream panel
-                </button>
-              </div>
-            </div>
-          )}
-          {editingConnection || newSourceType === 'm3u' ? (
-            <div>
-              <label htmlFor="playlist-url">
-                M3U playlist URL{editingConnection ? ' (optional)' : ''}
-              </label>
-              <input
-                id="playlist-url"
-                type="password"
-                value={playlistUrl}
-                onChange={(event) => setPlaylistUrl(event.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder={
-                  editingConnection
-                    ? 'Leave blank to keep the saved playlist URL'
-                    : undefined
+                  Add provider
+                </button>,
+                actionSlot,
+              )
+            : null}
+
+          <section className="ui-section">
+            <h2>Playlists</h2>
+            {sources.length === 0 || showSourceForm ? (
+              <form className="ui-card ui-stack" onSubmit={saveSource}>
+                <div className="ui-title">New provider</div>
+                <div className="ui-field">
+                  <label htmlFor="source-name">Name</label>
+                  <input
+                    id="source-name"
+                    className="ui-input"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    required
+                  />
+                </div>
+                <div className="ui-field">
+                  <span className="ui-label">How to connect</span>
+                  <div className="ui-chips">
+                    <button
+                      className="ui-chip"
+                      type="button"
+                      aria-pressed={newSourceType === 'm3u'}
+                      onClick={() => setNewSourceType('m3u')}
+                    >
+                      M3U link
+                    </button>
+                    <button
+                      className="ui-chip"
+                      type="button"
+                      aria-pressed={newSourceType === 'xtream'}
+                      onClick={() => setNewSourceType('xtream')}
+                    >
+                      Xtream login
+                    </button>
+                  </div>
+                </div>
+                {newSourceType === 'm3u' ? (
+                  <div className="ui-field">
+                    <label htmlFor="playlist-url">Playlist link</label>
+                    <input
+                      id="playlist-url"
+                      className="ui-input mono"
+                      type="text"
+                      value={playlistUrl}
+                      onChange={(event) => setPlaylistUrl(event.target.value)}
+                      autoComplete="off"
+                      spellCheck={false}
+                      required
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="ui-field">
+                      <label htmlFor="xtream-server">Server address</label>
+                      <input
+                        id="xtream-server"
+                        className="ui-input mono"
+                        value={xtreamServer}
+                        onChange={(event) =>
+                          setXtreamServer(event.target.value)
+                        }
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="http://panel.example:2095"
+                        required
+                      />
+                    </div>
+                    <div className="ui-field">
+                      <label htmlFor="xtream-username">Username</label>
+                      <input
+                        id="xtream-username"
+                        className="ui-input mono"
+                        value={xtreamUsername}
+                        onChange={(event) =>
+                          setXtreamUsername(event.target.value)
+                        }
+                        autoComplete="off"
+                        spellCheck={false}
+                        required
+                      />
+                    </div>
+                    <div className="ui-field">
+                      <label htmlFor="xtream-password">Password</label>
+                      <input
+                        id="xtream-password"
+                        className="ui-input mono"
+                        type="password"
+                        value={xtreamPassword}
+                        onChange={(event) =>
+                          setXtreamPassword(event.target.value)
+                        }
+                        autoComplete="off"
+                        spellCheck={false}
+                        required
+                      />
+                    </div>
+                  </>
+                )}
+                <div className="ui-field">
+                  <label htmlFor="epg-url">
+                    Guide link (XMLTV), optional
+                    {newSourceType === 'xtream'
+                      ? '. Leave empty to use the guide of the Xtream server'
+                      : ''}
+                  </label>
+                  <input
+                    id="epg-url"
+                    className="ui-input mono"
+                    type="text"
+                    value={epgUrl}
+                    onChange={(event) => setEpgUrl(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="ui-field">
+                  <label htmlFor="provider-timezone">
+                    Timezone the provider writes event times in
+                  </label>
+                  <input
+                    id="provider-timezone"
+                    className="ui-input"
+                    list="timezone-choices"
+                    value={providerTimezone}
+                    onChange={(event) =>
+                      setProviderTimezone(event.target.value)
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="ui-actions">
+                  <button
+                    className="ui-button primary"
+                    type="submit"
+                    disabled={saving}
+                  >
+                    {saving ? 'Adding…' : 'Add provider'}
+                  </button>
+                  {sources.length > 0 ? (
+                    <button
+                      className="ui-button"
+                      type="button"
+                      disabled={saving}
+                      onClick={clearSourceForm}
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+                </div>
+              </form>
+            ) : null}
+
+            {sources.map((source) => (
+              <ProviderCard
+                key={source.id}
+                source={source}
+                status={status?.sources.find(
+                  (candidate) => candidate.sourceId === source.id,
+                )}
+                locked={providerBusy}
+                refreshing={inspectingId === source.id}
+                refreshingGuide={importingEpgId === source.id}
+                removing={removingSourceId === source.id}
+                onSaved={(saved, importGuide) => {
+                  setSources((current) =>
+                    current.map((candidate) =>
+                      candidate.id === saved.id ? saved : candidate,
+                    ),
+                  );
+                  onRefreshStatus();
+                  if (importGuide) void importEpg(saved);
+                }}
+                onRefresh={() =>
+                  void (async () => {
+                    await selectSource(source);
+                    await inspectSource(source);
+                  })()
                 }
-                required={!editingConnection}
+                onRefreshGuide={() =>
+                  void (async () => {
+                    await selectSource(source);
+                    await importEpg(source);
+                  })()
+                }
+                onRemove={() => void removeSource(source)}
               />
-            </div>
-          ) : (
-            <>
-              <div>
-                <label htmlFor="xtream-server">Panel address</label>
-                <input
-                  id="xtream-server"
-                  value={xtreamServer}
-                  onChange={(event) => setXtreamServer(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="http://panel.example:2095"
-                  required
-                />
+            ))}
+
+            {importSummary ? (
+              <div className="ui-card ui-row ui-soft" aria-live="polite">
+                Playlist read:{' '}
+                {importSummary.retainedLiveEntries.toLocaleString()} live
+                channels, {importSummary.skippedEntries.toLocaleString()} movie
+                and series entries left out,{' '}
+                {(importSummary.totalBytes / 1_000_000).toFixed(1)} MB,{' '}
+                {importSummary.issues.toLocaleString()} lines could not be read.
               </div>
-              <div>
-                <label htmlFor="xtream-username">Panel username</label>
-                <input
-                  id="xtream-username"
-                  value={xtreamUsername}
-                  onChange={(event) => setXtreamUsername(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  required
-                />
+            ) : null}
+            {epgImportSummary ? (
+              <div className="ui-card ui-row ui-soft" aria-live="polite">
+                Guide read: {epgImportSummary.channelCount.toLocaleString()}{' '}
+                channels, {epgImportSummary.programmeCount.toLocaleString()}{' '}
+                programmes,{' '}
+                {(epgImportSummary.totalBytes / 1_000_000).toFixed(1)} MB,{' '}
+                {epgImportSummary.issueCount.toLocaleString()}
+                {epgImportSummary.issuesTruncated ? '+' : ''} entries could not
+                be read.
               </div>
-              <div>
-                <label htmlFor="xtream-password">Panel password</label>
-                <input
-                  id="xtream-password"
-                  type="password"
-                  value={xtreamPassword}
-                  onChange={(event) => setXtreamPassword(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  required
-                />
+            ) : null}
+            {sources.length > 0 ? (
+              <p className="ui-note">
+                Links are stored encrypted and shown only to the signed-in
+                administrator.
+              </p>
+            ) : null}
+          </section>
+
+          <EpgSourcesPanel active />
+          <AutomationSettings active />
+          <RefreshActivity sources={sources} />
+
+          {capabilities?.secureTransport === false ? (
+            <section className="ui-section">
+              <h2>Connection</h2>
+              <div className="ui-card ui-row">
+                <div className="ui-grow ui-soft">
+                  This editor runs over plain HTTP, which is normal on a home
+                  network. Sign-in, provider links and player links can be read
+                  by other devices on that network.
+                </div>
+                <a
+                  className="ui-link"
+                  href="https://github.com/Macstered/IPTVMaster/blob/main/docs/HTTPS.md"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  How to add HTTPS
+                </a>
               </div>
-            </>
-          )}
-          {editingConnection ? (
-            <div className="source-type-choice">
-              <span className="source-type-label">
-                Import from this provider
-              </span>
-              <div className="automation-toggles">
-                <label className="permanent-visibility-toggle">
-                  <input
-                    type="checkbox"
-                    checked={importScope.importLive}
-                    onChange={(event) =>
-                      setImportScope((current) => ({
-                        ...current,
-                        importLive: event.target.checked,
-                      }))
-                    }
-                  />
-                  Live TV channels
-                </label>
-                <label className="permanent-visibility-toggle">
-                  <input
-                    type="checkbox"
-                    checked={importScope.importCatalogue}
-                    onChange={(event) =>
-                      setImportScope((current) => ({
-                        ...current,
-                        importCatalogue: event.target.checked,
-                      }))
-                    }
-                  />
-                  Films and series
-                </label>
-              </div>
-              <small className="channel-limit-note">
-                Turning off live leaves a provider you keep only for its
-                catalogue. Films and series are still chosen category by
-                category under Movies &amp; series; this only decides whether
-                the catalogue is looked at during a refresh.
-              </small>
-            </div>
+            </section>
           ) : null}
-          <div>
-            <label htmlFor="provider-timezone">Provider timezone</label>
-            <input
-              id="provider-timezone"
-              list="timezone-choices"
-              value={providerTimezone}
-              onChange={(event) => setProviderTimezone(event.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-          <div>
-            <label htmlFor="epg-url">
-              XMLTV URL (optional)
-              {!editingConnection && newSourceType === 'xtream'
-                ? ' — leave blank to use the panel guide'
-                : ''}
-            </label>
-            <input
-              id="epg-url"
-              type="password"
-              value={epgUrl}
-              onChange={(event) => setEpgUrl(event.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={
-                editingConnection
-                  ? 'Leave blank to keep the saved XMLTV URL'
-                  : undefined
-              }
-            />
-          </div>
-          <button type="submit" disabled={saving}>
-            {saving
-              ? 'Saving securely…'
-              : editingConnection
-                ? 'Save connection'
-                : 'Save encrypted source'}
-          </button>
-          {editingConnection ? (
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={saving}
-              onClick={() =>
-                void updateSourceConnection(editingConnection, {
-                  deriveEpgUrl: true,
-                })
-              }
-            >
-              Use matching XMLTV URL
-            </button>
-          ) : null}
-          {editingConnection?.hasEpgUrl ? (
-            <button
-              className="danger-button"
-              type="button"
-              disabled={saving}
-              onClick={() =>
-                void updateSourceConnection(editingConnection, {
-                  clearEpgUrl: true,
-                })
-              }
-            >
-              Remove XMLTV URL
-            </button>
-          ) : null}
-          {sources.length > 0 ? (
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={saving}
-              onClick={clearSourceForm}
-            >
-              Cancel
-            </button>
-          ) : null}
+
           <datalist id="timezone-choices">
             {TIMEZONE_CHOICES.map((zone) => (
               <option value={zone} key={zone} />
             ))}
           </datalist>
-          <p className="secret-note">
-            {editingConnection
-              ? 'URL fields are intentionally blank. Enter only values you want to replace; saved URLs remain encrypted and are never shown again.'
-              : 'URLs are encrypted before database storage and never shown again.'}
-          </p>
-        </form>
+        </div>
       ) : null}
 
-      {sources.length > 0 ? (
-        <div className="saved-source-list">
-          {sources.map((source) => (
-            <article
-              className={`saved-source ${
-                source.id === primarySource?.id ? 'selected' : ''
-              }`}
-              key={source.id}
-            >
-              <div className="source-symbol">
-                <IconTv />
-              </div>
-              <div>
-                <strong>{source.name}</strong>
-                <p>
-                  {source.sourceType.toUpperCase()} ·{' '}
-                  {source.hasEpgUrl ? 'XMLTV configured' : 'No XMLTV URL'}
-                </p>
-                <small>
-                  {source.sourceTimezone} → {source.displayTimezone}
-                </small>
-                {capabilities?.playlistAutomation ? (
-                  <small className="automation-note">
-                    Automatic playlist
-                    {source.hasEpgUrl && capabilities.epgAutomation
-                      ? ' and EPG refresh enabled'
-                      : ' refresh enabled'}
-                  </small>
-                ) : null}
-              </div>
-              <div className="source-actions">
-                <button
-                  className="secondary-button"
-                  type="button"
-                  disabled={saving || removingSourceId !== null}
-                  onClick={() => void beginConnectionEdit(source)}
-                >
-                  Manage connection
-                </button>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  disabled={inspectingId !== null || importingEpgId !== null}
-                  onClick={() =>
-                    void (async () => {
-                      await selectSource(source);
-                      await inspectSource(source);
-                    })()
-                  }
-                >
-                  {inspectingId === source.id
-                    ? 'Importing…'
-                    : 'Import live playlist'}
-                </button>
-                {source.hasEpgUrl ? (
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    disabled={inspectingId !== null || importingEpgId !== null}
-                    onClick={() =>
-                      void (async () => {
-                        await selectSource(source);
-                        await importEpg(source);
-                      })()
-                    }
-                  >
-                    {importingEpgId === source.id
-                      ? 'Importing guide…'
-                      : 'Import XMLTV guide'}
-                  </button>
-                ) : null}
-                <button
-                  className="danger-button compact"
-                  type="button"
-                  disabled={
-                    saving ||
-                    removingSourceId !== null ||
-                    inspectingId !== null ||
-                    importingEpgId !== null
-                  }
-                  onClick={() =>
-                    setConfirmingRemoval((current) =>
-                      current === source.id ? null : source.id,
-                    )
-                  }
-                >
-                  {removingSourceId === source.id
-                    ? 'Removing…'
-                    : 'Remove provider'}
-                </button>
-              </div>
-              {confirmingRemoval === source.id ? (
-                <div className="snapshot-confirm source-remove-confirm">
-                  <p>
-                    Remove {source.name}? This permanently deletes its imported
-                    playlists, guide data, and edits, and revokes any output
-                    URLs that include it.
-                  </p>
-                  <div>
-                    <button
-                      className="danger-button compact"
-                      type="button"
-                      disabled={removingSourceId !== null}
-                      onClick={() => void removeSource(source)}
-                    >
-                      Remove permanently
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      disabled={removingSourceId !== null}
-                      onClick={() => setConfirmingRemoval(null)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
+      <PlayerLinksWorkspace
+        active={workspace === 'links' && sourcePersistence}
+        sources={sources}
+      />
+
+      {workspace === 'updates' && primarySource ? (
+        <div className="ui-page" id="updates">
+          <RefreshActivity sources={sources} />
+
+          <section className="ui-section">
+            <h2>Earlier playlists</h2>
+            <div className="ui-card">
+              {snapshots.length === 0 ? (
+                <div className="ui-row ui-soft">
+                  No earlier playlists yet. One is kept after each successful
+                  refresh.
                 </div>
               ) : null}
-            </article>
-          ))}
-        </div>
-      ) : null}
-
-      {capabilities?.sourcePersistence &&
-      sources.length > 0 &&
-      !showSourceForm &&
-      editingConnection === null ? (
-        <button
-          className="secondary-button add-provider-button"
-          type="button"
-          onClick={() => {
-            clearSourceForm();
-            setShowSourceForm(true);
-          }}
-        >
-          Add another provider
-        </button>
-      ) : null}
-
-      {workspace === 'overview' && capabilities?.sourcePersistence ? (
-        <>
-          <EpgSourcesPanel active />
-          <AutomationSettings active />
-          <RefreshActivity sources={sources} />
-        </>
-      ) : null}
-
-      {importSummary ? (
-        <div className="import-summary" aria-live="polite">
-          <div>
-            <small>LIVE ENTRIES</small>
-            <strong>
-              {importSummary.retainedLiveEntries.toLocaleString()}
-            </strong>
-          </div>
-          <div>
-            <small>VOD/SERIES SKIPPED</small>
-            <strong>{importSummary.skippedEntries.toLocaleString()}</strong>
-          </div>
-          <div>
-            <small>DOWNLOAD SIZE</small>
-            <strong>
-              {(importSummary.totalBytes / 1_000_000).toFixed(1)} MB
-            </strong>
-          </div>
-          <div>
-            <small>PARSE ISSUES</small>
-            <strong>{importSummary.issues.toLocaleString()}</strong>
-          </div>
-        </div>
-      ) : null}
-
-      {epgImportSummary ? (
-        <div className="import-summary" aria-live="polite">
-          <div>
-            <small>EPG CHANNELS</small>
-            <strong>{epgImportSummary.channelCount.toLocaleString()}</strong>
-          </div>
-          <div>
-            <small>PROGRAMMES</small>
-            <strong>{epgImportSummary.programmeCount.toLocaleString()}</strong>
-          </div>
-          <div>
-            <small>DOWNLOAD SIZE</small>
-            <strong>
-              {(epgImportSummary.totalBytes / 1_000_000).toFixed(1)} MB
-            </strong>
-          </div>
-          <div>
-            <small>PARSE ISSUES</small>
-            <strong>
-              {epgImportSummary.issueCount.toLocaleString()}
-              {epgImportSummary.issuesTruncated ? '+' : ''}
-            </strong>
-          </div>
-        </div>
-      ) : null}
-
-      {workspace !== 'overview' && sources.length > 0 ? (
-        <div className="workspace-toolbar">
-          <div>
-            <small>EDITING PROVIDER</small>
-            <strong>{primarySource?.name}</strong>
-          </div>
-          {sources.length > 1 ? (
-            <label>
-              Provider
-              <select
-                value={primarySource?.id ?? ''}
-                onChange={(event) => {
-                  const nextSource = sources.find(
-                    (source) => source.id === event.target.value,
-                  );
-                  if (nextSource) void selectSource(nextSource);
-                }}
-              >
-                {sources.map((source) => (
-                  <option value={source.id} key={source.id}>
-                    {source.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          <span className="workspace-provider-status">
-            <span className="status-dot" />{' '}
-            {primarySource?.enabled && capabilities?.playlistAutomation
-              ? 'Automatic refresh enabled'
-              : 'Provider selected'}
-          </span>
-        </div>
-      ) : null}
-
-      {workspace === 'updates' &&
-      sourceHistory &&
-      primarySource &&
-      sourceHistory.snapshots.length > 0 ? (
-        <section className="history-panel" id="updates">
-          <div className="subsection-heading history-heading">
-            <div>
-              <small>UPDATE HISTORY</small>
-              <strong>Retained snapshots and activity</strong>
-            </div>
-            <span className="channel-count">
-              {sourceHistory.snapshots.length} shown
-            </span>
-            <button
-              className="secondary-button compact section-toggle"
-              type="button"
-              onClick={() => toggleSection('history')}
-            >
-              {collapsedSections.history ? 'Expand' : 'Collapse'}
-            </button>
-          </div>
-          <div hidden={collapsedSections.history}>
-            <p className="secret-note">
-              Restore a previously accepted playlist if a provider update is
-              wrong. Channel overrides remain yours; uncertain matches return to
-              the review queue. A later provider refresh can reactivate newer
-              retained data.
-            </p>
-            <div className="history-grid">
-              <div className="snapshot-list" aria-label="Retained snapshots">
-                {sourceHistory.snapshots.length > 6 ? (
-                  <small className="channel-limit-note">
-                    Showing the 6 most recent of{' '}
-                    {sourceHistory.snapshots.length.toLocaleString()} retained
-                    snapshots.
-                  </small>
-                ) : null}
-                {sourceHistory.snapshots.slice(0, 6).map((snapshot) => (
-                  <article
-                    className={`snapshot-row ${snapshot.isCurrent ? 'current' : ''}`}
-                    key={snapshot.id}
-                  >
-                    <div className="snapshot-main">
-                      <strong>{formatHistoryTime(snapshot.importedAt)}</strong>
-                      <small>
-                        {snapshot.liveCount.toLocaleString()} live ·{' '}
-                        {snapshot.issueCount.toLocaleString()} issues ·{' '}
-                        {snapshot.fingerprint.slice(0, 8)}
-                      </small>
+              {snapshots.slice(0, 6).map((snapshot) => (
+                <div key={snapshot.id}>
+                  <div className="ui-row">
+                    <div className="ui-grow">
+                      <div className="ui-title">
+                        {formatHistoryTime(snapshot.importedAt)}
+                      </div>
+                      <div className="ui-soft">
+                        {snapshot.liveCount.toLocaleString()} channels ·{' '}
+                        {snapshot.issueCount.toLocaleString()} lines could not
+                        be read
+                      </div>
                     </div>
                     {snapshot.isCurrent ? (
-                      <span className="snapshot-current">CURRENT</span>
+                      <span className="ui-pill ok">In use</span>
                     ) : (
                       <button
-                        className="secondary-button compact"
+                        className="ui-button"
                         type="button"
                         disabled={restoringSnapshot !== null}
                         onClick={() => setConfirmingSnapshot(snapshot.id)}
@@ -2280,74 +1860,73 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
                         Restore
                       </button>
                     )}
-                    {confirmingSnapshot === snapshot.id ? (
-                      <div className="snapshot-confirm">
-                        <p>
-                          Publish this retained playlist now and reconcile the
-                          permanent channels against it?
-                        </p>
-                        <div>
-                          <button
-                            className="danger-button compact"
-                            type="button"
-                            disabled={restoringSnapshot !== null}
-                            onClick={() =>
-                              void restoreSnapshot(primarySource, snapshot.id)
-                            }
-                          >
-                            {restoringSnapshot === snapshot.id
-                              ? 'Restoring…'
-                              : 'Confirm restore'}
-                          </button>
-                          <button
-                            className="secondary-button compact"
-                            type="button"
-                            disabled={restoringSnapshot !== null}
-                            onClick={() => setConfirmingSnapshot(null)}
-                          >
-                            Cancel
-                          </button>
-                        </div>
+                  </div>
+                  {confirmingSnapshot === snapshot.id ? (
+                    <div className="ui-row ui-warning">
+                      <div className="ui-grow">
+                        Use this playlist again? Your channel edits are kept.
+                        Matches that are no longer certain go back to review.
                       </div>
-                    ) : null}
-                  </article>
-                ))}
-              </div>
-              <div
-                className="activity-list"
-                aria-label="Recent source activity"
-              >
-                {sourceHistory.activity.length > 0 ? (
-                  sourceHistory.activity.slice(0, 10).map((activity) => (
-                    <article className="activity-row" key={activity.id}>
-                      <span
-                        className={`activity-status ${activity.status ?? 'succeeded'}`}
-                      />
-                      <div>
-                        <strong>{activity.title}</strong>
-                        <p>{activity.detail}</p>
-                        <small>{formatHistoryTime(activity.occurredAt)}</small>
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <p className="review-clear">No activity has been recorded.</p>
-                )}
-              </div>
+                      <button
+                        className="ui-button danger"
+                        type="button"
+                        disabled={restoringSnapshot !== null}
+                        onClick={() =>
+                          void restoreSnapshot(primarySource, snapshot.id)
+                        }
+                      >
+                        {restoringSnapshot === snapshot.id
+                          ? 'Restoring…'
+                          : 'Restore this playlist'}
+                      </button>
+                      <button
+                        className="ui-button"
+                        type="button"
+                        disabled={restoringSnapshot !== null}
+                        onClick={() => setConfirmingSnapshot(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
             </div>
-          </div>
-        </section>
-      ) : null}
+            <p className="ui-note">
+              Restore an earlier playlist if a provider update went wrong. A
+              later refresh can bring newer data back.
+              {snapshots.length > 6
+                ? ` Showing the 6 most recent of ${snapshots.length.toLocaleString()}.`
+                : ''}
+            </p>
+          </section>
 
-      {workspace === 'updates' &&
-      primarySource &&
-      (!sourceHistory || sourceHistory.snapshots.length === 0) ? (
-        <div className="workspace-empty">
-          <strong>No retained updates yet</strong>
-          <p>
-            Playlist and EPG refresh activity will appear here after the next
-            successful import.
-          </p>
+          <section className="ui-section">
+            <h2>Activity</h2>
+            <div className="ui-card">
+              {activity.length === 0 ? (
+                <div className="ui-row ui-soft">Nothing has happened yet.</div>
+              ) : null}
+              {activity.map((entry) => (
+                <div className="ui-row" key={entry.id}>
+                  <span
+                    className={`ui-dot ${
+                      entry.status && entry.status !== 'succeeded'
+                        ? 'warn'
+                        : 'ok'
+                    }`}
+                  />
+                  <div className="ui-grow">
+                    <div className="ui-strong">{entry.title}</div>
+                    <div className="ui-soft">{entry.detail}</div>
+                  </div>
+                  <span className="ui-muted">
+                    {formatHistoryTime(entry.occurredAt)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
         </div>
       ) : null}
 
@@ -2365,8 +1944,15 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           : {})}
       />
 
-      {workspace !== 'updates' && groups.length > 0 && primarySource ? (
-        <div className="group-policy-editor">
+      {groups.length > 0 && primarySource ? (
+        <div
+          className="group-policy-editor"
+          hidden={
+            workspace !== 'lineup' &&
+            workspace !== 'events' &&
+            workspace !== 'epg'
+          }
+        >
           <div className="subsection-heading" hidden={workspace !== 'events'}>
             <div>
               <small>GROUP RULES</small>
@@ -2957,7 +2543,10 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           <EpgWorkspace
             source={primarySource}
             active={workspace === 'epg'}
+            actionSlot={actionSlot}
+            onOpenProviders={() => onNavigate('providers')}
             onActivityChanged={() => {
+              onRefreshStatus();
               if (primarySource) void loadSourceHistory(primarySource.id);
             }}
           />
@@ -3770,365 +3359,28 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               </p>
             )}
           </div>
-
-          <div className="output-setup" hidden={workspace !== 'overview'}>
-            <div>
-              <strong>Combined playlist and EPG URLs</strong>
-              <small>
-                Pick one or more providers. Their channels and guide data are
-                combined into one private, revocable URL.
-              </small>
-              <div hidden={collapsedSections.output}>
-                <label className="output-name-field" htmlFor="output-name">
-                  Output name
-                  <input
-                    id="output-name"
-                    value={outputName}
-                    onChange={(event) => setOutputName(event.target.value)}
-                  />
-                </label>
-                <div className="source-type-choice">
-                  <span className="source-type-label">
-                    This URL carries (choose any)
-                  </span>
-                  <div className="epg-chips">
-                    {(
-                      [
-                        ['live', 'Live TV'],
-                        ['vod', 'Movies'],
-                        ['series', 'Series'],
-                      ] as const
-                    ).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        aria-pressed={outputMediaTypes.includes(value)}
-                        className={`epg-chip ${outputMediaTypes.includes(value) ? 'active' : ''}`}
-                        onClick={() =>
-                          setOutputMediaTypes((current) =>
-                            current.includes(value)
-                              ? // Never leave an output carrying nothing.
-                                current.length > 1
-                                ? current.filter((kind) => kind !== value)
-                                : current
-                              : [...current, value],
-                          )
-                        }
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <small className="channel-limit-note">
-                    Pick several to publish one combined URL, or make a separate
-                    URL per kind so a live playlist never grows by a catalogue
-                    your player would download and ignore.
-                  </small>
-                </div>
-                <div className="output-provider-list">
-                  {sources.map((source) => (
-                    <label key={source.id}>
-                      <input
-                        type="checkbox"
-                        checked={outputSourceIds.includes(source.id)}
-                        onChange={() => toggleOutputSource(source.id)}
-                      />
-                      {source.name}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="output-actions">
-              <button
-                className="secondary-button compact section-toggle"
-                type="button"
-                onClick={() => toggleSection('output')}
-              >
-                {collapsedSections.output ? 'Expand' : 'Collapse'}
-              </button>
-              <button
-                type="button"
-                disabled={creatingOutput || outputSourceIds.length === 0}
-                onClick={() => void createOutputProfile()}
-              >
-                {creatingOutput ? 'Creating…' : 'Create output URLs'}
-              </button>
-            </div>
-          </div>
-          {workspace === 'overview' &&
-          !collapsedSections.output &&
-          outputProfiles.length > 0 ? (
-            <div className="output-profile-list">
-              {outputProfiles.map((profile) => {
-                const sourceNames = profile.sourceIds
-                  .map(
-                    (sourceId) =>
-                      sources.find((source) => source.id === sourceId)?.name ??
-                      'Removed provider',
-                  )
-                  .join(' + ');
-                const playlistOutputUrl = profile.accessToken
-                  ? `${window.location.origin}/m/${profile.accessToken}`
-                  : '';
-                const epgOutputUrl = profile.accessToken
-                  ? `${window.location.origin}/e/${profile.accessToken}`
-                  : '';
-                const mediaTypes = profile.mediaTypes ?? ['live'];
-                const splitPlaylistUrls = mediaTypes.map((mediaType) => ({
-                  mediaType,
-                  label: MEDIA_TYPE_LABELS[mediaType],
-                  url: `${playlistOutputUrl}/${
-                    mediaType === 'vod' ? 'movies' : mediaType
-                  }`,
-                }));
-                return (
-                  <article className="output-url" key={profile.id}>
-                    <div className="output-url-heading">
-                      <strong>{profile.name}</strong>
-                      <small>
-                        {sourceNames} ·{' '}
-                        {(profile.mediaTypes ?? ['live'])
-                          .map((kind) => MEDIA_TYPE_LABELS[kind])
-                          .join(', ')}
-                      </small>
-                    </div>
-                    {profile.recoverable && profile.accessToken ? (
-                      <>
-                        <label htmlFor={`playlist-output-url-${profile.id}`}>
-                          {mediaTypes.length > 1
-                            ? 'Combined M3U playlist URL'
-                            : 'M3U playlist URL'}
-                        </label>
-                        <div className="copy-row">
-                          <input
-                            id={`playlist-output-url-${profile.id}`}
-                            readOnly
-                            value={playlistOutputUrl}
-                            onFocus={(event) => event.currentTarget.select()}
-                          />
-                          <button
-                            className="secondary-button compact"
-                            type="button"
-                            onClick={() =>
-                              void navigator.clipboard
-                                .writeText(playlistOutputUrl)
-                                .then(() =>
-                                  showToast('success', 'Playlist URL copied'),
-                                )
-                                .catch(() =>
-                                  showToast(
-                                    'error',
-                                    'Could not copy — select the text instead',
-                                  ),
-                                )
-                            }
-                          >
-                            Copy
-                          </button>
-                        </div>
-                        {mediaTypes.length > 1 ? (
-                          <div className="output-variant-list">
-                            <strong>Player-specific M3U URLs</strong>
-                            <small>
-                              Add these as separate playlists when a player
-                              cannot reliably split a combined M3U into Live TV,
-                              Movies, and Series.
-                            </small>
-                            {splitPlaylistUrls.map((output) => (
-                              <div
-                                className="output-variant"
-                                key={output.mediaType}
-                              >
-                                <label
-                                  htmlFor={`playlist-output-url-${profile.id}-${output.mediaType}`}
-                                >
-                                  {output.label}
-                                </label>
-                                <div className="copy-row">
-                                  <input
-                                    id={`playlist-output-url-${profile.id}-${output.mediaType}`}
-                                    readOnly
-                                    value={output.url}
-                                    onFocus={(event) =>
-                                      event.currentTarget.select()
-                                    }
-                                  />
-                                  <button
-                                    className="secondary-button compact"
-                                    type="button"
-                                    onClick={() =>
-                                      void navigator.clipboard
-                                        .writeText(output.url)
-                                        .then(() =>
-                                          showToast(
-                                            'success',
-                                            `${output.label} URL copied`,
-                                          ),
-                                        )
-                                        .catch(() =>
-                                          showToast(
-                                            'error',
-                                            'Could not copy — select the text instead',
-                                          ),
-                                        )
-                                    }
-                                  >
-                                    Copy
-                                  </button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : null}
-
-                        <div className="output-variant-list xtream-login">
-                          <strong>
-                            Xtream login
-                            {mediaTypes.includes('vod') ||
-                            mediaTypes.includes('series')
-                              ? ' — recommended'
-                              : ''}
-                          </strong>
-                          <small>
-                            In StreamMate, add an Xtream Codes/API playlist.
-                            Series are sent as a compact show catalogue;
-                            episodes are loaded only when the app asks for a
-                            show.
-                          </small>
-                          {[
-                            {
-                              key: 'server',
-                              label: 'Server URL',
-                              value: window.location.origin,
-                            },
-                            {
-                              key: 'username',
-                              label: 'Username',
-                              value: 'iptvmaster',
-                            },
-                            {
-                              key: 'password',
-                              label: 'Password',
-                              value: profile.accessToken,
-                            },
-                          ].map((field) => (
-                            <div className="output-variant" key={field.key}>
-                              <label
-                                htmlFor={
-                                  'xtream-' + field.key + '-' + profile.id
-                                }
-                              >
-                                {field.label}
-                              </label>
-                              <div className="copy-row">
-                                <input
-                                  id={'xtream-' + field.key + '-' + profile.id}
-                                  readOnly
-                                  value={field.value}
-                                  onFocus={(event) =>
-                                    event.currentTarget.select()
-                                  }
-                                />
-                                <button
-                                  className="secondary-button compact"
-                                  type="button"
-                                  onClick={() =>
-                                    void navigator.clipboard
-                                      .writeText(field.value)
-                                      .then(() =>
-                                        showToast(
-                                          'success',
-                                          field.label + ' copied',
-                                        ),
-                                      )
-                                      .catch(() =>
-                                        showToast(
-                                          'error',
-                                          'Could not copy — select the text instead',
-                                        ),
-                                      )
-                                  }
-                                >
-                                  Copy
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        {mediaTypes.includes('live') ? (
-                          <>
-                            <label htmlFor={`epg-output-url-${profile.id}`}>
-                              XMLTV EPG URL
-                            </label>
-                            <div className="copy-row">
-                              <input
-                                id={`epg-output-url-${profile.id}`}
-                                readOnly
-                                value={epgOutputUrl}
-                                onFocus={(event) =>
-                                  event.currentTarget.select()
-                                }
-                              />
-                              <button
-                                className="secondary-button compact"
-                                type="button"
-                                onClick={() =>
-                                  void navigator.clipboard
-                                    .writeText(epgOutputUrl)
-                                    .then(() =>
-                                      showToast('success', 'EPG URL copied'),
-                                    )
-                                    .catch(() =>
-                                      showToast(
-                                        'error',
-                                        'Could not copy — select the text instead',
-                                      ),
-                                    )
-                                }
-                              >
-                                Copy
-                              </button>
-                            </div>
-                          </>
-                        ) : null}
-                        <small>
-                          Available from any device signed in as this
-                          administrator. Treat these URLs like passwords.
-                        </small>
-                      </>
-                    ) : (
-                      <p className="legacy-output-note">
-                        This older URL stays active but cannot be shown again.
-                        Create a replacement, update your player, then revoke
-                        this one.
-                      </p>
-                    )}
-                    <button
-                      className="revoke-button"
-                      type="button"
-                      disabled={creatingOutput}
-                      onClick={() => void revokeOutputProfile(profile.id)}
-                    >
-                      Revoke this URL
-                    </button>
-                  </article>
-                );
-              })}
-            </div>
-          ) : null}
         </div>
       ) : null}
 
-      {workspace !== 'overview' &&
-      workspace !== 'updates' &&
+      {(workspace === 'lineup' ||
+        workspace === 'events' ||
+        workspace === 'epg') &&
       groups.length === 0 ? (
-        <div className="workspace-empty">
-          <strong>No imported live playlist</strong>
-          <p>
-            Open Overview and import a provider playlist before editing this
-            workspace.
-          </p>
+        <div className="ui-card ui-row">
+          <div className="ui-grow">
+            <div className="ui-title">No channels yet</div>
+            <div className="ui-soft">
+              Refresh a provider&apos;s playlist first. Its channels then show
+              up here.
+            </div>
+          </div>
+          <button
+            className="ui-button primary"
+            type="button"
+            onClick={() => onNavigate('providers')}
+          >
+            Open Providers
+          </button>
         </div>
       ) : null}
     </section>

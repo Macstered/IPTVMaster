@@ -84,8 +84,8 @@ through IPTVMaster.
 
 - Single local administrator account (scrypt, database-backed revocable
   sessions, CSRF protection, login throttling).
-- Provider and guide URLs are encrypted with AES-256-GCM before storage and
-  never displayed again.
+- Provider and guide URLs are encrypted with AES-256-GCM before storage. The
+  signed-in administrator can view and edit them on the Providers page.
 - Output URLs are long random tokens, individually revocable; only their
   hashes are stored for verification.
 - Designed for trusted LAN use over a stable local address: no DNS entry,

@@ -17,8 +17,10 @@ import { appendXmltvGuide, buildApp } from './app.js';
 import {
   deriveXmltvUrl,
   SnapshotActivationConflictError,
+  inEpgReviewView,
 } from './source-repository.js';
 import type {
+  EpgMappingReviewView,
   BulkUpdateChannelInput,
   BulkUpdateChannelResult,
   ActiveOutputProfile,
@@ -181,6 +183,15 @@ class MemorySourceRepository implements SourceRepository {
         this.epgMappingSources.delete(channelId);
       }
     }
+    return true;
+  }
+
+  async updateCustomEpgSourceUrl(epgSourceId: string, url: string) {
+    const custom = this.customEpgSources.find(
+      (epgSource) => epgSource.id === epgSourceId,
+    );
+    if (!custom) return false;
+    custom.url = url;
     return true;
   }
 
@@ -1218,7 +1229,7 @@ class MemorySourceRepository implements SourceRepository {
     sourceId: string,
     search: string | undefined,
     limit: number,
-    view: 'mappable' | 'excluded' = 'mappable',
+    view: EpgMappingReviewView = 'mappable',
   ) {
     const normalizedSearch = search?.toLocaleLowerCase() ?? '';
     const excludedChannels = this.channels.filter(
@@ -1313,7 +1324,9 @@ class MemorySourceRepository implements SourceRepository {
         };
       });
     return {
-      mappings: mappings.slice(0, limit),
+      mappings: mappings
+        .filter((mapping) => inEpgReviewView(mapping, view))
+        .slice(0, limit),
       matchedCount: mappings.filter((mapping) => mapping.status === 'matched')
         .length,
       missingCount: mappings.filter((mapping) => mapping.status === 'missing')
@@ -2766,6 +2779,23 @@ describe('IPTVMaster API', () => {
       }),
     );
 
+    const manualOnly = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings?view=manual`,
+    });
+    expect(
+      (manualOnly.json().mappings as Array<{ channelId: string }>).map(
+        (mapping) => mapping.channelId,
+      ),
+    ).toEqual([channelId]);
+    const attentionOnly = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/epg-mappings?view=attention`,
+    });
+    expect(attentionOnly.json().mappings).not.toContainEqual(
+      expect.objectContaining({ channelId }),
+    );
+
     const removeResponse = await app.inject({
       method: 'DELETE',
       url: `/api/v1/epg-sources/${epgSourceId}`,
@@ -2778,6 +2808,85 @@ describe('IPTVMaster API', () => {
     expect(reviewAfterRemove.json().mappings).toContainEqual(
       expect.objectContaining({ channelId, status: 'missing' }),
     );
+  });
+
+  it('returns the saved provider links to the signed-in administrator', async () => {
+    const repository = new MemorySourceRepository();
+    const source = await repository.createSource({
+      name: 'Home provider',
+      sourceType: 'm3u',
+      credentials: {
+        playlistUrl: 'http://provider.test/get.php?username=u&password=p',
+        epgUrl: 'http://provider.test/xmltv.php?username=u&password=p',
+      },
+      sourceTimezone: 'UTC',
+      displayTimezone: 'UTC',
+    });
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sources/${source.id}/connection`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      playlistUrl: 'http://provider.test/get.php?username=u&password=p',
+      epgUrl: 'http://provider.test/xmltv.php?username=u&password=p',
+    });
+    expect(response.headers['cache-control']).toBe('no-store');
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/api/v1/sources/00000000-0000-4000-8000-0000000000ff/connection',
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
+  it('shows and replaces the link of a custom guide', async () => {
+    const repository = new MemorySourceRepository();
+    const app = await buildApp({ sourceRepository: repository });
+    applications.push(app);
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/epg-sources',
+      payload: { name: 'UK guide', url: 'http://guides.test/uk.xml' },
+    });
+    const epgSourceId = created.json().epgSource.id as string;
+
+    const before = await app.inject({
+      method: 'GET',
+      url: `/api/v1/epg-sources/${epgSourceId}/connection`,
+    });
+    expect(before.json()).toEqual({ url: 'http://guides.test/uk.xml' });
+
+    const rejected = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/epg-sources/${epgSourceId}`,
+      payload: { url: 'ftp://guides.test/uk.xml' },
+    });
+    expect(rejected.statusCode).toBe(400);
+
+    const updated = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/epg-sources/${epgSourceId}`,
+      payload: { url: 'http://guides.test/uk-v2.xml' },
+    });
+    expect(updated.statusCode).toBe(204);
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/api/v1/epg-sources/${epgSourceId}/connection`,
+    });
+    expect(after.json()).toEqual({ url: 'http://guides.test/uk-v2.xml' });
+
+    const unknown = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/epg-sources/00000000-0000-4000-8000-0000000000ff',
+      payload: { url: 'http://guides.test/other.xml' },
+    });
+    expect(unknown.statusCode).toBe(404);
   });
 
   it('reads and updates the refresh schedule at runtime', async () => {

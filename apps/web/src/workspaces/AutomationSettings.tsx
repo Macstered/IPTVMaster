@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
+import { readJson } from '../readJson.js';
 import { showToast } from '../toast.js';
 
 interface SchedulerState {
@@ -18,21 +19,6 @@ interface AutomationSettingsResponse {
     epgMinimumMinutes: number;
     maximumMinutes: number;
   };
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const value: unknown = await response.json();
-  if (!response.ok) {
-    const message =
-      typeof value === 'object' &&
-      value !== null &&
-      'error' in value &&
-      typeof value.error === 'string'
-        ? value.error
-        : 'Request failed';
-    throw new Error(message);
-  }
-  return value as T;
 }
 
 function describeNextRun(state: SchedulerState): string {
@@ -151,128 +137,117 @@ export function AutomationSettings({ active }: AutomationSettingsProps) {
     }
   }
 
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const playlist = Number(playlistMinutes);
-    const epg = Number(epgMinutes);
-    const update: Record<string, number> = {};
-    if (
-      Number.isInteger(playlist) &&
-      playlist !== settings?.playlist.intervalMinutes
-    ) {
-      update['playlistIntervalMinutes'] = playlist;
+  /** Saves an interval once the field is left, if it holds a new number. */
+  function commit(target: 'playlist' | 'epg') {
+    const current = settings?.[target].intervalMinutes;
+    const typed = Number(target === 'playlist' ? playlistMinutes : epgMinutes);
+    if (Number.isInteger(typed) && typed > 0 && typed !== current) {
+      void save({
+        [target === 'playlist'
+          ? 'playlistIntervalMinutes'
+          : 'epgIntervalMinutes']: typed,
+      });
+      return;
     }
-    if (Number.isInteger(epg) && epg !== settings?.epg.intervalMinutes) {
-      update['epgIntervalMinutes'] = epg;
-    }
-    if (Object.keys(update).length === 0) return;
-    void save(update);
+    if (target === 'playlist') setPlaylistMinutes(String(current ?? ''));
+    else setEpgMinutes(String(current ?? ''));
   }
 
   if (!active || !settings) return null;
 
   const limits = settings.limits;
+  const rows = [
+    {
+      target: 'playlist' as const,
+      label: 'Playlists',
+      state: settings.playlist,
+      value: playlistMinutes,
+      setValue: setPlaylistMinutes,
+      minimum: limits?.playlistMinimumMinutes ?? 15,
+      step: 5,
+      enabledKey: 'playlistEnabled',
+    },
+    {
+      target: 'epg' as const,
+      label: 'Guides',
+      state: settings.epg,
+      value: epgMinutes,
+      setValue: setEpgMinutes,
+      minimum: limits?.epgMinimumMinutes ?? 30,
+      step: 30,
+      enabledKey: 'epgEnabled',
+    },
+  ];
 
   return (
-    <section className="automation-settings" aria-label="Refresh schedule">
-      <div className="subsection-heading">
-        <div>
-          <small>REFRESH SCHEDULE</small>
-          <strong>How often providers are checked</strong>
-        </div>
+    <section className="ui-section" aria-label="Automatic refresh">
+      <h2>Automatic refresh</h2>
+      <div className="ui-card">
+        {rows.map((row) => (
+          <div className="ui-row" key={row.target}>
+            <label
+              className="ui-title automation-label"
+              htmlFor={`${row.target}-interval`}
+            >
+              {row.label}
+            </label>
+            <div className="ui-status ui-soft">
+              <span>every</span>
+              <input
+                id={`${row.target}-interval`}
+                className="ui-input automation-interval"
+                type="number"
+                inputMode="numeric"
+                min={row.minimum}
+                max={limits?.maximumMinutes ?? 10080}
+                step={row.step}
+                value={row.value}
+                disabled={!row.state.available || saving}
+                onChange={(event) => row.setValue(event.target.value)}
+                onBlur={() => commit(row.target)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                }}
+              />
+              <span>minutes</span>
+            </div>
+            <span className="ui-muted automation-next">
+              {describeNextRun(row.state)}
+            </span>
+            <button
+              className="ui-button"
+              type="button"
+              disabled={
+                !row.state.available || row.state.running || starting !== null
+              }
+              onClick={() => void refreshNow(row.target)}
+            >
+              {row.state.running ? 'Refreshing…' : 'Refresh all now'}
+            </button>
+            <button
+              className="ui-switch"
+              type="button"
+              role="switch"
+              aria-checked={row.state.enabled}
+              aria-label={`Automatic refresh of ${row.label.toLowerCase()}`}
+              disabled={!row.state.available || saving}
+              onClick={() =>
+                void save({ [row.enabledKey]: !row.state.enabled })
+              }
+            >
+              <span className="ui-switch-track">
+                <span />
+              </span>
+              {row.state.enabled ? 'On' : 'Off'}
+            </button>
+          </div>
+        ))}
       </div>
-      <p className="secret-note">
-        Provider feeds change slowly and frequent polling is unwelcome, so
-        prefer the longest interval you are comfortable with. A change applies
-        immediately and is remembered across restarts. “Update now” runs a full
-        cycle over every provider straight away, whether or not automatic
-        refresh is paused.
+      <p className="ui-note">
+        Changes save as you make them. Providers dislike frequent polling, so
+        longer is kinder. “Refresh all now” covers every provider, whether or
+        not automatic refresh is on.
       </p>
-      <div className="automation-now">
-        <button
-          type="button"
-          className="secondary-button compact"
-          disabled={
-            !settings.playlist.available ||
-            settings.playlist.running ||
-            starting !== null
-          }
-          onClick={() => void refreshNow('playlist')}
-        >
-          {settings.playlist.running
-            ? 'Updating playlist…'
-            : 'Update playlist now'}
-        </button>
-        <button
-          type="button"
-          className="secondary-button compact"
-          disabled={
-            !settings.epg.available || settings.epg.running || starting !== null
-          }
-          onClick={() => void refreshNow('epg')}
-        >
-          {settings.epg.running ? 'Updating guide…' : 'Update guide now'}
-        </button>
-      </div>
-      <form className="automation-form" onSubmit={submit}>
-        <div>
-          <label htmlFor="playlist-interval">Playlist every (minutes)</label>
-          <input
-            id="playlist-interval"
-            type="number"
-            inputMode="numeric"
-            min={limits?.playlistMinimumMinutes ?? 15}
-            max={limits?.maximumMinutes ?? 10080}
-            step={5}
-            value={playlistMinutes}
-            disabled={!settings.playlist.available || saving}
-            onChange={(event) => setPlaylistMinutes(event.target.value)}
-          />
-          <small>{describeNextRun(settings.playlist)}</small>
-        </div>
-        <div>
-          <label htmlFor="epg-interval">Guide every (minutes)</label>
-          <input
-            id="epg-interval"
-            type="number"
-            inputMode="numeric"
-            min={limits?.epgMinimumMinutes ?? 30}
-            max={limits?.maximumMinutes ?? 10080}
-            step={30}
-            value={epgMinutes}
-            disabled={!settings.epg.available || saving}
-            onChange={(event) => setEpgMinutes(event.target.value)}
-          />
-          <small>{describeNextRun(settings.epg)}</small>
-        </div>
-        <button type="submit" disabled={saving}>
-          {saving ? 'Saving…' : 'Save schedule'}
-        </button>
-      </form>
-      <div className="automation-toggles">
-        <label className="permanent-visibility-toggle">
-          <input
-            type="checkbox"
-            checked={settings.playlist.enabled}
-            disabled={!settings.playlist.available || saving}
-            onChange={(event) =>
-              void save({ playlistEnabled: event.target.checked })
-            }
-          />
-          Automatic playlist refresh
-        </label>
-        <label className="permanent-visibility-toggle">
-          <input
-            type="checkbox"
-            checked={settings.epg.enabled}
-            disabled={!settings.epg.available || saving}
-            onChange={(event) =>
-              void save({ epgEnabled: event.target.checked })
-            }
-          />
-          Automatic guide refresh
-        </label>
-      </div>
     </section>
   );
 }

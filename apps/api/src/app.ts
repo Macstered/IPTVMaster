@@ -369,7 +369,9 @@ const manualMatchSchema = z.object({
 const epgMappingReviewSchema = z.object({
   search: z.string().trim().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
-  view: z.enum(['mappable', 'excluded']).default('mappable'),
+  view: z
+    .enum(['mappable', 'attention', 'matched', 'manual', 'excluded'])
+    .default('mappable'),
 });
 
 const epgChannelSearchSchema = z.object({
@@ -403,6 +405,10 @@ const automationRefreshSchema = z.object({
 
 const epgSourceCreateSchema = z.object({
   name: z.string().trim().min(1).max(200),
+  url: z.url().max(4_000),
+});
+
+const epgSourceUpdateSchema = z.object({
   url: z.url().max(4_000),
 });
 
@@ -1519,6 +1525,34 @@ export async function buildApp(
     },
   );
 
+  // The saved links, so the administrator can correct part of one in place
+  // instead of pasting the whole link again. Same trust level as the output
+  // tokens the session can already read back.
+  app.get<{ Params: { sourceId: string } }>(
+    '/api/v1/sources/:sourceId/connection',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const sourceId = z.uuid().safeParse(request.params.sourceId);
+      if (!sourceId.success) {
+        return reply.code(400).send({ error: 'sourceId must be a UUID' });
+      }
+      const credentials = await sourceRepository.getSourceCredentials(
+        sourceId.data,
+      );
+      if (!credentials) {
+        return reply.code(404).send({ error: 'Source not found' });
+      }
+      return {
+        playlistUrl: credentials.playlistUrl,
+        ...(credentials.epgUrl ? { epgUrl: credentials.epgUrl } : {}),
+      };
+    },
+  );
+
   app.post<{ Params: { sourceId: string } }>(
     '/api/v1/sources/:sourceId/preview-import',
     async (request, reply) => {
@@ -1833,6 +1867,60 @@ export async function buildApp(
         }
         throw error;
       }
+    },
+  );
+
+  app.get<{ Params: { epgSourceId: string } }>(
+    '/api/v1/epg-sources/:epgSourceId/connection',
+    async (request, reply) => {
+      if (!sourceRepository) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const epgSourceId = z.uuid().safeParse(request.params.epgSourceId);
+      if (!epgSourceId.success) {
+        return reply.code(400).send({ error: 'epgSourceId must be a UUID' });
+      }
+      const target = await sourceRepository.getEpgSourceRefreshTarget(
+        epgSourceId.data,
+      );
+      if (!target || target.kind !== 'custom' || !target.epgUrl) {
+        return reply.code(404).send({ error: 'Custom EPG source not found' });
+      }
+      return { url: target.epgUrl };
+    },
+  );
+
+  app.put<{ Params: { epgSourceId: string } }>(
+    '/api/v1/epg-sources/:epgSourceId',
+    async (request, reply) => {
+      if (!sourceRepository?.updateCustomEpgSourceUrl) {
+        return reply
+          .code(503)
+          .send({ error: 'Source persistence is not configured' });
+      }
+      const epgSourceId = z.uuid().safeParse(request.params.epgSourceId);
+      if (!epgSourceId.success) {
+        return reply.code(400).send({ error: 'epgSourceId must be a UUID' });
+      }
+      const parsed = epgSourceUpdateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: validationMessage(parsed.error) });
+      }
+      if (!['http:', 'https:'].includes(new URL(parsed.data.url).protocol)) {
+        return reply
+          .code(400)
+          .send({ error: 'EPG URL must use HTTP or HTTPS' });
+      }
+      const updated = await sourceRepository.updateCustomEpgSourceUrl(
+        epgSourceId.data,
+        parsed.data.url,
+      );
+      if (!updated) {
+        return reply.code(404).send({ error: 'Custom EPG source not found' });
+      }
+      return reply.code(204).send();
     },
   );
 
