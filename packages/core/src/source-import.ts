@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { retainedPlaylistFingerprint } from './playlist-fingerprint.js';
 import { Readable } from 'node:stream';
 
 import { parseM3u } from './m3u.js';
@@ -44,7 +44,6 @@ async function* limitedBody(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,
   state: { bytes: number; prefix: string },
-  hash: ReturnType<typeof createHash>,
 ): AsyncGenerator<Uint8Array> {
   const decoder = new TextDecoder();
   for await (const chunk of body) {
@@ -52,7 +51,6 @@ async function* limitedBody(
     if (state.bytes > maxBytes) {
       throw new Error(`Playlist download exceeds the ${maxBytes}-byte limit`);
     }
-    hash.update(chunk);
     if (state.prefix.length < 512) {
       state.prefix += decoder
         .decode(chunk, { stream: true })
@@ -101,10 +99,9 @@ export async function inspectRemotePlaylist(
   if (!response.body)
     throw new Error('Provider returned an empty response body');
 
-  const hash = createHash('sha256');
   const state = { bytes: 0, prefix: '' };
   const result = await parseM3u(
-    Readable.from(limitedBody(response.body, maxBytes, state, hash)),
+    Readable.from(limitedBody(response.body, maxBytes, state)),
     {
       includeMediaTypes: options.includeLive === false ? [] : ['live'],
       // Films and series are counted always but retained only for the
@@ -134,7 +131,7 @@ export async function inspectRemotePlaylist(
   }
 
   return {
-    fingerprint: hash.digest('hex'),
+    fingerprint: retainedPlaylistFingerprint(result.entries),
     totalBytes: state.bytes,
     entries: result.entries,
     issues: result.issues,

@@ -4,7 +4,9 @@ import { channelLogoSource, ChannelLogo } from './components/ChannelLogo.js';
 import { IconChevronDown, IconChevronUp, IconGrip, IconTv } from './icons.js';
 import { showToast } from './toast.js';
 import { AutomationSettings } from './workspaces/AutomationSettings.js';
+import { RefreshActivity } from './workspaces/RefreshActivity.js';
 import { CataloguePanel } from './workspaces/CataloguePanel.js';
+import { ChannelsWorkspace } from './workspaces/ChannelsWorkspace.js';
 import { EpgSourcesPanel } from './workspaces/EpgSourcesPanel.js';
 import { EpgWorkspace } from './workspaces/EpgWorkspace.js';
 
@@ -178,14 +180,6 @@ interface PermanentGroupSummary {
 interface CustomCategory {
   name: string;
   channelCount: number;
-}
-
-interface OutputGroupSummary {
-  name: string;
-  entryCount: number;
-  visibleEntryCount: number;
-  behavior: 'permanent' | 'event' | 'mixed';
-  sortOrder: number;
 }
 
 interface ChannelDraft {
@@ -403,29 +397,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   const [permanentGroupRenames, setPermanentGroupRenames] = useState<
     Record<string, string>
   >(() => Object.create(null) as Record<string, string>);
-  const [outputGroupFilter, setOutputGroupFilter] = useState('');
-  const [draggedOutputGroup, setDraggedOutputGroup] = useState<string | null>(
-    null,
-  );
-  const [savingOutputGroupOrder, setSavingOutputGroupOrder] = useState<
-    string | null
-  >(null);
-  const [savingOutputGroupVisibility, setSavingOutputGroupVisibility] =
-    useState<string | null>(null);
-  const [outputGroupCategories, setOutputGroupCategories] = useState<
-    OutputGroupSummary[]
-  >([]);
-  const [expandedOutputGroup, setExpandedOutputGroup] = useState<string | null>(
-    null,
-  );
-  const [outputGroupChannels, setOutputGroupChannels] = useState<
-    ChannelSummary[]
-  >([]);
-  const [outputGroupChannelTotal, setOutputGroupChannelTotal] = useState(0);
-  const [loadingOutputGroupChannels, setLoadingOutputGroupChannels] =
-    useState(false);
-  const [draggedOutputGroupChannelId, setDraggedOutputGroupChannelId] =
-    useState<string | null>(null);
   const [showHiddenPermanentGroups, setShowHiddenPermanentGroups] =
     useState(false);
   const [customCategories, setCustomCategories] = useState<CustomCategory[]>(
@@ -490,12 +461,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setRemovedGroups(payload.groups);
   }
 
-  async function loadOutputGroupCategories(sourceId: string) {
-    const response = await fetch(`/api/v1/sources/${sourceId}/output-groups`);
-    const payload = await readJson<{ groups: OutputGroupSummary[] }>(response);
-    setOutputGroupCategories(payload.groups);
-  }
-
   async function loadChannels(sourceId: string, group?: string) {
     setLoadingChannels(true);
     try {
@@ -510,27 +475,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       setSelectedChannelIds([]);
     } finally {
       setLoadingChannels(false);
-    }
-  }
-
-  async function loadOutputGroupChannels(
-    sourceId: string,
-    outputGroup: string,
-  ) {
-    setLoadingOutputGroupChannels(true);
-    try {
-      const parameters = new URLSearchParams({
-        limit: '2000',
-        outputGroup,
-      });
-      const response = await fetch(
-        `/api/v1/sources/${sourceId}/channels?${parameters.toString()}`,
-      );
-      const payload = await readJson<ChannelListPage>(response);
-      setOutputGroupChannels(payload.channels);
-      setOutputGroupChannelTotal(payload.total);
-    } finally {
-      setLoadingOutputGroupChannels(false);
     }
   }
 
@@ -561,7 +505,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     const updates: Promise<void>[] = [
       loadPermanentGroups(sourceId),
       loadCustomCategories(sourceId),
-      loadOutputGroupCategories(sourceId),
     ];
     if (expandedPermanentGroup !== null) {
       updates.push(loadChannels(sourceId, expandedPermanentGroup));
@@ -638,7 +581,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               initialLoads.push(
                 loadGroups(firstSource.id),
                 loadRemovedGroups(firstSource.id),
-                loadOutputGroupCategories(firstSource.id),
                 loadPermanentGroups(firstSource.id),
                 loadCustomCategories(firstSource.id),
                 loadReconciliationReview(firstSource.id),
@@ -684,7 +626,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   useEffect(() => {
     if (workspace !== 'lineup' || selectedSourceId === null) return;
     void Promise.all([
-      loadOutputGroupCategories(selectedSourceId),
       loadPermanentGroups(selectedSourceId),
       loadCustomCategories(selectedSourceId),
     ]).catch((caught: unknown) =>
@@ -703,9 +644,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     setImportSummary(null);
     setEpgImportSummary(null);
     setExpandedPermanentGroup(null);
-    setExpandedOutputGroup(null);
-    setOutputGroupChannels([]);
-    setOutputGroupChannelTotal(0);
     setChannels([]);
     setChannelTotal(0);
     setSelectedChannelIds([]);
@@ -714,7 +652,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       await Promise.all([
         loadGroups(source.id),
         loadRemovedGroups(source.id),
-        loadOutputGroupCategories(source.id),
         loadPermanentGroups(source.id),
         loadCustomCategories(source.id),
         loadReconciliationReview(source.id),
@@ -742,6 +679,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
   }
 
   async function beginConnectionEdit(source: SafeSource) {
+    setNewSourceType(source.sourceType);
     setEditingConnection(source);
     setShowSourceForm(false);
     setName(source.name);
@@ -765,6 +703,9 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name,
+          ...(newSourceType !== source.sourceType
+            ? { sourceType: newSourceType }
+            : {}),
           ...(playlistUrl.trim() ? { playlistUrl: playlistUrl.trim() } : {}),
           ...(!options.deriveEpgUrl && !options.clearEpgUrl && epgUrl.trim()
             ? { epgUrl: epgUrl.trim() }
@@ -787,6 +728,12 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         await importEpg(payload.source);
       }
       clearSourceForm();
+      if (source.sourceType !== payload.source.sourceType) {
+        showToast(
+          'success',
+          'Import method checked and saved. Import the playlist to load it using the new method.',
+        );
+      }
     } catch (caught) {
       showToast(
         'error',
@@ -870,10 +817,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         const nextSource = remaining[0] ?? null;
         setSelectedSourceId(nextSource?.id ?? null);
         setGroups([]);
-        setOutputGroupCategories([]);
-        setExpandedOutputGroup(null);
-        setOutputGroupChannels([]);
-        setOutputGroupChannelTotal(0);
         setPermanentGroups([]);
         setChannels([]);
         setChannelTotal(0);
@@ -1058,10 +1001,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             : candidate,
         ),
       );
-      await Promise.all([
-        loadEventReview(source.id),
-        loadOutputGroupCategories(source.id),
-      ]);
+      await loadEventReview(source.id);
       setEditingEventGroup(null);
       setEventRuleDraft(null);
     } catch (caught) {
@@ -1105,34 +1045,15 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
           candidate.id === payload.channel.id ? payload.channel : candidate,
         ),
       );
-      setOutputGroupChannels((current) =>
-        current
-          .map((candidate) =>
-            candidate.id === payload.channel.id ? payload.channel : candidate,
-          )
-          .filter(
-            (candidate) =>
-              expandedOutputGroup === null ||
-              (candidate.customGroup ?? candidate.providerGroup) ===
-                expandedOutputGroup,
-          ),
-      );
       const refreshes: Promise<void>[] = [];
       if ('enabled' in update || 'customGroup' in update) {
-        refreshes.push(
-          loadPermanentGroups(source.id),
-          loadOutputGroupCategories(source.id),
-        );
+        refreshes.push(loadPermanentGroups(source.id));
       }
-      if ('sortOrder' in update || 'customName' in update) {
-        if (expandedPermanentGroup !== null) {
-          refreshes.push(loadChannels(source.id, expandedPermanentGroup));
-        }
-        if (expandedOutputGroup !== null) {
-          refreshes.push(
-            loadOutputGroupChannels(source.id, expandedOutputGroup),
-          );
-        }
+      if (
+        ('sortOrder' in update || 'customName' in update) &&
+        expandedPermanentGroup !== null
+      ) {
+        refreshes.push(loadChannels(source.id, expandedPermanentGroup));
       }
       await Promise.all(refreshes);
       return payload.channel;
@@ -1237,10 +1158,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
       );
       await readJson<{ category: CustomCategory }>(response);
       setNewCustomCategory('');
-      await Promise.all([
-        loadCustomCategories(source.id),
-        loadOutputGroupCategories(source.id),
-      ]);
+      await loadCustomCategories(source.id);
     } catch (caught) {
       showToast(
         'error',
@@ -1264,116 +1182,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     if (!moved) return values;
     next.splice(to, 0, moved);
     return next;
-  }
-
-  async function saveOutputGroupOrder(
-    source: SafeSource,
-    draggedGroup: string,
-    targetGroup: string,
-  ) {
-    const rows = [...outputGroupCategories]
-      .sort(
-        (left, right) =>
-          left.sortOrder - right.sortOrder ||
-          left.name.localeCompare(right.name),
-      )
-      .map((group) => ({ id: group.name, group }));
-    const nextRows = reordered(rows, draggedGroup, targetGroup);
-    if (nextRows === rows) return;
-    const nextGroups = nextRows.map((row, sortOrder) => ({
-      ...row.group,
-      sortOrder,
-    }));
-    setOutputGroupCategories(nextGroups);
-    setSavingOutputGroupOrder(draggedGroup);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/output-groups/order`,
-        {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            outputGroups: nextGroups.map((group) => group.name),
-          }),
-        },
-      );
-      if (!response.ok) await readJson<never>(response);
-      await loadOutputGroupCategories(source.id);
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not save output group order',
-      );
-      await loadOutputGroupCategories(source.id);
-    } finally {
-      setSavingOutputGroupOrder(null);
-    }
-  }
-
-  async function toggleOutputGroupChannels(
-    source: SafeSource,
-    outputGroup: string,
-  ) {
-    if (expandedOutputGroup === outputGroup) {
-      setExpandedOutputGroup(null);
-      setOutputGroupChannels([]);
-      setOutputGroupChannelTotal(0);
-      return;
-    }
-    setExpandedOutputGroup(outputGroup);
-    try {
-      await loadOutputGroupChannels(source.id, outputGroup);
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not load output group channels',
-      );
-    }
-  }
-
-  async function saveOutputGroupChannelOrder(
-    source: SafeSource,
-    draggedId: string,
-    targetId: string,
-  ) {
-    if (expandedOutputGroup === null) return;
-    const next = reordered(outputGroupChannels, draggedId, targetId);
-    if (next === outputGroupChannels) return;
-    setOutputGroupChannels(next);
-    setSavingChannel(draggedId);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/output-groups/channels/order`,
-        {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            outputGroup: expandedOutputGroup,
-            channelIds: next.map((channel) => channel.id),
-          }),
-        },
-      );
-      if (!response.ok) await readJson<never>(response);
-      await Promise.all([
-        loadOutputGroupChannels(source.id, expandedOutputGroup),
-        loadOutputGroupCategories(source.id),
-        loadPermanentGroups(source.id),
-      ]);
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not save output group channel order',
-      );
-      await loadOutputGroupChannels(source.id, expandedOutputGroup);
-    } finally {
-      setSavingChannel(null);
-    }
   }
 
   async function saveChannelOrder(
@@ -1415,82 +1223,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     }
   }
 
-  /**
-   * Hides or shows a playlist group by its published name. A custom group is
-   * a slice of a provider group, so this is the only place its visibility can
-   * be set — the provider-group editor would move every sibling with it.
-   */
-  async function setOutputGroupVisible(
-    source: SafeSource,
-    name: string,
-    enabled: boolean,
-  ) {
-    setSavingOutputGroupVisibility(name);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/output-groups`,
-        {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ groupName: name, update: { enabled } }),
-        },
-      );
-      await readJson<{ updatedCount: number }>(response);
-      showToast('success', `${name} ${enabled ? 'published' : 'hidden'}`);
-      await Promise.all([
-        loadOutputGroupCategories(source.id),
-        loadPermanentGroups(source.id),
-        loadGroups(source.id),
-      ]);
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not change group visibility',
-      );
-    } finally {
-      setSavingOutputGroupVisibility(null);
-    }
-  }
-
-  async function moveOutputGroup(
-    source: SafeSource,
-    name: string,
-    direction: -1 | 1,
-  ) {
-    const names = outputGroups.map((group) => group.name);
-    const from = names.indexOf(name);
-    const to = from + direction;
-    if (from < 0 || to < 0 || to >= names.length) return;
-    const target = names[to];
-    if (target === undefined) return;
-    names[to] = name;
-    names[from] = target;
-    setSavingOutputGroupOrder(name);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/output-groups/order`,
-        {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ outputGroups: names }),
-        },
-      );
-      if (!response.ok) await readJson<never>(response);
-      await loadOutputGroupCategories(source.id);
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not save output group order',
-      );
-    } finally {
-      setSavingOutputGroupOrder(null);
-    }
-  }
-
   async function moveListedChannel(
     source: SafeSource,
     channelId: string,
@@ -1529,51 +1261,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         caught instanceof Error
           ? caught.message
           : 'Could not save channel order',
-      );
-    } finally {
-      setSavingChannel(null);
-    }
-  }
-
-  async function moveOutputGroupChannel(
-    source: SafeSource,
-    channelId: string,
-    direction: -1 | 1,
-  ) {
-    if (expandedOutputGroup === null) return;
-    const ids = outputGroupChannels.map((channel) => channel.id);
-    const from = ids.indexOf(channelId);
-    const to = from + direction;
-    if (from < 0 || to < 0 || to >= ids.length) return;
-    const swapped = ids[to];
-    if (swapped === undefined) return;
-    ids[to] = channelId;
-    ids[from] = swapped;
-    setSavingChannel(channelId);
-    try {
-      const response = await fetch(
-        `/api/v1/sources/${source.id}/output-groups/channels/order`,
-        {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            outputGroup: expandedOutputGroup,
-            channelIds: ids,
-          }),
-        },
-      );
-      if (!response.ok) await readJson<never>(response);
-      await Promise.all([
-        loadOutputGroupChannels(source.id, expandedOutputGroup),
-        loadOutputGroupCategories(source.id),
-        loadPermanentGroups(source.id),
-      ]);
-    } catch (caught) {
-      showToast(
-        'error',
-        caught instanceof Error
-          ? caught.message
-          : 'Could not save output group channel order',
       );
     } finally {
       setSavingChannel(null);
@@ -1990,21 +1677,6 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
     (total, group) => total + group.channelCount,
     0,
   );
-  const normalizedOutputGroupFilter = outputGroupFilter
-    .trim()
-    .toLocaleLowerCase();
-  const outputGroups = [...outputGroupCategories].sort(
-    (left, right) =>
-      left.sortOrder - right.sortOrder || left.name.localeCompare(right.name),
-  );
-  const visibleOutputGroups = outputGroups.filter((group) => {
-    const groupMatches = normalizedOutputGroupFilter
-      ? group.name.toLocaleLowerCase().includes(normalizedOutputGroupFilter)
-      : true;
-    const visibilityMatches =
-      showHiddenPermanentGroups || group.visibleEntryCount > 0;
-    return groupMatches && visibilityMatches;
-  });
   const activeEventReview = eventReview?.groups.find(
     (group) => group.groupName === selectedEventGroup,
   );
@@ -2077,7 +1749,32 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
               required
             />
           </div>
-          {editingConnection ? null : (
+          {editingConnection ? (
+            <div>
+              <label htmlFor="source-import-method">Import method</label>
+              <select
+                id="source-import-method"
+                value={newSourceType}
+                disabled={saving}
+                onChange={(event) =>
+                  setNewSourceType(event.target.value as 'm3u' | 'xtream')
+                }
+              >
+                <option value="m3u">M3U playlist</option>
+                <option value="xtream">
+                  Native Xtream API (parent series)
+                </option>
+              </select>
+              <p className="secret-note">
+                Native Xtream avoids importing every episode as a catalogue row.
+                Changing methods checks the provider API and selected categories
+                first; this can take a few minutes or wait for an active update.
+                Your source, edits and player links are kept. No change is saved
+                if the check fails. Leave the URL blank to use your existing
+                credentials.
+              </p>
+            </div>
+          ) : (
             <div className="source-type-choice">
               <span className="source-type-label">How to connect</span>
               <div className="epg-chips">
@@ -2431,6 +2128,7 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
         <>
           <EpgSourcesPanel active />
           <AutomationSettings active />
+          <RefreshActivity sources={sources} />
         </>
       ) : null}
 
@@ -3269,390 +2967,26 @@ export function SourceSetup({ workspace, lineupView }: SourceSetupProps) {
             id="channels"
             hidden={workspace !== 'lineup'}
           >
-            <section className="output-group-order" aria-live="polite">
-              <div className="subsection-heading output-group-order-heading">
-                <div>
-                  <small>PLAYLIST ORDER</small>
-                  <strong>Playlist groups</strong>
-                </div>
-                <span className="channel-count">
-                  {outputGroups.length.toLocaleString()}{' '}
-                  {outputGroups.length === 1 ? 'group' : 'groups'}
-                </span>
-                <button
-                  className="secondary-button compact section-toggle"
-                  type="button"
-                  onClick={() => toggleSection('output-group-order')}
-                >
-                  {collapsedSections['output-group-order']
-                    ? 'Expand'
-                    : 'Collapse'}
-                </button>
-              </div>
-              <div
-                className="output-group-order-body"
-                hidden={collapsedSections['output-group-order']}
-              >
-                <p className="secret-note">
-                  Drag groups into their final playlist order, and publish or
-                  hide any of them here. TV, live-event, and custom groups all
-                  share this list. Hiding a group removes it from the list
-                  unless “Show hidden groups” is ticked.
-                </p>
-                <div className="channel-search output-group-search">
-                  <input
-                    aria-label="Filter output groups"
-                    placeholder="Filter TV, event, or custom groups"
-                    value={outputGroupFilter}
-                    onChange={(event) =>
-                      setOutputGroupFilter(event.target.value)
-                    }
-                  />
-                  <label className="hidden-group-toggle">
-                    <input
-                      type="checkbox"
-                      checked={showHiddenPermanentGroups}
-                      onChange={(event) =>
-                        setShowHiddenPermanentGroups(event.target.checked)
-                      }
-                    />
-                    Show hidden groups
-                  </label>
-                  <small>
-                    {visibleOutputGroups.length.toLocaleString()} shown
-                  </small>
-                </div>
-                <div className="output-group-order-list">
-                  {visibleOutputGroups.map((group, index) => {
-                    const isSaving = savingOutputGroupOrder === group.name;
-                    const isExpanded = expandedOutputGroup === group.name;
-                    const canEditChannels =
-                      group.behavior !== 'event' && group.entryCount > 0;
-                    return (
-                      <article
-                        className={`output-group-order-row ${group.behavior} ${
-                          dropTarget === group.name && draggedOutputGroup
-                            ? 'drop-target'
-                            : ''
-                        }`}
-                        key={group.name}
-                        draggable={
-                          !normalizedOutputGroupFilter &&
-                          savingOutputGroupOrder === null
-                        }
-                        onDragStart={(event: DragEvent<HTMLElement>) => {
-                          setDraggedOutputGroup(group.name);
-                          event.dataTransfer.effectAllowed = 'move';
-                        }}
-                        onDragEnd={() => {
-                          setDraggedOutputGroup(null);
-                          setDropTarget(null);
-                        }}
-                        onDragOver={(event: DragEvent<HTMLElement>) => {
-                          if (draggedOutputGroup) {
-                            event.preventDefault();
-                            setDropTarget(group.name);
-                          }
-                        }}
-                        onDrop={(event: DragEvent<HTMLElement>) => {
-                          event.preventDefault();
-                          const draggedGroup = draggedOutputGroup;
-                          setDraggedOutputGroup(null);
-                          setDropTarget(null);
-                          if (draggedGroup) {
-                            void saveOutputGroupOrder(
-                              primarySource,
-                              draggedGroup,
-                              group.name,
-                            );
-                          }
-                        }}
-                      >
-                        <span className="row-order-controls">
-                          <span
-                            className="drag-handle"
-                            aria-hidden="true"
-                            title={
-                              normalizedOutputGroupFilter
-                                ? 'Clear the filter to drag; the arrows still work'
-                                : 'Drag to reorder'
-                            }
-                          >
-                            <IconGrip />
-                          </span>
-                          <button
-                            className="order-arrow"
-                            type="button"
-                            aria-label={`Move ${group.name || 'group'} up`}
-                            disabled={
-                              savingOutputGroupOrder !== null || index === 0
-                            }
-                            onClick={() =>
-                              void moveOutputGroup(
-                                primarySource,
-                                group.name,
-                                -1,
-                              )
-                            }
-                          >
-                            <IconChevronUp />
-                          </button>
-                          <button
-                            className="order-arrow"
-                            type="button"
-                            aria-label={`Move ${group.name || 'group'} down`}
-                            disabled={
-                              savingOutputGroupOrder !== null ||
-                              index === visibleOutputGroups.length - 1
-                            }
-                            onClick={() =>
-                              void moveOutputGroup(primarySource, group.name, 1)
-                            }
-                          >
-                            <IconChevronDown />
-                          </button>
-                        </span>
-                        <div>
-                          <strong>{group.name || '(Ungrouped)'}</strong>
-                          <small>
-                            {group.entryCount.toLocaleString()} live entries
-                            {group.visibleEntryCount < group.entryCount
-                              ? ` · ${group.visibleEntryCount.toLocaleString()} shown`
-                              : ''}
-                          </small>
-                        </div>
-                        <span className={`behavior-badge ${group.behavior}`}>
-                          {group.behavior === 'event'
-                            ? 'Live event'
-                            : group.behavior === 'mixed'
-                              ? 'TV + events'
-                              : 'TV'}
-                        </span>
-                        <label
-                          className="permanent-visibility-toggle"
-                          title={`Publish ${group.name || 'this group'} in the generated playlist`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={group.visibleEntryCount > 0}
-                            disabled={
-                              group.entryCount === 0 ||
-                              savingOutputGroupVisibility !== null
-                            }
-                            onChange={(event) =>
-                              void setOutputGroupVisible(
-                                primarySource,
-                                group.name,
-                                event.target.checked,
-                              )
-                            }
-                          />
-                          {savingOutputGroupVisibility === group.name
-                            ? 'Saving…'
-                            : group.visibleEntryCount === 0
-                              ? 'Hidden'
-                              : group.visibleEntryCount === group.entryCount
-                                ? 'Visible'
-                                : `${group.visibleEntryCount.toLocaleString()} of ${group.entryCount.toLocaleString()}`}
-                        </label>
-                        <button
-                          className="secondary-button compact output-group-channels-button"
-                          type="button"
-                          disabled={
-                            !canEditChannels || loadingOutputGroupChannels
-                          }
-                          onClick={() =>
-                            void toggleOutputGroupChannels(
-                              primarySource,
-                              group.name,
-                            )
-                          }
-                        >
-                          {isExpanded ? 'Close' : 'Channels'}
-                        </button>
-                        <span className="output-group-position">
-                          {isSaving ? 'Saving…' : index + 1}
-                        </span>
-                        {isExpanded ? (
-                          <div className="output-group-channel-list">
-                            <small className="output-group-channel-note">
-                              Drag the grip beside a channel to set its order
-                              inside {group.name}.
-                            </small>
-                            {outputGroupChannels.map(
-                              (channel, channelIndex) => (
-                                <div
-                                  className={`output-group-channel-row ${
-                                    channel.enabled ? '' : 'disabled'
-                                  } ${
-                                    dropTarget === channel.id &&
-                                    draggedOutputGroupChannelId
-                                      ? 'drop-target'
-                                      : ''
-                                  }`}
-                                  key={channel.id}
-                                  draggable={savingChannel === null}
-                                  onDragStart={(
-                                    event: DragEvent<HTMLElement>,
-                                  ) => {
-                                    event.stopPropagation();
-                                    setDraggedOutputGroupChannelId(channel.id);
-                                    event.dataTransfer.effectAllowed = 'move';
-                                  }}
-                                  onDragEnd={(
-                                    event: DragEvent<HTMLElement>,
-                                  ) => {
-                                    event.stopPropagation();
-                                    setDraggedOutputGroupChannelId(null);
-                                  }}
-                                  onDragOver={(
-                                    event: DragEvent<HTMLElement>,
-                                  ) => {
-                                    if (draggedOutputGroupChannelId) {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      setDropTarget(channel.id);
-                                    }
-                                  }}
-                                  onDrop={(event: DragEvent<HTMLElement>) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    const draggedId =
-                                      draggedOutputGroupChannelId;
-                                    setDraggedOutputGroupChannelId(null);
-                                    if (draggedId) {
-                                      void saveOutputGroupChannelOrder(
-                                        primarySource,
-                                        draggedId,
-                                        channel.id,
-                                      );
-                                    }
-                                  }}
-                                >
-                                  <span className="row-order-controls">
-                                    <span
-                                      className="drag-handle"
-                                      aria-hidden="true"
-                                      title="Drag to reorder"
-                                    >
-                                      <IconGrip />
-                                    </span>
-                                    <button
-                                      className="order-arrow"
-                                      type="button"
-                                      aria-label={`Move ${
-                                        channel.customName ??
-                                        channel.providerName
-                                      } up`}
-                                      disabled={
-                                        savingChannel !== null ||
-                                        channelIndex === 0
-                                      }
-                                      onClick={() =>
-                                        void moveOutputGroupChannel(
-                                          primarySource,
-                                          channel.id,
-                                          -1,
-                                        )
-                                      }
-                                    >
-                                      <IconChevronUp />
-                                    </button>
-                                    <button
-                                      className="order-arrow"
-                                      type="button"
-                                      aria-label={`Move ${
-                                        channel.customName ??
-                                        channel.providerName
-                                      } down`}
-                                      disabled={
-                                        savingChannel !== null ||
-                                        channelIndex ===
-                                          outputGroupChannels.length - 1
-                                      }
-                                      onClick={() =>
-                                        void moveOutputGroupChannel(
-                                          primarySource,
-                                          channel.id,
-                                          1,
-                                        )
-                                      }
-                                    >
-                                      <IconChevronDown />
-                                    </button>
-                                  </span>
-                                  <span className="output-group-channel-position">
-                                    {channelIndex + 1}
-                                  </span>
-                                  <ChannelLogo
-                                    src={channelLogoSource(
-                                      primarySource?.id,
-                                      channel.id,
-                                      Boolean(
-                                        channel.customLogoUrl ??
-                                        channel.providerLogoUrl,
-                                      ),
-                                    )}
-                                    name={
-                                      channel.customName ?? channel.providerName
-                                    }
-                                  />
-                                  <div>
-                                    <strong>
-                                      {channel.customName ??
-                                        channel.providerName}
-                                    </strong>
-                                    <small>{channel.providerGroup}</small>
-                                  </div>
-                                  <button
-                                    className="secondary-button compact output-group-channel-visibility"
-                                    type="button"
-                                    aria-label={`${channel.enabled ? 'Hide' : 'Show'} ${
-                                      channel.customName ?? channel.providerName
-                                    }`}
-                                    disabled={savingChannel !== null}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      void updateChannel(
-                                        primarySource,
-                                        channel,
-                                        {
-                                          enabled: !channel.enabled,
-                                        },
-                                      );
-                                    }}
-                                  >
-                                    {savingChannel === channel.id
-                                      ? 'Saving…'
-                                      : channel.enabled
-                                        ? 'Hide'
-                                        : 'Show'}
-                                  </button>
-                                </div>
-                              ),
-                            )}
-                            {!loadingOutputGroupChannels &&
-                            outputGroupChannelTotal === 0 ? (
-                              <p className="empty-groups">
-                                This output group currently contains only live
-                                events.
-                              </p>
-                            ) : null}
-                          </div>
-                        ) : null}
-                      </article>
-                    );
-                  })}
-                  {visibleOutputGroups.length === 0 ? (
-                    <p className="empty-groups">
-                      {loadingPermanentGroups
-                        ? 'Loading playlist groups…'
-                        : 'Import a playlist, change the group filter, or show hidden groups.'}
-                    </p>
-                  ) : null}
-                </div>
-              </div>
-            </section>
+            <ChannelsWorkspace
+              source={primarySource}
+              active={workspace === 'lineup' && lineupView === 'order'}
+              onChanged={() => {
+                void Promise.all([
+                  loadGroups(primarySource.id),
+                  refreshPermanentWorkspace(primarySource.id),
+                ]).catch((caught: unknown) =>
+                  showToast(
+                    'error',
+                    caught instanceof Error
+                      ? caught.message
+                      : 'Could not refresh lineup',
+                  ),
+                );
+              }}
+              onOpenEvents={() => {
+                window.location.hash = '#/events';
+              }}
+            />
 
             <div className="subsection-heading channel-heading">
               <div>

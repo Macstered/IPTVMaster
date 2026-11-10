@@ -3,6 +3,7 @@ export * from './events.js';
 export * from './image-fetch.js';
 export * from './m3u.js';
 export * from './output.js';
+export * from './playlist-fingerprint.js';
 export * from './provider-error.js';
 export * from './safe-fetch.js';
 export * from './secrets.js';

@@ -14,8 +14,13 @@ import {
   type ProviderRetryOptions,
 } from './provider-retry.js';
 import type { ExclusiveBackgroundRun } from './background-work.js';
+import {
+  RefreshProgress,
+  type RefreshProgressSnapshot,
+} from './refresh-progress.js';
 
 export interface PlaylistRefreshResult {
+  progress?: RefreshProgressSnapshot;
   status: 'completed' | 'already-running';
   sourceId: string;
   startedAt: string;
@@ -26,6 +31,7 @@ export interface PlaylistRefreshResult {
 }
 
 export interface PlaylistRefreshState {
+  progress?: RefreshProgressSnapshot;
   sourceId: string;
   status: 'running' | 'succeeded' | 'failed' | 'rejected';
   startedAt: string;
@@ -57,6 +63,8 @@ export class PlaylistRefreshCoordinator {
   readonly #retryOptions: Partial<ProviderRetryOptions>;
   readonly #running = new Map<string, Promise<PlaylistRefreshResult>>();
   readonly #states = new Map<string, PlaylistRefreshState>();
+  readonly #progress = new Map<string, RefreshProgress>();
+  readonly #runExclusive: ExclusiveBackgroundRun;
 
   constructor(
     repository: SourceRepository,
@@ -74,10 +82,12 @@ export class PlaylistRefreshCoordinator {
           : {},
       ),
     retryOptions: Partial<ProviderRetryOptions> = {},
+    runExclusive: ExclusiveBackgroundRun = (work) => work(),
   ) {
     this.#repository = repository;
     this.#inspector = inspector;
     this.#retryOptions = retryOptions;
+    this.#runExclusive = runExclusive;
   }
 
   async refresh(sourceId: string): Promise<PlaylistRefreshResult> {
@@ -100,61 +110,77 @@ export class PlaylistRefreshCoordinator {
   }
 
   listStates(): PlaylistRefreshState[] {
-    return [...this.#states.values()].sort((left, right) =>
-      left.sourceId.localeCompare(right.sourceId),
-    );
+    return [...this.#states.values()]
+      .map((state) => ({
+        ...state,
+        progress: this.#progress.get(state.sourceId)?.snapshot(),
+      }))
+      .sort((left, right) => left.sourceId.localeCompare(right.sourceId));
   }
 
   async #execute(sourceId: string): Promise<PlaylistRefreshResult> {
     const startedAt = new Date().toISOString();
     let attempts = 0;
     this.#states.set(sourceId, { sourceId, status: 'running', startedAt });
-    try {
-      const credentials = await this.#repository.getSourceCredentials(sourceId);
-      if (!credentials) throw new SourceNotFoundError('Source not found');
-      // Read before fetching: the parser needs to know what to retain while it
-      // streams, because holding a whole catalogue in order to filter it
-      // afterwards is exactly what this avoids.
-      const plan = await this.#repository.getImportPlan?.(sourceId);
-      const inspection = await withProviderRetry(() => {
-        attempts += 1;
-        return this.#inspector(credentials.playlistUrl, plan);
-      }, this.#retryOptions);
-      const snapshot = await this.#repository.savePlaylistSnapshot(
-        sourceId,
-        inspection,
-      );
-      const finishedAt = new Date().toISOString();
-      this.#states.set(sourceId, {
-        sourceId,
-        status: 'succeeded',
-        startedAt,
-        finishedAt,
-        unchanged: snapshot.unchanged,
-        liveCount: snapshot.liveCount,
-        attempts,
-      });
-      return {
-        status: 'completed',
-        sourceId,
-        startedAt,
-        finishedAt,
-        inspection,
-        snapshot,
-        attempts,
-      };
-    } catch (error) {
-      const finishedAt = new Date().toISOString();
-      this.#states.set(sourceId, {
-        sourceId,
-        status: error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
-        startedAt,
-        finishedAt,
-        safeError: safeRefreshError(error),
-        attempts,
-      });
-      throw error;
-    }
+    const progress = new RefreshProgress();
+    this.#progress.set(sourceId, progress);
+    return this.#runExclusive(async () => {
+      try {
+        progress.report('downloading');
+        const credentials =
+          await this.#repository.getSourceCredentials(sourceId);
+        if (!credentials) throw new SourceNotFoundError('Source not found');
+        // Read before fetching: the parser needs to know what to retain while it
+        // streams, because holding a whole catalogue in order to filter it
+        // afterwards is exactly what this avoids.
+        const plan = await this.#repository.getImportPlan?.(sourceId);
+        const inspection = await withProviderRetry(() => {
+          attempts += 1;
+          return this.#inspector(credentials.playlistUrl, plan);
+        }, this.#retryOptions);
+        progress.report('saving', 0, inspection.entries.length);
+        const snapshot = await this.#repository.savePlaylistSnapshot(
+          sourceId,
+          inspection,
+          progress.report,
+          startedAt,
+        );
+        progress.report('completed');
+        const finishedAt = new Date().toISOString();
+        this.#states.set(sourceId, {
+          sourceId,
+          status: 'succeeded',
+          startedAt,
+          finishedAt,
+          unchanged: snapshot.unchanged,
+          liveCount: snapshot.liveCount,
+          attempts,
+        });
+        return {
+          status: 'completed',
+          progress: progress.snapshot(),
+          sourceId,
+          startedAt,
+          finishedAt,
+          inspection,
+          snapshot,
+          attempts,
+        };
+      } catch (error) {
+        progress.report('failed');
+        const finishedAt = new Date().toISOString();
+        this.#states.set(sourceId, {
+          sourceId,
+          status:
+            error instanceof SnapshotRejectedError ? 'rejected' : 'failed',
+          startedAt,
+          finishedAt,
+          safeError: safeRefreshError(error),
+          attempts,
+        });
+        throw error;
+      }
+    });
   }
 }
 
@@ -166,7 +192,6 @@ export interface PlaylistSchedulerLogger {
 export interface PlaylistSchedulerOptions {
   intervalMs: number;
   initialDelayMs: number;
-  runExclusive?: ExclusiveBackgroundRun;
 }
 
 export interface PlaylistSchedulerStatus {
@@ -183,7 +208,6 @@ export class PlaylistScheduler {
   readonly #repository: SourceRepository;
   readonly #coordinator: PlaylistRefreshCoordinator;
   readonly #logger: PlaylistSchedulerLogger;
-  readonly #runExclusive: ExclusiveBackgroundRun;
   #options: PlaylistSchedulerOptions;
   #timer?: NodeJS.Timeout;
   #cyclePromise?: Promise<void>;
@@ -203,7 +227,6 @@ export class PlaylistScheduler {
     this.#coordinator = coordinator;
     this.#logger = logger;
     this.#options = { ...options };
-    this.#runExclusive = options.runExclusive ?? ((work) => work());
   }
 
   start(): void {
@@ -259,28 +282,27 @@ export class PlaylistScheduler {
     this.#running = true;
     this.#lastCycleStartedAt = new Date().toISOString();
     try {
-      await this.#runExclusive(async () => {
-        const sources = await this.#repository.listSources();
-        for (const source of sources.filter((candidate) => candidate.enabled)) {
-          try {
-            const result = await this.#coordinator.refresh(source.id);
-            this.#logger.info(
-              {
-                sourceId: source.id,
-                unchanged: result.snapshot?.unchanged,
-                liveCount: result.snapshot?.liveCount,
-                skipped: result.status === 'already-running',
-              },
-              'Automatic playlist refresh finished',
-            );
-          } catch (error) {
-            this.#logger.warn(
-              { sourceId: source.id, safeError: safeRefreshError(error) },
-              'Automatic playlist refresh failed',
-            );
-          }
+      const sources = await this.#repository.listSources();
+      for (const source of sources.filter((candidate) => candidate.enabled)) {
+        try {
+          const result = await this.#coordinator.refresh(source.id);
+          this.#logger.info(
+            {
+              sourceId: source.id,
+              unchanged: result.snapshot?.unchanged,
+              liveCount: result.snapshot?.liveCount,
+              skipped: result.status === 'already-running',
+              progress: result.progress,
+            },
+            'Automatic playlist refresh finished',
+          );
+        } catch (error) {
+          this.#logger.warn(
+            { sourceId: source.id, safeError: safeRefreshError(error) },
+            'Automatic playlist refresh failed',
+          );
         }
-      });
+      }
     } finally {
       this.#running = false;
       this.#lastCycleFinishedAt = new Date().toISOString();

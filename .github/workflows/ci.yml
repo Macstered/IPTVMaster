@@ -27,6 +27,16 @@ jobs:
             --tag iptvmaster:ci .
           test "$(docker image inspect iptvmaster:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = ci
           test "$(docker image inspect iptvmaster:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+      - name: Verify refresh persistence and timings
+        run: |
+          docker run -d --name iptvmaster-refresh-test \
+            -e POSTGRES_DB=iptvmaster_refresh_test \
+            -e POSTGRES_USER=fixture -e POSTGRES_PASSWORD=synthetic-fixture-only \
+            -p 127.0.0.1:15483:5432 postgres:17-alpine
+          trap 'docker rm -f iptvmaster-refresh-test >/dev/null' EXIT
+          node scripts/verify-refresh-performance.mjs
+        env:
+          REFRESH_TEST_DATABASE_URL: postgresql://fixture:synthetic-fixture-only@127.0.0.1:15483/iptvmaster_refresh_test
       - name: Verify database backup and restore
         run: bash scripts/verify-backup-restore.sh
         env:

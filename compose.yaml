@@ -40,6 +40,12 @@ services:
       - track_io_timing=on
       - -c
       - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_MS:-1000}
+      # Bulk imports contain large JSON parameters. Never write their payloads
+      # into slow-query/error logs (disk amplification and secret exposure).
+      - -c
+      - log_parameter_max_length=0
+      - -c
+      - log_parameter_max_length_on_error=0
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-iptvmaster}
       POSTGRES_USER: ${POSTGRES_USER:-iptvmaster}
