@@ -66,8 +66,8 @@ const workspaceDetails: Record<
     icon: <IconHome />,
   },
   lineup: {
-    label: 'Lineup',
-    title: 'Lineup editor',
+    label: 'Channels',
+    title: 'Channels',
     subtitle:
       'Arrange groups and edit the channels that appear in your player.',
     icon: <IconRows />,
@@ -143,9 +143,10 @@ const lineupDetails: Record<
   { label: string; title: string; subtitle: string }
 > = {
   order: {
-    label: 'Playlist order',
-    title: 'Playlist order',
-    subtitle: 'Arrange final playlist groups and sort their channels.',
+    label: 'Order & visibility',
+    title: 'Channels',
+    subtitle:
+      'Put groups and channels in your order and choose what the player shows.',
   },
   channels: {
     label: 'Group & channel editor',

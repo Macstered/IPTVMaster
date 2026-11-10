@@ -17,7 +17,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "verify:version": "node scripts/verify-release-tag.mjs --current",
-    "test": "npm run build -w @iptvmaster/core && npm run test -w @iptvmaster/core && npm run test -w @iptvmaster/api",
+    "test": "npm run build -w @iptvmaster/core && npm run test -w @iptvmaster/core && npm run test -w @iptvmaster/api && npm run test -w @iptvmaster/web",
     "typecheck": "npm run build -w @iptvmaster/core && npm run typecheck --workspaces --if-present",
     "check": "npm run format:check && npm run lint && npm run verify:version && npm run typecheck && npm test && npm run build"
   },
